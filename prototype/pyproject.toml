@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eval-engine-prototype"
+version = "0.1.0"
+description = "Phase 0/1 prototype of the eval-engine: Inspect kernel + ledger + control plane + dashboard"
+requires-python = ">=3.10"
+dependencies = [
+  "inspect-ai",
+  "duckdb",
+  "pydantic>=2",
+  "pyyaml",
+  "fastapi",
+  "uvicorn[standard]",
+]
+
+[project.scripts]
+eval-engine = "eval_engine.cli:main"
+
+[tool.setuptools]
+packages = ["eval_engine"]

@@ -1,0 +1,9 @@
+{
+  "eval": "capitals_qa",
+  "dataset": "examples/qa.jsonl",
+  "model": "mockllm/model",
+  "mock_output": "Paris",
+  "batch_size": 2,
+  "harness": { "type": "single_turn" },
+  "scorers": [ { "type": "includes", "config": { "ignore_case": true } } ]
+}

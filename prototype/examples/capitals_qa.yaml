@@ -1,0 +1,13 @@
+# Example RunSpec. Mock model emits a fixed "Paris" output (deterministic, no API key),
+# so q1 passes and q2/q3 fail → accuracy 1/3. Proves the spine end-to-end.
+eval: capitals_qa
+dataset: examples/qa.jsonl
+model: mockllm/model
+mock_output: Paris
+batch_size: 2          # small, so the ledger does multiple claim→execute→load cycles
+harness:
+  type: single_turn
+scorers:
+  - type: includes
+    config:
+      ignore_case: true
