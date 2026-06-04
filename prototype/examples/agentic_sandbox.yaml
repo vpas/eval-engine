@@ -1,0 +1,23 @@
+# Agentic eval: a real model drives a bash tool whose calls execute inside a hardened, AIR-GAPPED
+# Docker sandbox (sandbox/airgap-compose.yaml). The answers can ONLY be obtained by running the
+# tool in the sandbox — sb1's secret is never in the prompt and the worker has no such env var —
+# so a passing score is itself proof the tool ran inside the sandbox. Needs OPENROUTER_API_KEY.
+# Local Docker stands in for the production K8s sandbox provider (docs/SANDBOXING.md).
+#
+# Model note: agentic harnesses need a capable NATIVE tool-caller. gpt-4o-mini scores 2/2 here;
+# the cheap llama-3.1-8b emits tool calls as literal text ("<function=bash>...") that never
+# execute → fails sb1. Picking the model is a capability decision, not just a cost one.
+eval: agentic_sandbox
+dataset: examples/sandbox_qa.jsonl
+model: openrouter/openai/gpt-4o-mini
+batch_size: 2
+harness:
+  type: agentic
+  config:
+    tools: [bash]
+    sandbox: docker
+    compose_file: sandbox/airgap-compose.yaml
+scorers:
+  - type: includes
+    config:
+      ignore_case: true

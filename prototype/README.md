@@ -16,12 +16,13 @@ and crash resumability (`ray_executor.py`, "Distributed execution" below).
 | S3 + zstd transcripts | `.data/transcripts/<run>/<sample>.json` | object-store stand-in (no compression) |
 | LiteLLM + real model | Inspect `mockllm` **(default)** *or* real **OpenRouter** model (cost from catalog price) | same `Target` swap; LiteLLM gateway stands in as catalog-priced cost |
 | Ray orchestrator | single-process loop **(default)** *or* real **local Ray** workers (`ray_executor.py`) | same claim→commit→load→prune loop, now also proven across worker *processes* |
+| K8s sandbox (agentic) | Inspect **Docker** sandbox, air-gapped + hardened (`sandbox/airgap-compose.yaml`) | identical Inspect `sandbox()` contract; only the provider changes (docker→k8s) — gVisor/Kata escape boundary is the one k8s-only piece |
 
 The runner exercises the real result path: **expand ledger → claim batch → execute (Inspect)
 → commit result → batch-load to analytics → finalize (aggregate, archive failures, prune)**.
 
-Agentic harnesses + sandboxing are **out of this prototype** (need Docker/k8s; see
-`docs/SANDBOXING.md`).
+Agentic harnesses + sandboxing now run **locally** via Inspect's Docker sandbox provider (the
+k8s-sandbox stand-in) — see "Agentic execution + sandboxing" below and `docs/SANDBOXING.md`.
 
 ## Setup
 
@@ -62,12 +63,41 @@ mock's 33%. Cost is computed from Inspect's token usage × OpenRouter's catalog 
 source-of-truth for per-run cost attribution + hard-cap. Other providers (`openai/gpt-4o-mini`,
 `anthropic/claude-...`) work the same way; only `openrouter/*` is priced here (others → cost 0).
 
+## Agentic execution + sandboxing
+
+The `agentic` harness is the leap from `single_turn`: instead of one `generate()`, it runs a
+**tool-use agent** (`basic_agent` with a `bash`/`python` tool) whose tool calls execute **inside
+a sandbox**. The plugin contract carries it cleanly — an agentic harness returns `(solver,
+sandbox)`, and the runner passes that sandbox to the Inspect `Task` (the "harness declares its
+sandbox; the orchestrator provisions it" shape from `docs/SANDBOXING.md` §4/§7).
+
+Locally the sandbox is **Inspect's Docker provider** standing in for the production **Kubernetes
+sandbox provider** — the Inspect `sandbox()` contract is identical, only `sandbox: docker|k8s`
+changes (same spirit as SQLite→Postgres). `sandbox/airgap-compose.yaml` maps the doc's baseline
+hardening + air-gap onto Docker: **`network_mode: none`** (zero egress — can't reach Postgres, the
+gateway, or IMDS), read-only rootfs, non-root, `cap_drop: ALL`, `no-new-privileges`, pid/mem caps.
+What Docker *can't* give you locally is the gVisor/Kata kernel-escape boundary — that stays a k8s
+concern by design.
+
+```bash
+docker pull python:3.11-slim                          # pre-pull so the air-gapped container starts
+PYTHONPATH=. ../.venv/bin/python tests/test_sandbox_agentic.py   # deterministic, no API key
+
+# real-model demo (needs OPENROUTER_API_KEY):
+PYTHONPATH=. ../.venv/bin/python -m eval_engine.cli run examples/agentic_sandbox.yaml
+```
+
+The test's proof is airtight: the sandbox sets `EE_SANDBOX_SECRET`, the worker process does **not**
+have it, and the secret is **never in the prompt** — so the agent reading it back via `bash` is
+proof the tool ran *inside* the container. (Agentic needs a capable **native tool-caller**:
+`gpt-4o-mini` scores 2/2; cheap llama-3.1-8b emits tool calls as literal text that never execute.)
+
 ## Layout
 
 ```
 eval_engine/
   plugins.py    registry + @harness/@scorer (prototype of docs/PLUGINS.md)
-  builtins.py   single_turn harness; includes/match/llm_judge scorers
+  builtins.py   single_turn + agentic (tool-use, sandbox) harnesses; includes/match/llm_judge scorers
   datasets.py   JSONL → Inspect dataset (+ content hash, à la SCHEMA §0)
   models.py     RunSpec (SCHEMA §1.5)
   control.py    SQLite: runs + ephemeral sample-task ledger + failure archive (SCHEMA §1);
@@ -84,8 +114,10 @@ tests/
   test_concurrency.py      exactly-once + lease-reclaim (SQLite)
   test_concurrency_pg.py   exactly-once + lease-reclaim (Postgres SKIP LOCKED)
   test_distributed_ray.py  exactly-once + crash-reclaim across Ray worker processes
+  test_sandbox_agentic.py  agentic harness + tool exec inside an air-gapped Docker sandbox
 infra/          up.sh / down.sh — docker Postgres + ClickHouse
-examples/       qa.jsonl + capitals_qa.yaml
+sandbox/        airgap-compose.yaml — hardened, air-gapped agentic sandbox (k8s-sandbox stand-in)
+examples/       qa.jsonl + capitals_qa.yaml + capitals_openrouter.yaml + sandbox_qa.jsonl + agentic_sandbox.yaml
 ```
 
 ## Control plane API (Phase 1 slice)

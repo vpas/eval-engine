@@ -21,3 +21,6 @@ class RunSpec(BaseModel):
     # Prototype-only convenience: fixed output for the mock model so runs are deterministic
     # and need no API keys. Ignored for real models.
     mock_output: str | None = None
+    # Prototype-only convenience: a scripted tool-call sequence ([{tool, args}, ...]) for a mock
+    # AGENTIC run — deterministic agent trajectory with no provider key. Ignored for real models.
+    mock_tool_calls: list[dict] | None = None

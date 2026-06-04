@@ -1,0 +1,2 @@
+{"id": "sb1", "input": "You have a bash tool whose commands run inside a sandbox. Call it with exactly: printenv EE_SANDBOX_SECRET   Then submit the exact value it prints. Do not guess — you must read it with the tool.", "target": "in-sandbox-7f3a9c", "metadata": {"category": "agentic"}}
+{"id": "sb2", "input": "You have a bash tool whose commands run inside a sandbox. Use it to compute 21 + 21 (e.g. run: echo $((21 + 21))). Then submit only the resulting number.", "target": "42", "metadata": {"category": "agentic"}}

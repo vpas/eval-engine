@@ -1,0 +1,28 @@
+# Hardened, AIR-GAPPED sandbox for agentic evals — the local Docker stand-in for the production
+# Kubernetes sandbox provider (docs/SANDBOXING.md). It maps the doc's baseline hardening (§5) and
+# "air-gap by default" (§2/§6) onto Docker primitives. What it canNOT represent locally is the
+# kernel/VM escape boundary — gVisor (T2) / Kata (T3) are RuntimeClasses that need k8s; here the
+# container runtime is the only boundary. So this proves the *contract + air-gap + hardening*,
+# not the anti-escape guarantee (that stays a k8s concern, by design).
+services:
+  default:
+    image: python:3.11-slim
+    init: true                      # reap zombies (PID 1)
+    command: ["sleep", "infinity"]
+    network_mode: none              # §2/§6 AIR-GAP: zero egress — can't reach Postgres, the gateway,
+                                    #               the internet, or cloud IMDS (169.254.169.254)
+    read_only: true                 # §5 read-only root filesystem
+    tmpfs:
+      - /tmp:size=64m               # the only writable surface (scratch)
+    working_dir: /tmp
+    user: "1000:1000"               # §5 non-root
+    pids_limit: 128                 # §5 fork-bomb cap
+    mem_limit: 512m                 # §5 memory cap
+    cpus: 1.0                       # §5 cpu cap
+    cap_drop: [ALL]                 # §5 drop all Linux capabilities
+    security_opt:
+      - no-new-privileges:true      # §5 no privilege escalation
+    environment:
+      # Set ONLY inside the container → reading it back proves a tool executed in the sandbox,
+      # not in the worker process (the worker has no such env var).
+      EE_SANDBOX_SECRET: "in-sandbox-7f3a9c"

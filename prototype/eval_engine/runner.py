@@ -66,6 +66,10 @@ def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
 
 def _model_for(spec: RunSpec, n: int):
     if spec.model.startswith("mockllm"):
+        if spec.mock_tool_calls:  # scripted agentic mock: emit the tool-call sequence in order
+            outs = [ModelOutput.for_tool_call(spec.model, tc["tool"], tc.get("args", {}))
+                    for tc in spec.mock_tool_calls]
+            return get_model(spec.model, custom_outputs=outs)
         out = spec.mock_output or "Paris"
         return get_model(spec.model, custom_outputs=[ModelOutput.from_content(spec.model, out) for _ in range(n + 2)])
     return get_model(spec.model)
@@ -82,9 +86,12 @@ def _put_transcript(run_id: str, sample_id: str, payload: dict) -> str:
 def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:
     """Run Inspect on the claimed shard; return {sample_id: result dict}."""
     sub = MemoryDataset([samples_by_id[i] for i in ids])
-    solver, _ = plugins.build("harness", spec.harness.model_dump())
+    built, _ = plugins.build("harness", spec.harness.model_dump())
+    # An agentic harness returns (solver, sandbox); simple harnesses return just a solver. The
+    # sandbox flows into the Task → Inspect provisions one per sample (the ephemeral-pod shape).
+    solver, sandbox = built if isinstance(built, tuple) else (built, None)
     scorers = [plugins.build("scorer", s.model_dump())[0] for s in spec.scorers]
-    task = Task(dataset=sub, solver=solver, scorer=scorers)
+    task = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)
     log = inspect_eval(
         task, model=_model_for(spec, len(ids)), display="none",
         log_dir=str(control.DATA / "logs"),
