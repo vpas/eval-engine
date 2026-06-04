@@ -19,6 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 # real backends (need the docker Postgres + ClickHouse, see infra/up.sh)
 postgres = ["psycopg[binary]", "clickhouse-connect"]
+# distributed executor — Ray workers over the shared ledger (needs the postgres backend)
+ray = ["ray"]
 
 [project.scripts]
 eval-engine = "eval_engine.cli:main"

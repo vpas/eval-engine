@@ -1,8 +1,10 @@
 # Eval Engine — Phase 0 Prototype
 
-A single-process miniature of the engine's **spine**, to de-risk the core assumptions before
-building the distributed system. Proves: Inspect AI integration (Pure A), the plugin contract,
-and the result path (Inspect log → flatten → store → query).
+A miniature of the engine's **spine**, to de-risk the core assumptions before building out the
+full system. Proves: Inspect AI integration (Pure A), the plugin contract, the result path
+(Inspect log → flatten → store → query), and — against the real backends — **distributed
+execution**: Ray workers fanning out over a shared Postgres ledger with exactly-once claiming
+and crash resumability (`ray_executor.py`, "Distributed execution" below).
 
 ## What's real vs stubbed
 
@@ -13,7 +15,7 @@ and the result path (Inspect log → flatten → store → query).
 | ClickHouse | DuckDB `.data/analytics.duckdb` (`sample_results`, 20 cols) | *the design's named dev path*; production-shaped (scores map, group_key, tokens/cost) |
 | S3 + zstd transcripts | `.data/transcripts/<run>/<sample>.json` | object-store stand-in (no compression) |
 | LiteLLM + real model | Inspect `mockllm` (fixed output) | zero cost/keys; proves plumbing |
-| Ray orchestrator | single-process claim→commit→load→prune loop | exact lifecycle (ORCHESTRATION §4–§10), not scale |
+| Ray orchestrator | single-process loop **(default)** *or* real **local Ray** workers (`ray_executor.py`) | same claim→commit→load→prune loop, now also proven across worker *processes* |
 
 The runner exercises the real result path: **expand ledger → claim batch → execute (Inspect)
 → commit result → batch-load to analytics → finalize (aggregate, archive failures, prune)**.
@@ -62,12 +64,14 @@ eval_engine/
   analytics.py  DuckDB: production-shaped sample_results + slice queries (SCHEMA §2)
   analytics_ch.py  ClickHouse backend: ReplacingMergeTree(attempt), monthly partitions, TTL
   db.py         backend selector (EVAL_ENGINE_BACKEND=sqlite|postgres)
-  runner.py     result-path lifecycle, split launch()/execute() (ORCHESTRATION §4–§10)
+  runner.py     result-path lifecycle, split launch()/execute()/_finalize() (ORCHESTRATION §4–§10)
+  ray_executor.py  DISTRIBUTED executor: N Ray workers over the shared Postgres ledger (Phase 2)
   api.py        FastAPI control plane: POST /runs (bg execute), GET status/results/catalog
   cli.py        run | report | runs | catalog | ledger
 tests/
   test_concurrency.py      exactly-once + lease-reclaim (SQLite)
   test_concurrency_pg.py   exactly-once + lease-reclaim (Postgres SKIP LOCKED)
+  test_distributed_ray.py  exactly-once + crash-reclaim across Ray worker processes
 infra/          up.sh / down.sh — docker Postgres + ClickHouse
 examples/       qa.jsonl + capitals_qa.yaml
 ```
@@ -123,6 +127,34 @@ bash infra/down.sh                                  # teardown
 
 Config: `EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD`. ClickHouse table uses
 the production engine (`ReplacingMergeTree(attempt)`, monthly partitions, 12-month TTL).
+
+## Distributed execution (Ray) — the Phase 2 leap
+
+`ray_executor.py` replaces the single-process loop with **N Ray workers, each running the
+identical claim→execute→commit→batch-load loop against the same Postgres ledger**. The workers
+never coordinate with each other — the ledger (`FOR UPDATE SKIP LOCKED`) is the sole
+coordinator, so distribution is just *"run N copies of a loop already proven exactly-once."*
+Needs the **postgres** backend (Ray workers are separate processes; DuckDB can't take
+concurrent multi-process writes, ClickHouse + Postgres can). A local `ray.init()` proves the
+*model*; KubeRay is deployment, a separate concern.
+
+```bash
+../.venv/bin/pip install -e 'prototype[postgres,ray]'
+bash infra/up.sh
+EVAL_ENGINE_BACKEND=postgres PYTHONPATH=. ../.venv/bin/python tests/test_distributed_ray.py
+```
+
+Proves two things the distributed system rides on:
+- **exactly-once across worker *processes*** — every sample lands in ClickHouse exactly once,
+  ledger prunes to 0 (not just across threads, as the concurrency test shows);
+- **crash resumability** — a worker that hard-crashes holding a claimed batch has its tasks
+  reclaimed by a survivor once the lease expires, and the run still completes — no orchestrator,
+  the ledger recovers itself.
+
+```python
+from eval_engine.ray_executor import run_distributed   # launch + distributed execute
+run_id = run_distributed(spec, n_workers=4)
+```
 
 ## MCP servers (for Claude Code)
 

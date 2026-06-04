@@ -172,15 +172,19 @@ def mark_failed(run_id: str, sample_id: str, error_type: str) -> None:
     con.close()
 
 
-def fetch_unloaded(run_id: str):
-    """done & not-yet-loaded rows → for batch-load into analytics (ORCHESTRATION §4)."""
+def fetch_unloaded(run_id: str, only_ids: list[str] | None = None):
+    """done & not-yet-loaded rows → for batch-load into analytics (ORCHESTRATION §4).
+
+    ``only_ids`` scopes the fetch to a specific shard (distributed loaders load just their own)."""
     con = _con()
-    rows = con.execute(
-        "SELECT sample_id, group_key, passed, primary_score, scores, tokens_in, tokens_out, "
-        "cost_usd, latency_ms, error_type, transcript_uri, attempts FROM sample_tasks "
-        "WHERE run_id=? AND status='done' AND loaded=0",
-        (run_id,),
-    ).fetchall()
+    sql = ("SELECT sample_id, group_key, passed, primary_score, scores, tokens_in, tokens_out, "
+           "cost_usd, latency_ms, error_type, transcript_uri, attempts FROM sample_tasks "
+           "WHERE run_id=? AND status='done' AND loaded=0")
+    if only_ids is None:
+        rows = con.execute(sql, (run_id,)).fetchall()
+    else:
+        ph = ",".join("?" * len(only_ids))
+        rows = con.execute(sql + f" AND sample_id IN ({ph})", (run_id, *only_ids)).fetchall()
     con.close()
     return rows
 

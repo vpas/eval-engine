@@ -152,13 +152,13 @@ def mark_failed(run_id: str, sample_id: str, error_type: str) -> None:
     )
 
 
-def fetch_unloaded(run_id: str):
-    return _conn().execute(
-        "SELECT sample_id, group_key, passed, primary_score, scores, tokens_in, tokens_out, "
-        "cost_usd, latency_ms, error_type, transcript_uri, attempts FROM sample_tasks "
-        "WHERE run_id=%s AND status='done' AND NOT loaded",
-        (run_id,),
-    ).fetchall()
+def fetch_unloaded(run_id: str, only_ids: list[str] | None = None):
+    cols = ("SELECT sample_id, group_key, passed, primary_score, scores, tokens_in, tokens_out, "
+            "cost_usd, latency_ms, error_type, transcript_uri, attempts FROM sample_tasks "
+            "WHERE run_id=%s AND status='done' AND NOT loaded")
+    if only_ids is None:
+        return _conn().execute(cols, (run_id,)).fetchall()
+    return _conn().execute(cols + " AND sample_id = ANY(%s)", (run_id, list(only_ids))).fetchall()
 
 
 def mark_loaded(run_id: str, sample_ids: list[str]) -> None:

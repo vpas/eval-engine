@@ -88,11 +88,16 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     return out
 
 
-def _batch_load(run_id: str, spec: RunSpec) -> None:
-    """Flatten done-but-unloaded ledger rows → analytics (one batched insert)."""
+def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> None:
+    """Flatten done-but-unloaded ledger rows → analytics (one batched insert).
+
+    ``ids`` scopes the load to a specific shard: each distributed worker loads only the rows
+    it just committed, so concurrent loaders never fetch+mark the same rows (no race). The
+    single-process runner passes ``None`` and drains everything unloaded.
+    """
     provider, model_id = _split_model(spec.model)
     fin = datetime.datetime.utcnow()
-    rows = control.fetch_unloaded(run_id)
+    rows = control.fetch_unloaded(run_id, ids)
     if not rows:
         return
     tuples, ids = [], []
@@ -128,6 +133,18 @@ def launch(spec: RunSpec) -> str:
     return run_id
 
 
+def _finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
+    """Aggregate the run, archive failures, prune the ledger, mark completed. Run ONCE per run
+    (by the single-process runner, or by the distributed coordinator after all workers join)."""
+    cnt = control.counts(run_id)
+    done, failed = cnt.get("done", 0), cnt.get("failed", 0)
+    n, passed, *_ = analytics.run_summary(run_id)
+    accuracy = (passed / n) if n else 0.0
+    control.archive_and_prune(run_id)
+    control.finalize_run(run_id, done, failed, accuracy)
+    return done, failed, accuracy
+
+
 def execute(run_id: str, spec: RunSpec) -> None:
     """ORCHESTRATOR action: claim → execute → commit → batch-load loop, then finalize."""
     dataset, _ = load_jsonl(spec.dataset, spec.limit)
@@ -144,12 +161,7 @@ def execute(run_id: str, spec: RunSpec) -> None:
                 control.mark_failed(run_id, sid, "no_result")
         _batch_load(run_id, spec)
 
-    cnt = control.counts(run_id)
-    done, failed = cnt.get("done", 0), cnt.get("failed", 0)
-    n, passed, *_ = analytics.run_summary(run_id)
-    accuracy = (passed / n) if n else 0.0
-    control.archive_and_prune(run_id)
-    control.finalize_run(run_id, done, failed, accuracy)
+    _finalize(run_id, spec)
 
 
 def run(spec: RunSpec) -> str:
