@@ -1,0 +1,6 @@
+# never commit local terraform state or your filled-in vars (may contain ids/paths)
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+terraform/*.tfstate
+terraform/*.tfstate.*

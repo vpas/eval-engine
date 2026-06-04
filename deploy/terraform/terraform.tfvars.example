@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. (terraform.tfvars is gitignored — see deploy/.gitignore)
+project_id = "eval-engine-vp01"   # <-- your actual project id
+region     = "us-central1"
+zone       = "us-central1-a"
+
+# Cost knobs (defaults are the cheapest sensible):
+# system_machine_type = "e2-medium"   # drop to "e2-small" to save ~$12/mo if ClickHouse fits
+# worker_machine_type = "e2-medium"
+# worker_max_nodes    = 3
