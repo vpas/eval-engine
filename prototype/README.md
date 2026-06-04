@@ -123,3 +123,52 @@ bash infra/down.sh                                  # teardown
 
 Config: `EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD`. ClickHouse table uses
 the production engine (`ReplacingMergeTree(attempt)`, monthly partitions, 12-month TTL).
+
+## MCP servers (for Claude Code)
+
+A project `.mcp.json` (root, **gitignored** — it holds a machine-specific venv path + a dev
+credential) wires Claude Code into the running dev backends, **read-only**, so it can inspect
+the live ledger and run analytics slices without hand-written scripts:
+
+- `eval-pg` — `@modelcontextprotocol/server-postgres` (via npx) over a dedicated **read-only
+  role** `ee_ro` (not the owner; the server also wraps every query in a `READ ONLY` txn).
+- `eval-clickhouse` — `mcp-clickhouse` (in the venv); `run_select_query` executes with
+  `readonly=1`.
+
+Recreate after `infra/up.sh`:
+
+```bash
+# read-only Postgres role (idempotent)
+docker exec -i ee-postgres psql -U evalengine -d evalengine <<'SQL'
+DROP ROLE IF EXISTS ee_ro;
+CREATE ROLE ee_ro LOGIN PASSWORD 'ee_ro';
+GRANT CONNECT ON DATABASE evalengine TO ee_ro;
+GRANT USAGE ON SCHEMA public TO ee_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ee_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ee_ro;
+SQL
+
+../.venv/bin/pip install mcp-clickhouse   # ClickHouse MCP server
+```
+
+`.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "eval-pg": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres",
+               "postgresql://ee_ro:ee_ro@localhost:5433/evalengine"]
+    },
+    "eval-clickhouse": {
+      "command": "<repo>/.venv/bin/mcp-clickhouse",
+      "env": {"CLICKHOUSE_HOST": "localhost", "CLICKHOUSE_PORT": "8123",
+              "CLICKHOUSE_USER": "default", "CLICKHOUSE_PASSWORD": "", "CLICKHOUSE_SECURE": "false"}
+    }
+  }
+}
+```
+
+Claude Code prompts to approve project MCP servers on next start (`/mcp` to manage). The
+servers need the `infra/up.sh` containers running.

@@ -7,3 +7,5 @@ logs/
 *.egg-info/
 build/
 dist/
+# local MCP server config: machine-specific venv path + dev-only RO creds (see prototype/README.md)
+.mcp.json
