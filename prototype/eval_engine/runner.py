@@ -18,7 +18,8 @@ from inspect_ai.dataset import MemoryDataset
 from inspect_ai.model import ModelOutput, get_model
 from inspect_ai.scorer import CORRECT
 
-from . import analytics, builtins, control, plugins  # noqa: F401  builtins populates registry
+from . import builtins, plugins  # noqa: F401  builtins import populates the registry
+from .db import analytics, control
 from .datasets import load_jsonl
 from .models import RunSpec
 
@@ -97,9 +98,11 @@ def _batch_load(run_id: str, spec: RunSpec) -> None:
     tuples, ids = [], []
     for (sid, gk, passed, prim, scores, tin, tout, cost, lat, err, uri, attempt) in rows:
         ids.append(sid)
+        scores_json = scores if isinstance(scores, str) else json.dumps(scores)  # PG JSONB → dict
         tuples.append((
             run_id, sid, spec.eval, 1, provider, model_id, spec.harness.type, gk or "",
-            passed, prim, scores, tin, tout, cost, lat, attempt, err or "", uri or "", "none", fin,
+            passed, prim, scores_json, tin, tout, cost, lat, attempt, err or "", uri or "",
+            "none", fin,
         ))
     analytics.insert(tuples)
     control.mark_loaded(run_id, ids)

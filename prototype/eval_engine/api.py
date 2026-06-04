@@ -14,7 +14,8 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
-from . import analytics, builtins, control, plugins, runner  # noqa: F401  populate registry
+from . import builtins, plugins, runner  # noqa: F401  populate registry
+from .db import analytics, control
 from .models import RunSpec
 
 app = FastAPI(title="eval-engine", version="0.1.0-prototype")

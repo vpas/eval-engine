@@ -58,12 +58,17 @@ eval_engine/
   models.py     RunSpec (SCHEMA §1.5)
   control.py    SQLite: runs + ephemeral sample-task ledger + failure archive (SCHEMA §1);
                 atomic UPDATE..RETURNING claim w/ lease reclaim (SKIP-LOCKED analogue)
+  control_pg.py Postgres backend: same interface, REAL FOR UPDATE SKIP LOCKED claim
   analytics.py  DuckDB: production-shaped sample_results + slice queries (SCHEMA §2)
+  analytics_ch.py  ClickHouse backend: ReplacingMergeTree(attempt), monthly partitions, TTL
+  db.py         backend selector (EVAL_ENGINE_BACKEND=sqlite|postgres)
   runner.py     result-path lifecycle, split launch()/execute() (ORCHESTRATION §4–§10)
   api.py        FastAPI control plane: POST /runs (bg execute), GET status/results/catalog
   cli.py        run | report | runs | catalog | ledger
 tests/
-  test_concurrency.py   exactly-once + lease-reclaim under N threads
+  test_concurrency.py      exactly-once + lease-reclaim (SQLite)
+  test_concurrency_pg.py   exactly-once + lease-reclaim (Postgres SKIP LOCKED)
+infra/          up.sh / down.sh — docker Postgres + ClickHouse
 examples/       qa.jsonl + capitals_qa.yaml
 ```
 
@@ -94,9 +99,27 @@ progress bar driven by the ledger. Vanilla HTML/JS, no build step.
 ## Concurrency test (the claim/idempotency correctness)
 
 ```bash
-PYTHONPATH=. ../.venv/bin/python tests/test_concurrency.py
+PYTHONPATH=. ../.venv/bin/python tests/test_concurrency.py        # SQLite
+PYTHONPATH=. ../.venv/bin/python tests/test_concurrency_pg.py     # Postgres (real SKIP LOCKED)
 ```
 
-Proves exactly-once claim (no double-claim, none dropped) under 8 threads, and lease-based
-reclaim of tasks abandoned by a "crashed" worker — the SQLite claim is an atomic
-`UPDATE..RETURNING` (analogue of Postgres `FOR UPDATE SKIP LOCKED`).
+Proves exactly-once claim (no double-claim, none dropped) and lease-based reclaim of tasks
+abandoned by a "crashed" worker. SQLite uses an atomic `UPDATE..RETURNING`; Postgres uses the
+real `FOR UPDATE SKIP LOCKED` — where all N workers claim *in parallel* (2000 samples / 12
+workers, exactly-once, ~3.8k samples/s).
+
+## Real backends (Postgres + ClickHouse)
+
+The SQLite/DuckDB stand-ins swap for the real backends via one env var — same interface
+(`db.py` selector), so nothing else changes. The only behavioural difference is the claim
+becomes a true `FOR UPDATE SKIP LOCKED`.
+
+```bash
+../.venv/bin/pip install -e 'prototype[postgres]'   # psycopg + clickhouse-connect
+bash infra/up.sh                                    # docker Postgres :5433 + ClickHouse :8123
+EVAL_ENGINE_BACKEND=postgres PYTHONPATH=. ../.venv/bin/eval-engine run examples/capitals_qa.yaml
+bash infra/down.sh                                  # teardown
+```
+
+Config: `EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD`. ClickHouse table uses
+the production engine (`ReplacingMergeTree(attempt)`, monthly partitions, 12-month TTL).

@@ -16,6 +16,10 @@ dependencies = [
   "uvicorn[standard]",
 ]
 
+[project.optional-dependencies]
+# real backends (need the docker Postgres + ClickHouse, see infra/up.sh)
+postgres = ["psycopg[binary]", "clickhouse-connect"]
+
 [project.scripts]
 eval-engine = "eval_engine.cli:main"
 

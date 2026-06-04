@@ -7,7 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from . import analytics, builtins, control, plugins, runner  # noqa: F401  populate registry
+from . import builtins, plugins, runner  # noqa: F401  populate registry
+from .db import analytics, control
 
 
 def cmd_run(args):
