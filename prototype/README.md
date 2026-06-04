@@ -14,7 +14,7 @@ and crash resumability (`ray_executor.py`, "Distributed execution" below).
 | Postgres (metadata + **ephemeral ledger**) | SQLite `.data/control.db` (`runs`, `sample_tasks`, `failed_task_archive`) | same tables/lifecycle; only the claim primitive (FOR UPDATE SKIP LOCKED) changes |
 | ClickHouse | DuckDB `.data/analytics.duckdb` (`sample_results`, 20 cols) | *the design's named dev path*; production-shaped (scores map, group_key, tokens/cost) |
 | S3 + zstd transcripts | `.data/transcripts/<run>/<sample>.json` | object-store stand-in (no compression) |
-| LiteLLM + real model | Inspect `mockllm` (fixed output) | zero cost/keys; proves plumbing |
+| LiteLLM + real model | Inspect `mockllm` **(default)** *or* real **OpenRouter** model (cost from catalog price) | same `Target` swap; LiteLLM gateway stands in as catalog-priced cost |
 | Ray orchestrator | single-process loop **(default)** *or* real **local Ray** workers (`ray_executor.py`) | same claim→commit→load→prune loop, now also proven across worker *processes* |
 
 The runner exercises the real result path: **expand ledger → claim batch → execute (Inspect)
@@ -46,9 +46,21 @@ Expected: `accuracy 33%` (mock always answers "Paris" → q1 passes, q2/q3 fail)
 
 ## Using a real model
 
-Swap `model:` in the RunSpec to e.g. `openai/gpt-4o-mini` or `anthropic/claude-...`, drop
-`mock_output`, and export the provider key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`). Nothing
-else changes — that's the point of the model being just a `Target`.
+Swap `model:` in the RunSpec to a real provider, drop `mock_output`, export the key. Nothing
+else changes — that's the point of the model being just a `Target`. A worked OpenRouter example
+ships as `examples/capitals_openrouter.yaml` (cheap Llama-3.1-8B, ~$0.000002 for the 3 samples):
+
+```bash
+../.venv/bin/pip install -e 'prototype[openrouter]'   # Inspect's openrouter/ provider needs openai
+export OPENROUTER_API_KEY=sk-or-...                    # (or `set -a; source ../.env`)
+PYTHONPATH=. ../.venv/bin/python -m eval_engine.cli run examples/capitals_openrouter.yaml
+```
+
+Expected: `accuracy 100%` (a real model gets all three) with **real token + cost** — vs the
+mock's 33%. Cost is computed from Inspect's token usage × OpenRouter's catalog price
+(`runner._cost_usd`), a stand-in for the production **LiteLLM gateway**, which is the design's
+source-of-truth for per-run cost attribution + hard-cap. Other providers (`openai/gpt-4o-mini`,
+`anthropic/claude-...`) work the same way; only `openrouter/*` is priced here (others → cost 0).
 
 ## Layout
 

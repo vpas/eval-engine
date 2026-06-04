@@ -1,0 +1,13 @@
+# Same dataset/harness/scorer as capitals_qa.yaml, but a REAL model via OpenRouter.
+# No mock_output → the model actually generates. Needs OPENROUTER_API_KEY in the env.
+# Llama-3.1-8B is cheap ($0.02/$0.05 per M tok) and should get all 3 right → accuracy 3/3.
+eval: capitals_qa_openrouter
+dataset: examples/qa.jsonl
+model: openrouter/meta-llama/llama-3.1-8b-instruct
+batch_size: 2
+harness:
+  type: single_turn
+scorers:
+  - type: includes
+    config:
+      ignore_case: true

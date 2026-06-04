@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import urllib.request
 from pathlib import Path
 
 from inspect_ai import Task
@@ -34,6 +35,33 @@ def _score_value(value) -> float:
     if value in (CORRECT, "C", 1, 1.0, True):
         return 1.0
     return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+_OR_PRICES: dict[str, tuple[float, float]] | None = None  # model_id → ($/prompt_tok, $/completion_tok)
+
+
+def _openrouter_prices() -> dict[str, tuple[float, float]]:
+    """Fetch+cache OpenRouter's per-token catalog prices (once per process). Offline → empty."""
+    global _OR_PRICES
+    if _OR_PRICES is None:
+        _OR_PRICES = {}
+        try:
+            with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=10) as r:
+                for m in json.load(r)["data"]:
+                    p = m.get("pricing", {})
+                    _OR_PRICES[m["id"]] = (float(p.get("prompt") or 0), float(p.get("completion") or 0))
+        except Exception:
+            pass  # API down / no network → prices stay empty → cost 0.0 (graceful, never fatal)
+    return _OR_PRICES
+
+
+def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Cost from tokens × catalog price. Prototype stand-in for the LiteLLM gateway, which is the
+    design's source-of-truth for cost (per-run hard-cap attribution). Only openrouter/* priced here."""
+    if not model.startswith("openrouter/"):
+        return 0.0
+    prompt, completion = _openrouter_prices().get(model.split("/", 1)[1], (0.0, 0.0))
+    return tokens_in * prompt + tokens_out * completion
 
 
 def _model_for(spec: RunSpec, n: int):
@@ -68,6 +96,8 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         score_vals = {name: _score_value(sc.value) for name, sc in (s.scores or {}).items()}
         primary = next(iter(score_vals.values()), 0.0)
         usage = getattr(s.output, "usage", None) if s.output else None
+        tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
+        tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
         completion = s.output.completion if s.output else ""
         uri = _put_transcript(
             run_id, sid,
@@ -78,9 +108,9 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
             "passed": 1 if primary >= 0.5 else 0,
             "primary_score": primary,
             "scores": score_vals,
-            "tokens_in": int(getattr(usage, "input_tokens", 0) or 0),
-            "tokens_out": int(getattr(usage, "output_tokens", 0) or 0),
-            "cost_usd": 0.0,  # prod: from LiteLLM gateway accounting
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": _cost_usd(spec.model, tokens_in, tokens_out),  # prod: LiteLLM gateway
             "latency_ms": 0,
             "error_type": "",
             "transcript_uri": uri,

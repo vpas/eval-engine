@@ -55,7 +55,7 @@ def _print_report(run_id: str):
     n, passed, mean, tokens, cost = analytics.run_summary(run_id)
     print(f"\n  run {run_id} | eval={run[1]} model={run[3]} | dataset_hash={run[13]}")
     print(f"  samples={n}  passed={passed}  accuracy={(passed or 0) / (n or 1):.0%}  "
-          f"tokens={tokens}  cost=${cost:.4f}\n")
+          f"tokens={tokens}  cost=${cost:.6f}\n")
 
     print(f"  {'sample':<8} {'pass':<5} {'category':<12} {'score':<6} output → target")
     print(f"  {'-'*8} {'-'*4} {'-'*11} {'-'*5} {'-'*24}")
