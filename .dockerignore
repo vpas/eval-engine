@@ -1,0 +1,13 @@
+# keep the build context small + never ship secrets or local state into the image
+.git/
+**/.venv/
+**/.data/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+**/.pytest_cache/
+.env
+.env.*
+.mcp.json
+*.log
+deploy/terraform/.terraform/

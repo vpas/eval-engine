@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from . import builtins, plugins, runner  # noqa: F401  populate registry
+from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
 
 
@@ -89,6 +89,10 @@ def main():
     sub.add_parser("ledger", help="show live ephemeral ledger size").set_defaults(func=cmd_ledger)
 
     args = ap.parse_args()
+    # ensure schema for DB-touching commands (no-op if already inited at import). `catalog` is a
+    # pure in-memory registry op → must work with no database (handy as a container healthcheck).
+    if args.func is not cmd_catalog:
+        db.init()
     args.func(args)
 
 

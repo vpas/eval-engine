@@ -9,16 +9,36 @@ Docs: http://localhost:8077/docs
 """
 from __future__ import annotations
 
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
-from . import builtins, plugins, runner  # noqa: F401  populate registry
+from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
 from .models import RunSpec
 
-app = FastAPI(title="eval-engine", version="0.1.0-prototype")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure schema once the DB is reachable. A pod may start before Neon/ClickHouse accept
+    # connections (cold start / ordering), so retry with backoff instead of crash-looping.
+    last = None
+    for attempt in range(12):
+        try:
+            db.init()
+            break
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(min(1.5 ** attempt, 8))
+    else:
+        raise RuntimeError(f"databases not reachable at startup: {last}")
+    yield
+
+
+app = FastAPI(title="eval-engine", version="0.1.0-prototype", lifespan=lifespan)
 _UI = Path(__file__).resolve().parent.parent / "static" / "index.html"
 
 
