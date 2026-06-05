@@ -10,3 +10,4 @@ dist/
 .mcp.json
 .env
 get_helm.sh
+.claude/
