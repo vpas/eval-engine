@@ -1,12 +1,17 @@
-"""Orchestrator entrypoint — admit → reconcile → finalize. One replica (leader-election later).
+"""Orchestrator entrypoint — admit → reconcile → finalize.
 
     python -m eval_engine.orchestrator
 
-Each tick:
-  - **Admit**: expanded ``queued`` runs become ``running`` (the API already expanded the ledger in
-    ``launch()``). Two-lane admission (docs/SCHEDULER.md) is a future refinement — v1 admits all.
-  - **Finalize**: a ``running`` run whose ledger is fully terminal (``done+failed == total``) gets a
-    safety-sweep load, then aggregate → archive failures → prune ledger → mark ``completed``.
+Runs leader-elected (a Postgres advisory lock; see ``main``), so >1 replica is safe — only the
+leader ticks, and a standby takes over on handover or a reaped stale lock (bug B1). Each tick:
+  - **Admit** (``_admit``): two-lane admission (docs/SCHEDULER.md §2) — ``queued`` runs become
+    ``running`` under a global cap with a reserved interactive slice (the API already expanded the
+    ledger in ``launch()``).
+  - **Reconcile**: publish each running run's live rollup onto its runs row (DESIGN §8) and enforce
+    its budget cap (skip still-queued samples once committed cost reaches the cap).
+  - **Finalize**: a ``running`` run whose ledger is fully terminal (``done+failed+budget_skipped ==
+    total``) gets a safety-sweep load, then aggregate → archive failures → prune ledger → mark
+    ``completed`` (or ``budget_exceeded``).
 
 The finalize gate keys on the run's authoritative ``total`` (set at create), so a run still being
 expanded — where ``done+failed`` momentarily equals the partial count — is never finalized early.

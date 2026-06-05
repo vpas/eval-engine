@@ -3,8 +3,9 @@
   create run → expand ledger → [claim batch → execute via Inspect → commit result →
   batch-load to analytics] loop → finalize (aggregate, archive failures, prune ledger).
 
-Real Ray/Postgres swap only changes the concurrency primitive (claim) and the backends; the
-lifecycle shape is exactly this.
+The distributed deployment (KEDA-scaled worker Deployment + leader-elected orchestrator, all
+coordinating through the Postgres ledger) only swaps the concurrency primitive (a shared claim
+instead of this single ``w0`` loop); the lifecycle shape is exactly this.
 """
 from __future__ import annotations
 
@@ -32,9 +33,6 @@ GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → tran
 EVAL_LOG_DIR = f"gs://{GCS_BUCKET}/eval-logs" if GCS_BUCKET else str(control.DATA / "logs")
 _gcs_client = None
 
-# Per-sample retry policy (FR5, ORCHESTRATION §7). A transient sample failure re-queues with
-# exponential `not_before` backoff up to MAX_ATTEMPTS, then goes terminal `failed`. The claim already
-# increments attempts; backoff keeps a poison sample from head-of-line blocking the queue.
 # Reproducibility pin (DESIGN §14): the worker image/code ref, baked at build time (Dockerfile ARG
 # GIT_SHA → this env) and recorded on every run so a run's inputs include the exact code that ran it.
 IMAGE_DIGEST = os.environ.get("EVAL_ENGINE_IMAGE_DIGEST", "dev")
@@ -56,6 +54,9 @@ def _classify(spec: RunSpec, total: int) -> tuple[str, int]:
     return lane, (INTERACTIVE_MAX_INFLIGHT if lane == "interactive" else BATCH_MAX_INFLIGHT)
 
 
+# Per-sample retry policy (FR5, ORCHESTRATION §7). A transient sample failure re-queues with
+# exponential `not_before` backoff up to MAX_ATTEMPTS, then goes terminal `failed`. The claim already
+# increments attempts; backoff keeps a poison sample from head-of-line blocking the queue.
 MAX_ATTEMPTS = int(os.environ.get("EVAL_ENGINE_MAX_ATTEMPTS", "3"))
 RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0"))
 RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
@@ -175,7 +176,7 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
         for sid, r in good.items():
             gk = (samples_by_id[sid].metadata or {}).get("category", "") if sid in samples_by_id else ""
             tuples.append((
-                run_id, sid, spec.eval, 1, provider, model_id, spec.harness.type, gk or "",
+                run_id, sid, spec.eval, spec.eval_version, provider, model_id, spec.harness.type, gk or "",
                 r["passed"], r["primary_score"], json.dumps(r["scores"]), r["tokens_in"],
                 r["tokens_out"], r["cost_usd"], r["latency_ms"], attempts.get(sid, 1),
                 r["error_type"] or "", r["transcript_uri"] or "", "none", fin,
@@ -291,7 +292,7 @@ def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> Non
         ids.append(sid)
         scores_json = scores if isinstance(scores, str) else json.dumps(scores)  # PG JSONB → dict
         tuples.append((
-            run_id, sid, spec.eval, 1, provider, model_id, spec.harness.type, gk or "",
+            run_id, sid, spec.eval, spec.eval_version, provider, model_id, spec.harness.type, gk or "",
             passed, prim, scores_json, tin, tout, cost, lat, attempt, err or "", uri or "",
             "none", fin,
         ))
