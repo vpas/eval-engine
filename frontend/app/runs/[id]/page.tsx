@@ -136,8 +136,11 @@ function TranscriptDrawer({ sid, uri, onClose }: { sid: string; uri: string; onC
           <strong style={{ fontFamily: "var(--mono)", fontSize: 13 }}>{sid}</strong>
           <span style={{ flex: 1 }} />
           {data?.eval_log_uri && (
+            // The viewer reads gs:// logs server-side; pass the *relative* log name (basename) so the
+            // proxied API URLs carry no `//` (oauth2-proxy would collapse it), and force the server API
+            // (`inspect_server=true`) instead of the browser's direct-fetch path. See view_main.py.
             <a className="btn" target="_blank"
-               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri))}`}>
+               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri).split("/").pop() || "")}&inspect_server=true`}>
               full trace ↗
             </a>
           )}

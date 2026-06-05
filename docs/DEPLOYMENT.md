@@ -165,7 +165,44 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
       the **full `gs://` log path**, not basename.
 - [x] **Per-sample deep-link:** workers record each sample's `.eval` log path (`eval_log_uri`) in its
       transcript; the dashboard's sample drawer has a **"full trace ↗"** link → `/inspect/?log_file=<that
-      log>`, opening that exact sample's rich Inspect trace. Verified end-to-end.
+      log>`, opening that exact sample's rich Inspect trace.
+- [x] **Deep-link "Failed to fetch" — root cause + fix (inspect-ai version bump):** the deployed viewer
+      was **inspect-ai 0.3.69** (frozen by the cached Docker dependency layer, not a pin — `pyproject` only
+      said `inspect-ai`). That old client sends the **full `gs://…` log path** to `/api/log-size/<path>`;
+      **oauth2-proxy** (Go `net/http`, runs `path.Clean`) decodes `%2F` and collapses the `gs://` `//` → `gs:/`
+      via a **301 redirect** → inspect-view 404 → "Error: Failed to fetch". (nginx `merge_slashes` was a
+      red herring; the collapse is in oauth2-proxy's redirect, not nginx request routing.) **Fix:** pin
+      **`inspect-ai>=0.3.235`** in `pyproject.toml` (busts the cached layer + documents the requirement).
+      The 0.3.235 client builds every API URL via `directoryRelativeUrl(file, log_dir)`, which strips the
+      `gs://<bucket>/eval-logs/` prefix to a **single-segment basename** (`2026-…eval`, no `/`) — so
+      `/api/log-bytes/2026-…eval` has nothing for `path.Clean` to collapse, and the deep-link's full-`gs://`
+      `?log_file=` is stripped the same way. Bonus: 0.3.235 also fixes the gcsfs `datetime`-mtime crash.
+- [x] **The actual sufficient fix — relative log names via a viewer `mapping_policy` (`view_main.py`):**
+      the version bump alone was *necessary but not sufficient*. inspect reads `.eval` files (`isEvalFile`)
+      through `openRemoteLogFile`, and the api it uses is chosen once by `resolveApi`: a bare `?log_file=`
+      → `staticHttpApi` (browser does `fetch("gs://…")` → unsupported scheme → "Failed to fetch", never
+      hits the server); `?inspect_server=true` → `viewServerApi` (server reads gs://, proxies bytes). **But**
+      `viewServerApi` builds `/log-info/${encodeURIComponent(file)}`, so a full `gs://` *still* yields
+      `%2F%2F` that **oauth2-proxy** (Go `path.Clean`) collapses via a 301 — so *every* `.eval` read (even a
+      sidebar click) was broken through the ingress, not just the deep-link. **Fix:** `view_main.py` injects
+      a `FileMappingPolicy` + matching access policy (monkeypatches `view_server_app`, which `view_server`
+      resolves by module-global name) so the client only ever sees/sends a **relative basename**
+      (`2026-…eval` — no scheme, no `/`); the server maps it back to `gs://<log_dir>/<name>` to read+proxy
+      server-side. The dashboard deep-link now passes `?log_file=<basename>&inspect_server=true`
+      (`frontend/app/runs/[id]/page.tsx`). Verified through the frontend proxy: `/api/log-files` returns
+      relative names; `/api/log-info/<basename>` + `/api/log-bytes/<basename>` → 200 (server resolves gs://).
+- [x] **Final piece — empty `/log-dir` (`view_main.py`):** the client re-expands a relative name with
+      `join(name, logDir)` where `logDir` comes from `GET /log-dir`; `join` returns the name unchanged
+      only when `logDir` is empty. That route never unmaps, so it returned the raw `gs://` dir → the client
+      rebuilt the full `gs://` path (and the `//` collapse came back as an HTTP 404). We monkeypatch
+      `get_log_dir` to report `log_dir=""` for `gs://` dirs (listing still works — the client omits the
+      `log_dir` query param when it's empty, so the server falls back to its internal `default_dir`). Now
+      `join(basename, "")` = `basename` stays relative end-to-end. Verified: `/api/log-dir` → `{"log_dir":""}`,
+      `/api/log-files` → relative names, `/api/log-info/<basename>` → 200. This also fixes plain sidebar
+      clicks (same `join` path), so the viewer is fully usable through the ingress.
+      Rebuilt + pushed `app:latest` (mapping + empty-/log-dir) and `frontend:latest` (deep-link); rolled both out.
+      The `merge_slashes off;` `http-snippet` on the `ingress-nginx-controller` ConfigMap is harmless
+      leftover defense-in-depth (not load-bearing — the relative names mean there are no `//` to collapse).
 
 ### Agentic / K8s sandbox in-cluster — SCAFFOLDED, blocked on cluster setup (documented)
 Built the whole path: image has **helm 3.16 + inspect-k8s-sandbox**; harness `sandbox: k8s`;
@@ -198,6 +235,16 @@ so it stays deferred.
 - [x] **`created_by` wired** — API reads `X-Auth-Request-Email` → stored on each run + shown in the dashboard "by" column (closes part of D6).
 - Cost: ingress LB ~$18/mo (the external-access tax). The api Service stays ClusterIP — reachable
   only through the authenticated proxy.
+
+### Pause / resume (overnight cost control)
+- **`infra/cloud-down.sh`** — scales the fixed `system` node pool to 0 (stops compute billing). Evicts
+  all pods but keeps the cluster, PVCs, config, static IP and images; `workers` already autoscales to 0.
+- **`infra/cloud-up.sh`** — scales `system` back to 1 and waits for the core deployments to reschedule
+  (no redeploy — Deployments persist across the pause).
+- Still billing while paused (negligible, needed for clean restore): control-plane mgmt fee (~$0.10/hr),
+  the ingress LB + static IP (deleting it would change the nip.io host → break OAuth), persistent disks.
+  Full stop = `terraform destroy` (teardown, not an overnight pause).
+- Note: `up.sh`/`down.sh` are the **local-dev** Postgres+ClickHouse backends (test suite), not the cloud.
 
 ---
 

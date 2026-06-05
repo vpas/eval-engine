@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "eval-engine: Inspect kernel + Postgres ledger + control plane + ClickHouse analytics + dashboard"
 requires-python = ">=3.10"
 dependencies = [
-  "inspect-ai",
+  # >=0.3.235: the log viewer's client builds API URLs relative to --log-dir (directoryRelativeUrl),
+  # so gs:// log paths are stripped to clean basenames — no `//` for the oauth2-proxy path-cleaner to
+  # collapse (the deep-link "Failed to fetch" bug). Older builds (0.3.69) sent full gs:// to /log-size.
+  "inspect-ai>=0.3.235",
   "duckdb",
   "pydantic>=2",
   "pyyaml",
