@@ -23,7 +23,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers TEXT, status TEXT, total INT, done INT, failed INT,
-  accuracy REAL, dataset_hash TEXT, spec_json TEXT, created_by TEXT, created_at TEXT, finished_at TEXT);
+  accuracy REAL, cost_usd REAL DEFAULT 0, dataset_hash TEXT, spec_json TEXT, created_by TEXT,
+  created_at TEXT, finished_at TEXT);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -46,6 +47,10 @@ def _con() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=5000")
     con.executescript(SCHEMA)
+    # Idempotent migration for dev DBs created before cost_usd existed (SQLite lacks ADD COLUMN IF
+    # NOT EXISTS). Cheap PRAGMA check; mirrors the Postgres ALTER ... IF NOT EXISTS migration.
+    if "cost_usd" not in {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}:
+        con.execute("ALTER TABLE runs ADD COLUMN cost_usd REAL DEFAULT 0")
     return con
 
 
@@ -116,12 +121,39 @@ def set_status(run_id: str, status: str) -> None:
     con.close()
 
 
-def finalize_run(run_id: str, done: int, failed: int, accuracy: float,
+def finalize_run(run_id: str, done: int, failed: int, accuracy: float, cost_usd: float = 0.0,
                  status: str = "completed") -> None:
     con = _con()
     con.execute(
-        "UPDATE runs SET status=?, done=?, failed=?, accuracy=?, finished_at=? WHERE id=?",
-        (status, done, failed, accuracy, _now(), run_id),
+        "UPDATE runs SET status=?, done=?, failed=?, accuracy=?, cost_usd=?, finished_at=? WHERE id=?",
+        (status, done, failed, accuracy, cost_usd, _now(), run_id),
+    )
+    con.commit()
+    con.close()
+
+
+def live_rollup(run_id: str) -> tuple[int, int, int, float]:
+    """One-pass live (done, failed, passed_so_far, cost_so_far) over committed ledger rows — the
+    orchestrator's per-tick runs-row rollup (DESIGN §8 "Live metrics")."""
+    con = _con()
+    r = con.execute(
+        "SELECT sum(CASE WHEN status='done' THEN 1 ELSE 0 END), "
+        "sum(CASE WHEN status='failed' THEN 1 ELSE 0 END), "
+        "coalesce(sum(CASE WHEN status='done' THEN passed ELSE 0 END), 0), "
+        "coalesce(sum(CASE WHEN status='done' THEN cost_usd ELSE 0 END), 0) "
+        "FROM sample_tasks WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    con.close()
+    return int(r[0] or 0), int(r[1] or 0), int(r[2] or 0), float(r[3] or 0.0)
+
+
+def update_live(run_id: str, done: int, failed: int, accuracy: float, cost_usd: float) -> None:
+    """Write the live rollup onto the runs row so clients read live progress/score/cost from one place."""
+    con = _con()
+    con.execute(
+        "UPDATE runs SET done=?, failed=?, accuracy=?, cost_usd=? WHERE id=?",
+        (done, failed, accuracy, cost_usd, run_id),
     )
     con.commit()
     con.close()
@@ -136,9 +168,14 @@ def list_runs():
     return rows
 
 
+# Explicit column order (NOT SELECT * — must match api.get_run; the table also has spec_json/created_by).
+RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, created_at, finished_at")
+
+
 def get_run(run_id: str):
     con = _con()
-    r = con.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    r = con.execute(f"SELECT {RUN_COLS} FROM runs WHERE id=?", (run_id,)).fetchone()
     con.close()
     return r
 

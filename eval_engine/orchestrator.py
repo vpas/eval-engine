@@ -31,6 +31,10 @@ def tick() -> None:
 
     for run_id in db.control.active_runs(("running",)):
         spec = RunSpec.model_validate_json(db.control.get_spec(run_id))
+        # Live rollup (DESIGN §8 "Live metrics"): publish progress + live score + cost onto the runs
+        # row each tick, so clients read live state from one authoritative place (no client-side agg).
+        ld, lf, lp, lc = db.control.live_rollup(run_id)
+        db.control.update_live(run_id, ld, lf, (lp / ld) if ld else 0.0, lc)
         # Budget cap (DESIGN §8): once committed cost reaches the cap, stop scheduling — convert
         # still-queued samples to the distinct terminal `budget_skipped` (in-flight ones finish).
         # Workers also enforce this (stop claiming early); the orchestrator is the authoritative sweep.

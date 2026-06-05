@@ -29,10 +29,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
-  accuracy DOUBLE PRECISION, dataset_hash TEXT, spec_json TEXT, created_by TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
--- idempotent migration for tables created before created_by existed
+  accuracy DOUBLE PRECISION, cost_usd DOUBLE PRECISION DEFAULT 0, dataset_hash TEXT, spec_json TEXT,
+  created_by TEXT, created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
+-- idempotent migrations for tables created before these columns existed
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -130,11 +131,32 @@ def set_status(run_id: str, status: str) -> None:
     _conn().execute("UPDATE runs SET status=%s WHERE id=%s", (status, run_id))
 
 
-def finalize_run(run_id: str, done: int, failed: int, accuracy: float,
+def finalize_run(run_id: str, done: int, failed: int, accuracy: float, cost_usd: float = 0.0,
                  status: str = "completed") -> None:
     _conn().execute(
-        "UPDATE runs SET status=%s, done=%s, failed=%s, accuracy=%s, finished_at=now() WHERE id=%s",
-        (status, done, failed, accuracy, run_id),
+        "UPDATE runs SET status=%s, done=%s, failed=%s, accuracy=%s, cost_usd=%s, finished_at=now() "
+        "WHERE id=%s",
+        (status, done, failed, accuracy, cost_usd, run_id),
+    )
+
+
+def live_rollup(run_id: str) -> tuple[int, int, int, float]:
+    """One-pass live (done, failed, passed_so_far, cost_so_far) over committed ledger rows — the
+    orchestrator's per-tick runs-row rollup (DESIGN §8 "Live metrics")."""
+    r = _conn().execute(
+        "SELECT count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), "
+        "coalesce(sum(passed) FILTER (WHERE status='done'), 0), "
+        "coalesce(sum(cost_usd) FILTER (WHERE status='done'), 0) FROM sample_tasks WHERE run_id=%s",
+        (run_id,),
+    ).fetchone()
+    return int(r[0]), int(r[1]), int(r[2] or 0), float(r[3] or 0.0)
+
+
+def update_live(run_id: str, done: int, failed: int, accuracy: float, cost_usd: float) -> None:
+    """Write the live rollup onto the runs row so clients read live progress/score/cost from one place."""
+    _conn().execute(
+        "UPDATE runs SET done=%s, failed=%s, accuracy=%s, cost_usd=%s WHERE id=%s",
+        (done, failed, accuracy, cost_usd, run_id),
     )
 
 
@@ -145,8 +167,14 @@ def list_runs():
     ).fetchall()
 
 
+# Explicit column order for get_run (NOT SELECT * — the table has spec_json/created_by the API doesn't
+# map, so positional SELECT * would misalign created_at/finished_at). Keep in sync with api.get_run.
+RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, created_at, finished_at")
+
+
 def get_run(run_id: str):
-    return _conn().execute("SELECT * FROM runs WHERE id=%s", (run_id,)).fetchone()
+    return _conn().execute(f"SELECT {RUN_COLS} FROM runs WHERE id=%s", (run_id,)).fetchone()
 
 
 # --------------------------------------------------------------------------- ledger

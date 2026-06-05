@@ -162,10 +162,28 @@ def test_budget_stop():
         _cleanup(run_id)
 
 
+def test_live_rollup():
+    """Orchestrator live rollup → runs row, on the REAL Postgres backend (DESIGN §8)."""
+    run_id = _make_run(4)
+    try:
+        ids = control.claim_batch(run_id, "W", 2)
+        control.commit_result(run_id, ids[0], {**_fake_result(), "passed": 1, "cost_usd": 0.10})
+        control.commit_result(run_id, ids[1], {**_fake_result(), "passed": 0, "cost_usd": 0.20})
+        done, failed, passed, cost = control.live_rollup(run_id)
+        assert (done, failed, passed) == (2, 0, 1) and abs(cost - 0.30) < 1e-9, (done, failed, passed, cost)
+        control.update_live(run_id, done, failed, passed / done, cost)
+        run = control.get_run(run_id)  # RUN_COLS: …done(10) failed(11) accuracy(12) cost_usd(13)
+        assert run[8] == "queued" and run[10] == 2 and run[12] == 0.5 and abs(run[13] - 0.30) < 1e-9, run
+        print("  [live-rollup] done/passed/cost gauge ✓  written to runs row ✓  get_run cols aligned ✓")
+    finally:
+        _cleanup(run_id)
+
+
 if __name__ == "__main__":
     print("Postgres FOR UPDATE SKIP LOCKED concurrency tests:")
     test_exactly_once()
     test_lease_reclaim()
     test_retry_backoff()
     test_budget_stop()
+    test_live_rollup()
     print("\nALL PASS ✓")

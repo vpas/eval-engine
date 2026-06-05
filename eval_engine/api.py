@@ -98,12 +98,15 @@ def get_run(run_id: str):
     run = control.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
+    # Keep in sync with control.RUN_COLS (explicit select; the table has more columns than we map).
     cols = [
         "id", "eval_id", "eval_version", "model", "provider", "model_id", "harness", "scorers",
-        "status", "total", "done", "failed", "accuracy", "dataset_hash", "created_at", "finished_at",
+        "status", "total", "done", "failed", "accuracy", "cost_usd", "dataset_hash", "created_by",
+        "created_at", "finished_at",
     ]
     meta = dict(zip(cols, run))
-    # live progress from the ledger (empty once finalized/pruned)
+    # live progress from the ledger (empty once finalized/pruned). done/failed/accuracy/cost_usd on the
+    # row are the orchestrator's live rollup (DESIGN §8) — authoritative live *and* final.
     meta["progress"] = control.counts(run_id)
     return meta
 

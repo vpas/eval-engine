@@ -179,6 +179,23 @@ def test_budget_stop():
     print("  [budget] cost gauge ✓  queued→budget_skipped (not failed) ✓  claim-terminal ✓  archived ✓")
 
 
+def test_live_rollup():
+    """The orchestrator's live rollup gauges done/failed/passed/cost from committed rows and writes
+    it onto the runs row (so clients read live progress/score/cost from one place; DESIGN §8)."""
+    run_id = _make_run(4)
+    ids = control.claim_batch(run_id, "W", 2)
+    control.commit_result(run_id, ids[0], {**_fake_result(), "passed": 1, "cost_usd": 0.10})
+    control.commit_result(run_id, ids[1], {**_fake_result(), "passed": 0, "cost_usd": 0.20})
+
+    done, failed, passed, cost = control.live_rollup(run_id)
+    assert (done, failed, passed) == (2, 0, 1) and abs(cost - 0.30) < 1e-9, (done, failed, passed, cost)
+
+    control.update_live(run_id, done, failed, passed / done, cost)
+    run = control.get_run(run_id)  # RUN_COLS: …done(10) failed(11) accuracy(12) cost_usd(13)
+    assert run[8] == "queued" and run[10] == 2 and run[12] == 0.5 and abs(run[13] - 0.30) < 1e-9, run
+    print("  [live-rollup] done/passed/cost gauge ✓  written to runs row ✓  get_run cols aligned ✓")
+
+
 if __name__ == "__main__":
     _use_temp_db()
     print("concurrency tests (ledger claim/commit):")
@@ -186,4 +203,5 @@ if __name__ == "__main__":
     test_lease_reclaim()
     test_retry_backoff()
     test_budget_stop()
+    test_live_rollup()
     print("\nALL PASS ✓")

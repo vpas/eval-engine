@@ -89,9 +89,15 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `fetch_unloaded == []` after drain (no done-but-unloaded row) and analytics fully populated
   pre-finalize; both backends green.
 
-- [ ] **6. Live metrics on the `runs` row.** §8 "Live metrics". Today the orchestrator only admits +
-  finalizes; live progress/cost/score aren't rolled into the `runs` row each tick. *Done when:* the
-  orchestrator writes live status counts + gateway cost + a live score each tick.
+- [x] **6. Live metrics on the `runs` row.** §8 "Live metrics". *Done (2026-06-05):* each tick the
+  orchestrator computes `control.live_rollup` (one-pass done/failed/passed/cost over committed ledger
+  rows) and `update_live` writes done + failed + live accuracy + `cost_usd` onto the `runs` row — so
+  clients read live progress/score/cost from one authoritative place (the runs list now shows live
+  accuracy mid-run, not just at finalize). Added a `cost_usd` column (PG `ALTER … IF NOT EXISTS`;
+  SQLite guarded PRAGMA migration); `finalize_run` persists final cost. Also fixed a latent bug:
+  `get_run` used `SELECT *` mapped positionally, misaligning `created_at`/`finished_at` past the
+  unmapped `spec_json`/`created_by` — now an explicit `RUN_COLS` (kept in sync with `api.get_run`),
+  which also surfaces `cost_usd` + `created_by`. Tested (`test_live_rollup`, both backends).
 
 - [ ] **7. RunSpec reproducibility fields.** §7, §14. Today `RunSpec` lacks `eval@version` pinning,
   **worker image digest**, provider version-fingerprint, `sampling{}`, budget, team. *Done when:* the

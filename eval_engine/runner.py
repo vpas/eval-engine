@@ -310,11 +310,11 @@ def _finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
     cnt = control.counts(run_id)
     done, failed = cnt.get("done", 0), cnt.get("failed", 0)
     budget_skipped = cnt.get("budget_skipped", 0)  # distinct terminal class (not a failure)
-    n, passed, *_ = analytics.run_summary(run_id)
+    n, passed, _mean, _tokens, cost = analytics.run_summary(run_id)
     accuracy = (passed / n) if n else 0.0
     status = "budget_exceeded" if budget_skipped else "completed"
     control.archive_and_prune(run_id)
-    control.finalize_run(run_id, done, failed, accuracy, status=status)
+    control.finalize_run(run_id, done, failed, accuracy, cost_usd=cost, status=status)
     return done, failed, accuracy
 
 
