@@ -33,11 +33,11 @@ def tick() -> None:
         spec = RunSpec.model_validate_json(db.control.get_spec(run_id))
         # Budget cap (DESIGN §8): once committed cost reaches the cap, stop scheduling — convert
         # still-queued samples to the distinct terminal `budget_skipped` (in-flight ones finish).
-        if spec.budget_usd and db.control.run_cost(run_id) >= spec.budget_usd:
-            skipped = db.control.budget_stop(run_id)
-            if skipped:
-                print(f"[orch] {run_id} hit budget ${spec.budget_usd:.4f} → skipped {skipped} queued "
-                      f"(budget_exceeded)", flush=True)
+        # Workers also enforce this (stop claiming early); the orchestrator is the authoritative sweep.
+        skipped = runner._enforce_budget(run_id, spec)
+        if skipped:
+            print(f"[orch] {run_id} hit budget ${spec.budget_usd:.6f} → skipped {skipped} queued "
+                  f"(budget_exceeded)", flush=True)
         total = db.control.run_total(run_id)
         c = db.control.counts(run_id)
         terminal = c.get("done", 0) + c.get("failed", 0) + c.get("budget_skipped", 0)

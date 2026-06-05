@@ -40,6 +40,15 @@ RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0
 RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
 
 
+def _enforce_budget(run_id: str, spec: RunSpec) -> int:
+    """If the run has a budget and committed cost has reached it, skip the still-queued samples
+    (terminal ``budget_skipped``, DESIGN §8). Returns # skipped. Idempotent — safe to call from the
+    worker (stop claiming early) *and* the orchestrator (authoritative sweep) without double-counting."""
+    if spec.budget_usd and control.run_cost(run_id) >= spec.budget_usd:
+        return control.budget_stop(run_id)
+    return 0
+
+
 def _settle_result(run_id: str, sid: str, result: dict | None) -> str:
     """Commit a clean result; retry-with-backoff a *transient* failure — a missing sample
     (``no_result``) or one Inspect recorded an execution error on. A merely low-scoring (wrong but
@@ -267,8 +276,7 @@ def execute(run_id: str, spec: RunSpec) -> None:
             for sid in ids:
                 _settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
             _batch_load(run_id, spec)
-            if spec.budget_usd and control.run_cost(run_id) >= spec.budget_usd:
-                control.budget_stop(run_id)  # cap reached → skip remaining queued (terminal, not failed)
+            _enforce_budget(run_id, spec)  # cap reached → skip remaining queued (terminal, not failed)
             continue
         # Nothing claimable right now. If tasks remain (queued behind a not_before backoff, or
         # running), wait out the backoff and re-claim — don't finalize early. (The distributed path
