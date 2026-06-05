@@ -134,6 +134,18 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [ ] Document `terraform destroy` / scale-to-zero to stop spend between sessions (KEDA covers workers;
       ClickHouse/Redis/LiteLLM/api/orch on the always-on node still cost while up).
 
+### M8 — External access + OIDC (Google)  ◐
+- [x] **ingress-nginx** (Helm) → external LB `35.202.212.111`; host `35-202-212-111.nip.io` (nip.io).
+- [x] **cert-manager** (Helm) + `letsencrypt-prod` ClusterIssuer → TLS cert issued (HTTP-01).
+- [x] **oauth2-proxy** (Google OIDC, `deploy/k8s/61-oauth2-proxy.yaml`) gates the API; allowlist =
+      consent-screen Test Users **and** an emails file (victor.passichenko@…, ravenkklo@…).
+- [x] **Ingress** (`62-ingress.yaml`) on the nip.io host, TLS, all traffic → oauth2-proxy → api.
+- [x] Verified: unauth `/` → 403; `/oauth2/start` → 302 to Google with the right client/redirect.
+- [ ] **Browser login confirmation** (user): sign in at `https://35-202-212-111.nip.io`.
+- [ ] **Follow-on:** API reads `X-Auth-Request-Email` → `created_by` on runs (closes part of D6).
+- Cost: ingress LB ~$18/mo (the external-access tax). The api Service stays ClusterIP — reachable
+  only through the authenticated proxy.
+
 ---
 
 ## 4. Decisions & open questions

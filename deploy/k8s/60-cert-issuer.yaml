@@ -1,0 +1,16 @@
+# Let's Encrypt issuer — HTTP-01 challenge solved through the nginx ingress. Issues the TLS cert for
+# the nip.io host so Google OIDC (which requires HTTPS) works.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: victor.passichenko@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

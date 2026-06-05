@@ -1,0 +1,69 @@
+# oauth2-proxy — Google OIDC gate in front of the API. Unauthenticated requests get redirected to
+# Google; on success it proxies to eval-engine-api and passes X-Auth-Request-Email upstream.
+# Access is restricted two ways: the Google consent screen's Test Users AND the emails file below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth2-proxy-emails
+  namespace: eval-engine
+data:
+  emails: |
+    victor.passichenko@gmail.com
+    ravenkklo@gmail.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: eval-engine
+  labels: { app: oauth2-proxy }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: oauth2-proxy } }
+  template:
+    metadata:
+      labels: { app: oauth2-proxy }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+          args:
+            - --provider=google
+            - --email-domain=*
+            - --authenticated-emails-file=/etc/oauth2-proxy/emails
+            - --upstream=http://eval-engine-api:8077
+            - --http-address=0.0.0.0:4180
+            - --redirect-url=https://35-202-212-111.nip.io/oauth2/callback
+            - --cookie-secure=true
+            - --reverse-proxy=true
+            - --set-xauthrequest=true
+            - --cookie-csrf-per-request=true
+            - --cookie-csrf-expire=5m
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: client-id } }
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: client-secret } }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: cookie-secret } }
+          ports:
+            - { name: http, containerPort: 4180 }
+          volumeMounts:
+            - { name: emails, mountPath: /etc/oauth2-proxy/emails, subPath: emails }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+      volumes:
+        - name: emails
+          configMap: { name: oauth2-proxy-emails }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: eval-engine
+spec:
+  selector: { app: oauth2-proxy }
+  ports:
+    - { name: http, port: 4180, targetPort: 4180 }
