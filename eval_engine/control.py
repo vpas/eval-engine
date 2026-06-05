@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers TEXT, status TEXT, total INT, done INT, failed INT,
   accuracy REAL, cost_usd REAL DEFAULT 0, dataset_hash TEXT, spec_json TEXT, created_by TEXT,
-  created_at TEXT, finished_at TEXT);
+  team TEXT, image_digest TEXT, created_at TEXT, finished_at TEXT);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -47,10 +47,13 @@ def _con() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=5000")
     con.executescript(SCHEMA)
-    # Idempotent migration for dev DBs created before cost_usd existed (SQLite lacks ADD COLUMN IF
-    # NOT EXISTS). Cheap PRAGMA check; mirrors the Postgres ALTER ... IF NOT EXISTS migration.
-    if "cost_usd" not in {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}:
-        con.execute("ALTER TABLE runs ADD COLUMN cost_usd REAL DEFAULT 0")
+    # Idempotent migrations for dev DBs predating these columns (SQLite lacks ADD COLUMN IF NOT
+    # EXISTS). Cheap PRAGMA check; mirrors the Postgres ALTER ... IF NOT EXISTS migrations.
+    have = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
+    for col, ddl in (("cost_usd", "cost_usd REAL DEFAULT 0"), ("team", "team TEXT"),
+                     ("image_digest", "image_digest TEXT")):
+        if col not in have:
+            con.execute(f"ALTER TABLE runs ADD COLUMN {ddl}")
     return con
 
 
@@ -76,13 +79,14 @@ def create_run(meta: dict) -> None:
     con = _con()
     con.execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,accuracy,dataset_hash,spec_json,created_by,created_at,finished_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "status,total,done,failed,accuracy,dataset_hash,spec_json,created_by,team,image_digest,"
+        "created_at,finished_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
             meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), "queued",
             meta["total"], 0, 0, None, meta["dataset_hash"], meta.get("spec_json"),
-            meta.get("created_by"), _now(), None,
+            meta.get("created_by"), meta.get("team"), meta.get("image_digest"), _now(), None,
         ),
     )
     con.commit()
@@ -170,7 +174,8 @@ def list_runs():
 
 # Explicit column order (NOT SELECT * — must match api.get_run; the table also has spec_json/created_by).
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
-            "done, failed, accuracy, cost_usd, dataset_hash, created_by, created_at, finished_at")
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, "
+            "created_at, finished_at")
 
 
 def get_run(run_id: str):

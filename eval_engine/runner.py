@@ -35,6 +35,10 @@ _gcs_client = None
 # Per-sample retry policy (FR5, ORCHESTRATION §7). A transient sample failure re-queues with
 # exponential `not_before` backoff up to MAX_ATTEMPTS, then goes terminal `failed`. The claim already
 # increments attempts; backoff keeps a poison sample from head-of-line blocking the queue.
+# Reproducibility pin (DESIGN §14): the worker image/code ref, baked at build time (Dockerfile ARG
+# GIT_SHA → this env) and recorded on every run so a run's inputs include the exact code that ran it.
+IMAGE_DIGEST = os.environ.get("EVAL_ENGINE_IMAGE_DIGEST", "dev")
+
 MAX_ATTEMPTS = int(os.environ.get("EVAL_ENGINE_MAX_ATTEMPTS", "3"))
 RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0"))
 RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
@@ -290,12 +294,14 @@ def launch(spec: RunSpec, created_by: str | None = None) -> str:
 
     run_id = control.new_run_id()
     control.create_run({
-        "id": run_id, "eval_id": spec.eval, "eval_version": 1, "model": spec.model,
+        "id": run_id, "eval_id": spec.eval, "eval_version": spec.eval_version, "model": spec.model,
         "provider": provider, "model_id": model_id, "harness": spec.harness.type,
         "scorers": [s.type for s in spec.scorers], "total": len(samples_by_id),
         "dataset_hash": dataset_hash,
         "spec_json": spec.model_dump_json(),  # so a separate worker/orchestrator can rehydrate it
         "created_by": created_by,             # authenticated email (OIDC proxy header), attribution
+        "team": spec.team,                    # ownership (tenancy-ready; enforcement deferred)
+        "image_digest": IMAGE_DIGEST,         # repro pin: the worker code/image that ran this (§14)
     })
     control.expand_tasks(
         run_id,

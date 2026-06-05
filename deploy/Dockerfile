@@ -32,6 +32,12 @@ COPY examples/ ./examples/
 COPY deploy/sandbox/ ./deploy/sandbox/
 RUN pip install -e '.[postgres,openrouter,gcs,k8s]' --no-deps
 
+# Reproducibility pin (DESIGN §14): stamp the build's git SHA so every run records the exact worker
+# code that produced it. Placed late so changing it only rebuilds this tiny layer (deps/code cached).
+# Pass at build time: `docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) …`.
+ARG GIT_SHA=dev
+ENV EVAL_ENGINE_IMAGE_DIGEST=$GIT_SHA
+
 EXPOSE 8077
 
 # Default role = control-plane API. Override `command` for the orchestrator / worker.

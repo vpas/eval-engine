@@ -30,10 +30,13 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
   accuracy DOUBLE PRECISION, cost_usd DOUBLE PRECISION DEFAULT 0, dataset_hash TEXT, spec_json TEXT,
-  created_by TEXT, created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
+  created_by TEXT, team TEXT, image_digest TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
 -- idempotent migrations for tables created before these columns existed
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS team TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS image_digest TEXT;  -- repro pin: worker code/image (DESIGN §14)
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -99,11 +102,12 @@ def new_run_id() -> str:
 def create_run(meta: dict) -> None:
     _conn().execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,dataset_hash,spec_json,created_by) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s)",
+        "status,total,done,failed,dataset_hash,spec_json,created_by,team,image_digest) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s,%s,%s)",
         (meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
          meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), meta["total"],
-         meta["dataset_hash"], meta.get("spec_json"), meta.get("created_by")),
+         meta["dataset_hash"], meta.get("spec_json"), meta.get("created_by"),
+         meta.get("team"), meta.get("image_digest")),
     )
 
 
@@ -170,7 +174,8 @@ def list_runs():
 # Explicit column order for get_run (NOT SELECT * — the table has spec_json/created_by the API doesn't
 # map, so positional SELECT * would misalign created_at/finished_at). Keep in sync with api.get_run.
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
-            "done, failed, accuracy, cost_usd, dataset_hash, created_by, created_at, finished_at")
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, "
+            "created_at, finished_at")
 
 
 def get_run(run_id: str):

@@ -12,10 +12,12 @@ class PluginRef(BaseModel):
 
 class RunSpec(BaseModel):
     eval: str
+    eval_version: int = 1          # pin eval@version (DESIGN §7 — the eval is a versioned bundle)
     dataset: str
     model: str = "mockllm/model"
     harness: PluginRef
     scorers: list[PluginRef]
+    team: str | None = None        # ownership (DESIGN §7) — tenancy enforcement is deferred (FUTURE.md §9)
     limit: int | None = None
     batch_size: int = 50  # ledger claim batch (worker grabs this many sample-tasks at a time)
     # Sampling for statistical comparability (DESIGN §14, FR8). epochs = repeat each sample N times

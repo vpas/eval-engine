@@ -28,6 +28,10 @@ def test_worker_orchestrator_split():
     assert run_id in db.control.active_runs(("queued",))
     assert db.control.run_total(run_id) == 3
 
+    # reproducibility pins recorded on the run (DESIGN §14). RUN_COLS: eval_version(2), image_digest(17)
+    rr = db.control.get_run(run_id)
+    assert rr[2] == 1 and rr[17] is not None, f"repro pins not recorded: eval_version={rr[2]} image={rr[17]}"
+
     # 2) orchestrator admits queued → running
     orchestrator.tick()
     assert run_id in db.control.active_runs(("running",))

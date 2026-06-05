@@ -99,9 +99,21 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   unmapped `spec_json`/`created_by` — now an explicit `RUN_COLS` (kept in sync with `api.get_run`),
   which also surfaces `cost_usd` + `created_by`. Tested (`test_live_rollup`, both backends).
 
-- [ ] **7. RunSpec reproducibility fields.** §7, §14. Today `RunSpec` lacks `eval@version` pinning,
-  **worker image digest**, provider version-fingerprint, `sampling{}`, budget, team. *Done when:* the
-  RunSpec pins inputs per §14 and they're recorded on the run.
+- [x] **7. RunSpec reproducibility fields.** §7, §14. *Done (2026-06-05):* `RunSpec.eval_version`
+  (pin eval@version, recorded on the run instead of the old hardcoded `1`), `RunSpec.team` (ownership,
+  tenancy-ready; enforcement deferred), and a **worker image/code pin** — the Dockerfile stamps the
+  build's git SHA (`ARG GIT_SHA` → `ENV EVAL_ENGINE_IMAGE_DIGEST`, built with
+  `--build-arg GIT_SHA=$(git rev-parse --short HEAD)`), which `runner` records as `image_digest` on
+  every run. New `team`/`image_digest` columns (PG + SQLite migrations); surfaced in `GET /runs/{id}`.
+  `sampling{epochs,temperature,seed}` (#4) and `budget` (#3) already landed, and `dataset_hash` was
+  already pinned — so a run's inputs are now pinned per §14. **Partial:** the per-call provider
+  version-fingerprint (e.g. OpenAI `system_fingerprint`) isn't recorded — Inspect's `ModelOutput`
+  doesn't surface it cleanly; capturing it needs digging into the raw provider response (left as a
+  documented follow-up). Tested (`test_distributed` asserts the pins are recorded).
+
+---
+
+> **Tier 1 (core mechanisms) complete.** Next up: Tier 2 platform surface (#8–#13).
 
 ### Tier 2 — platform surface (FR1–3, FR10)
 
