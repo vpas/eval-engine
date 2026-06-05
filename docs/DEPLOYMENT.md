@@ -109,29 +109,30 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - Deferred to a later pass (not needed for the QA e2e): the `run:<id>:stop` Redis flag (cancel/budget),
   two-lane admission + per-run cap, live-metrics on the `runs` row.
 
-### M4 — Model gateway (LiteLLM)  ☐
-- [ ] LiteLLM Deployment + Service `litellm:4000`, configured to proxy **OpenRouter** (key from the
-      `openrouter` Secret), with **Redis-backed** global rate limit + per-`run_id` cost tracking.
-- [ ] Point workers' model calls at the gateway (`OPENAI_BASE_URL`/LiteLLM route) instead of calling
-      OpenRouter directly — so the gateway is the canonical cost source (`DESIGN.md` §8).
-- [ ] Smoke: one model call through the gateway returns + is counted.
+### M4 — Model gateway (LiteLLM)  ☑
+- [x] LiteLLM Deployment + Service `litellm:4000` (`deploy/k8s/30-litellm.yaml`) proxying **OpenRouter**
+      (key from the `openrouter` secret), **Redis-backed**. (Bumped mem to 2.5Gi — OOMKilled at 1Gi.)
+- [x] Workers call the gateway OpenAI-compatible (`OPENAI_BASE_URL=http://litellm:4000/v1`); a run with
+      `model: openai/llama-3.1-8b` routes worker → LiteLLM → OpenRouter.
+- [ ] **Deferred (A5):** wire the gateway's per-`run_id` cost tally into analytics. Today `cost_usd=0`
+      in our table for gateway calls (the worker only self-prices `openrouter/*` direct calls).
 
-### M5 — Workers + KEDA  ☐
-- [ ] Worker Deployment on the spot pool (toleration for `eval-engine/worker`, nodeSelector
-      `eval-engine/role=worker`), replicas 0.
-- [ ] Install KEDA (Helm). `ScaledObject` with the **PostgreSQL scaler** on
-      `count(*) FROM sample_tasks WHERE status='queued'` + a `maxReplicas` cap.
-- [ ] Verify: launching a run scales workers 0→N, draining scales back to 0.
+### M5 — Workers + KEDA  ◐
+- [x] Worker Deployment on the spot pool (`deploy/k8s/50-worker.yaml`) — scheduling it autoscaled the
+      pool **0→1** (verified).
+- [ ] Install KEDA (Helm) + a `ScaledObject` (PostgreSQL scaler on `count(*) … WHERE status='queued'`
+      + `maxReplicas`) so workers (and the spot node) scale to **0** when idle. Today: manual `replicas`.
 
-### M6 — QA e2e  ☐
-- [ ] Seed one QA eval + dataset (reuse `examples/capitals_openrouter.yaml` shape) via the API.
-- [ ] Launch a run; watch the `runs` row progress + live score; workers spin up on spot; results
-      land in ClickHouse; ledger prunes to 0 on finalize.
-- [ ] Read accuracy/cost back (canned CH query). **This is the milestone.**
+### M6 — QA e2e  ☑
+- [x] **Mock run** through the full path: api→Neon ledger→spot worker→ClickHouse→finalize (1/3, ledger
+      pruned).
+- [x] **Real run through the gateway**: `openai/llama-3.1-8b` → LiteLLM → OpenRouter, **3/3 = 100%**,
+      74 real tokens, ledger pruned. **Milestone met.**
 
-### M7 — Access & teardown  ☐
-- [ ] `kubectl port-forward` the API/dashboard for a look (no LoadBalancer).
-- [ ] Document `terraform destroy` / scale-to-zero to stop spend between sessions.
+### M7 — Access & teardown  ◐
+- [x] `kubectl port-forward svc/eval-engine-api 8077:8077` to launch/read runs (no LoadBalancer).
+- [ ] Document `terraform destroy` / scale-to-zero to stop spend between sessions (KEDA covers workers;
+      ClickHouse/Redis/LiteLLM/api/orch on the always-on node still cost while up).
 
 ---
 
