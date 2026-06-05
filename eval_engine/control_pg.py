@@ -225,6 +225,18 @@ def retry_or_fail(run_id: str, sample_id: str, error_type: str, max_attempts: in
     return "retry"
 
 
+def attempts_for(run_id: str, sample_ids: list[str]) -> dict[str, int]:
+    """The current attempt count per still-claimed sample — the ReplacingMergeTree version for the
+    analytics insert (read while the row is ``running``, before the ack-before-flip commit)."""
+    if not sample_ids:
+        return {}
+    rows = _conn().execute(
+        "SELECT sample_id, attempts FROM sample_tasks WHERE run_id=%s AND sample_id = ANY(%s)",
+        (run_id, list(sample_ids)),
+    ).fetchall()
+    return {sid: int(a or 1) for sid, a in rows}
+
+
 def run_cost(run_id: str) -> float:
     """Committed cost-so-far (sum over ``done`` ledger rows) — the live budget gauge during a run."""
     row = _conn().execute(

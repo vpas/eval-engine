@@ -36,6 +36,11 @@ def test_worker_orchestrator_split():
     processed = worker._drain_run(run_id)
     assert processed == 3, f"expected 3 processed, got {processed}"
 
+    # ack-before-flip invariant (DESIGN §8): every 'done' row is ALREADY durable in analytics — the
+    # insert precedes the flip, so there are no done-but-unloaded rows (done ⟹ durable).
+    assert db.control.fetch_unloaded(run_id) == [], "done rows not loaded — ack-before-flip violated"
+    assert db.analytics.run_summary(run_id)[0] == 3, "analytics missing rows before finalize"
+
     # 4) orchestrator finalizes: aggregate → archive → prune → completed
     orchestrator.tick()
     run = db.control.get_run(run_id)

@@ -33,10 +33,8 @@ def _drain_run(run_id: str) -> int:
         if not ids:
             return processed
         results = runner._execute_batch(spec, run_id, samples_by_id, ids)
-        for sid in ids:
-            runner._settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
-        runner._batch_load(run_id, spec, ids)  # load only our shard (no loader race)
-        runner._enforce_budget(run_id, spec)   # stop claiming early once the run's budget is spent
+        # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
+        runner._commit_batch(spec, run_id, samples_by_id, ids, results)
         processed += len(ids)
 
 

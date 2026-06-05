@@ -136,6 +136,39 @@ def _model_for(spec: RunSpec, n: int):
     return get_model(spec.model)
 
 
+def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str],
+                  results: dict[str, dict]) -> None:
+    """Ack-before-flip commit (DESIGN §8, ORCHESTRATION §5). For each clean result: durably insert to
+    analytics FIRST, **then** flip its ledger row to ``done`` (+``loaded``). Invariant: ``done`` ⟹ the
+    result is durable in ClickHouse, so a crash never leaves a ``done`` row missing from analytics — a
+    row that crashes *after* the insert but *before* the flip stays ``running``, is re-claimed, and the
+    re-insert (higher ``attempt`` = newer ReplacingMergeTree version) wins. Missing/errored samples
+    route to retry-with-backoff; budget is enforced after."""
+    good = {sid: r for sid in ids
+            if (r := results.get(sid)) is not None and not r.get("error_type")}
+    if good:
+        attempts = control.attempts_for(run_id, list(good))  # ledger version for ReplacingMergeTree
+        provider, model_id = _split_model(spec.model)
+        fin = datetime.datetime.utcnow()
+        tuples = []
+        for sid, r in good.items():
+            gk = (samples_by_id[sid].metadata or {}).get("category", "") if sid in samples_by_id else ""
+            tuples.append((
+                run_id, sid, spec.eval, 1, provider, model_id, spec.harness.type, gk or "",
+                r["passed"], r["primary_score"], json.dumps(r["scores"]), r["tokens_in"],
+                r["tokens_out"], r["cost_usd"], r["latency_ms"], attempts.get(sid, 1),
+                r["error_type"] or "", r["transcript_uri"] or "", "none", fin,
+            ))
+        analytics.insert(tuples)                        # (1) DURABLE insert — happens BEFORE the flip
+        for sid, r in good.items():
+            control.commit_result(run_id, sid, r)       # (2) now flip the ledger row to 'done'
+        control.mark_loaded(run_id, list(good))         #     done ⟹ loaded ⟹ durable in analytics
+    for sid in ids:
+        if sid not in good:
+            _settle_result(run_id, sid, results.get(sid))  # missing/errored → retry-with-backoff
+    _enforce_budget(run_id, spec)
+
+
 def _put_transcript(run_id: str, sample_id: str, payload: dict) -> str:
     """Persist a transcript; return its URI. GCS (gs://…) in-cluster, local file in dev."""
     body = json.dumps(payload, ensure_ascii=False)
@@ -296,10 +329,8 @@ def execute(run_id: str, spec: RunSpec) -> None:
         ids = control.claim_batch(run_id, worker, spec.batch_size)
         if ids:
             results = _execute_batch(spec, run_id, samples_by_id, ids)
-            for sid in ids:
-                _settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
-            _batch_load(run_id, spec)
-            _enforce_budget(run_id, spec)  # cap reached → skip remaining queued (terminal, not failed)
+            # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
+            _commit_batch(spec, run_id, samples_by_id, ids, results)
             continue
         # Nothing claimable right now. If tasks remain (queued behind a not_before backoff, or
         # running), wait out the backoff and re-claim — don't finalize early. (The distributed path

@@ -79,10 +79,15 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   CI(50/100)=[0.404,0.596]. Caveat: per-sample cost reflects the reduced sample, so epoch cost is
   approximate (the canonical gateway tally is the deferred "A5").
 
-- [ ] **5. Commit protocol: ack-before-flip.** §8, `ORCHESTRATION.md` §5. Today the order is reversed
-  (`worker.py`: `commit_result` flips ledger `done`, *then* `_batch_load` inserts to ClickHouse).
-  Design invariant: durable CH ack **then** flip `done`, so `done ⟹ durable`. *Done when:* per-sample
-  ordering is transcript→S3 → CH insert w/ durable ack → flip `done`.
+- [x] **5. Commit protocol: ack-before-flip.** §8, `ORCHESTRATION.md` §5. *Done (2026-06-05):* new
+  `runner._commit_batch` (used by `worker._drain_run` + `runner.execute`) inserts each clean result to
+  ClickHouse **first** (synchronous = durable ack), **then** flips the ledger row to `done` (+`loaded`).
+  Invariant: `done ⟹ result durable in analytics`. A crash after the insert but before the flip leaves
+  the row `running` → re-claimed → re-inserted with a higher `attempt` (ReplacingMergeTree version) so
+  the retry wins; `done` rows are never missing from CH. `control.attempts_for` reads the ledger
+  version before the flip; transcript write already precedes both. Tested: distributed run asserts
+  `fetch_unloaded == []` after drain (no done-but-unloaded row) and analytics fully populated
+  pre-finalize; both backends green.
 
 - [ ] **6. Live metrics on the `runs` row.** §8 "Live metrics". Today the orchestrator only admits +
   finalizes; live progress/cost/score aren't rolled into the `runs` row each tick. *Done when:* the
