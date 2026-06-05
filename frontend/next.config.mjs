@@ -10,6 +10,7 @@ const VIEWER = process.env.VIEWER_URL || "http://inspect-view:7575";
 const nextConfig = {
   output: "standalone",
   reactStrictMode: true,
+  skipTrailingSlashRedirect: true, // we manage /inspect vs /inspect/ ourselves (avoid a redirect loop)
   async redirects() {
     // ensure the trailing slash so the viewer's relative URLs (./assets, api/logs) resolve under /inspect/
     return [{ source: "/inspect", destination: "/inspect/", permanent: false }];
