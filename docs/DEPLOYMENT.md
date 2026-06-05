@@ -140,7 +140,26 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [ ] Document `terraform destroy` / scale-to-zero to stop spend between sessions (KEDA covers workers;
       ClickHouse/Redis/LiteLLM/api/orch on the always-on node still cost while up).
 
-### M8 — External access + OIDC (Google)  ◐
+### M9 — Leader-election + transcripts to GCS  ☑
+- [x] Orchestrator leader-election (Postgres advisory lock; safe for >1 replica).
+- [x] Transcripts → GCS bucket when `EVAL_ENGINE_GCS_BUCKET` set; `GET /transcript` serves them;
+      node SA granted `storage.objectAdmin`. Verified write+read in-cluster.
+
+### M10 — Next.js dashboard  ☑
+- [x] `frontend/` — Next.js App Router app (dark lab-instrument theme): runs list (stats, status
+      pills, accuracy bars), run detail (metrics, category bars, samples + transcript drill-in),
+      launch drawer from `/catalog`. Proxies `/api/*` → eval-engine-api; `/api/me` shows the OIDC user.
+- [x] `deploy/k8s/80-frontend.yaml`; oauth2-proxy upstream rewired → the frontend (inherits Google
+      auth + forwards `X-Auth-Request-Email`). Verified serving + proxy + still-gated through the ingress.
+
+### Canonical A5 (gateway cost tally) — DEFERRED (documented)
+The pragmatic A5 (real `cost_usd` from the OpenRouter catalog the gateway fronts) is done and correct.
+The *canonical* form (gateway's own per-`run_id` spend as the source) needs a LiteLLM spend-DB +
+tagging every request with `run_id` threaded through Inspect's model call (not cleanly exposed) +
+a finalize-time query. Larger change, uncertain payoff here (worker-catalog price == gateway price),
+so it stays deferred.
+
+### M8 — External access + OIDC (Google)  ☑
 - [x] **ingress-nginx** (Helm) → external LB `35.202.212.111`; host `35-202-212-111.nip.io` (nip.io).
 - [x] **cert-manager** (Helm) + `letsencrypt-prod` ClusterIssuer → TLS cert issued (HTTP-01).
 - [x] **oauth2-proxy** (Google OIDC, `deploy/k8s/61-oauth2-proxy.yaml`) gates the API; allowlist =
