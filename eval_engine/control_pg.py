@@ -97,6 +97,35 @@ def leader_alive() -> bool:
         return False
 
 
+def release_leader(key: int) -> None:
+    """Graceful handover: explicitly release the advisory lock + close the connection. On pooled PG
+    (pgbouncer) merely closing the client connection returns the SERVER connection to the pool with the
+    session lock still held — so we must ``pg_advisory_unlock`` first. Called from the orchestrator's
+    SIGTERM handler so a rollout hands leadership over in ~1s instead of stalling (bug B1)."""
+    global _leader_con
+    try:
+        if _leader_con is not None and not _leader_con.closed:
+            _leader_con.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            _leader_con.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def reap_stale_leader(key: int, idle_seconds: float = 20.0) -> int:
+    """Backstop for an UNgraceful leader death (SIGKILL/OOM/node loss) where SIGTERM never ran: a dead
+    orchestrator's pooled connection lingers idle holding the lock, so the standby never gets it. A
+    LIVE leader refreshes its lock connection every tick (``leader_alive`` SELECT 1), so it never idles
+    this long — making idle>threshold a safe 'crashed' signal. Terminates such a holder; returns # reaped."""
+    classid, objid = key >> 32, key & 0xFFFFFFFF
+    rows = _conn().execute(
+        "SELECT pg_terminate_backend(l.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+        "WHERE l.locktype='advisory' AND l.granted AND l.classid=%s AND l.objid=%s "
+        "AND a.state='idle' AND a.state_change < now() - make_interval(secs => %s)",
+        (classid, objid, idle_seconds),
+    ).fetchall()
+    return len(rows)
+
+
 def init() -> None:
     global _init_done
     if not _init_done:

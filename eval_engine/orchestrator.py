@@ -15,6 +15,8 @@ Everything is idempotent: a crash mid-finalize just re-runs the (no-op-on-reentr
 from __future__ import annotations
 
 import os
+import signal
+import sys
 import time
 
 from . import db, runner
@@ -22,6 +24,7 @@ from .models import RunSpec
 
 TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
 LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
+STALE_LEADER_SECONDS = float(os.environ.get("EVAL_ENGINE_STALE_LEADER_SECONDS", "20"))
 
 
 def tick() -> None:
@@ -51,13 +54,27 @@ def tick() -> None:
             print(f"[orch] finalized {run_id}: done={done} failed={failed} acc={acc:.3f}", flush=True)
 
 
+def _graceful_shutdown(*_) -> None:
+    """SIGTERM (k8s pod delete / rollout): release the leader lock so the next pod takes over in ~1s
+    instead of stalling until our pooled connection times out (bug B1)."""
+    print("[orch] SIGTERM — releasing leadership", flush=True)
+    db.control.release_leader(LEADER_KEY)
+    sys.exit(0)
+
+
 def main() -> None:
     db.init()
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
     # Leader election: block as a standby until we hold the advisory lock, so running >1 orchestrator
-    # replica is safe (only the leader ticks). A standby takes over when the leader's lock releases.
+    # replica is safe (only the leader ticks). A standby takes over when the leader's lock releases —
+    # either gracefully (SIGTERM handover) or, if the old leader died ungracefully, by reaping its
+    # lingering pooled connection once it's been idle past the threshold (bug B1).
     while not db.control.acquire_leader(LEADER_KEY):
+        if db.control.reap_stale_leader(LEADER_KEY, STALE_LEADER_SECONDS):
+            print("[orch] reaped a stale leader (lingering lock) — retrying for leadership", flush=True)
+            continue
         print("[orch] standby — another orchestrator holds leadership", flush=True)
-        time.sleep(10)
+        time.sleep(5)
     print(f"[orch] up, leader (backend={db.BACKEND})", flush=True)
     while True:
         if not db.control.leader_alive():

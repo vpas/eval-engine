@@ -183,15 +183,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 
 ## Bugs found during the backlog work (not in the original gap analysis)
 
-- [ ] **B1. Orchestrator leader-election stalls on every rollout (pooled Postgres).** The leader is a
-  session-scoped Postgres advisory lock (`acquire_leader`). On a managed/pooled PG (Neon + pgbouncer),
-  a killed orchestrator pod's connection **lingers idle** and keeps holding the lock, so the new pod
-  sits in `standby` and **nothing finalizes / no live metrics** until the old connection times out
-  (minutes). Observed 2026-06-05: a deploy left the MC run stuck `running` with all samples `done`;
-  manually `pg_terminate_backend`-ing the idle lock holder let the new orch take over and finalize.
-  *Fix:* on standby, detect + terminate a stale leader (idle lock holder past a threshold) before
-  contending — or move to a heartbeat/TTL lease instead of a raw session advisory lock. Until then,
-  the manual mitigation is to terminate the idle advisory-lock backend after an orchestrator rollout.
+- [x] **B1. Orchestrator leader-election stalls on every rollout (pooled Postgres).** *Fixed
+  (2026-06-05):* two-part handover. (1) A SIGTERM handler (`_graceful_shutdown` → `release_leader`)
+  `pg_advisory_unlock`s before the pod exits — so a rollout hands leadership over in ~1s (merely
+  closing the client conn doesn't release the lock through pgbouncer; the explicit unlock does).
+  (2) For an *ungraceful* death (SIGKILL/OOM/node loss) where SIGTERM never ran, the standby loop
+  `reap_stale_leader`s — terminates the lock holder once it's been idle past `STALE_LEADER_SECONDS`
+  (20s; a live leader refreshes its lock connection every 2s tick via `leader_alive`, so idle>20s is a
+  safe "crashed" signal). Both no-ops on the single-process SQLite backend.
 
 ## Explicitly out of scope (deferred — see `docs/FUTURE.md`)
 

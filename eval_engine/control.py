@@ -76,6 +76,14 @@ def leader_alive() -> bool:
     return True
 
 
+def release_leader(key: int) -> None:
+    return None  # no-op: single-process, no advisory lock to release
+
+
+def reap_stale_leader(key: int, idle_seconds: float = 20.0) -> int:
+    return 0  # no-op: single-process, no contention
+
+
 def _now() -> str:
     return datetime.datetime.utcnow().isoformat(timespec="seconds")
 
