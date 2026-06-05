@@ -16,8 +16,11 @@ const nextConfig = {
   async rewrites() {
     return {
       afterFiles: [
-        { source: "/api/:path*", destination: `${BACKEND}/:path*` },
+        // our app talks to /be/* (the Inspect viewer owns absolute /api/*, so we ceded it)
+        { source: "/be/:path*", destination: `${BACKEND}/:path*` },
+        // the Inspect viewer: html+assets under /inspect/, but its data calls are ABSOLUTE /api/*
         { source: "/inspect/:path*", destination: `${VIEWER}/:path*` },
+        { source: "/api/:path*", destination: `${VIEWER}/api/:path*` },
       ],
     };
   },

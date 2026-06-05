@@ -1,4 +1,4 @@
-// Typed client for the eval-engine backend (proxied at /api/*).
+// Typed client for the eval-engine backend (proxied at /be/*).
 
 export type Run = {
   id: string;
@@ -35,13 +35,13 @@ const j = async (r: Response) => {
   return r.json();
 };
 
-export const getRuns = (): Promise<Run[]> => fetch("/api/runs", { cache: "no-store" }).then(j);
-export const getRun = (id: string): Promise<RunDetail> => fetch(`/api/runs/${id}`, { cache: "no-store" }).then(j);
-export const getResults = (id: string): Promise<Results> => fetch(`/api/runs/${id}/results`, { cache: "no-store" }).then(j);
-export const getCatalog = (): Promise<Plugin[]> => fetch("/api/catalog", { cache: "no-store" }).then(j);
-export const getMe = (): Promise<{ email: string | null }> => fetch("/api/me", { cache: "no-store" }).then(j);
+export const getRuns = (): Promise<Run[]> => fetch("/be/runs", { cache: "no-store" }).then(j);
+export const getRun = (id: string): Promise<RunDetail> => fetch(`/be/runs/${id}`, { cache: "no-store" }).then(j);
+export const getResults = (id: string): Promise<Results> => fetch(`/be/runs/${id}/results`, { cache: "no-store" }).then(j);
+export const getCatalog = (): Promise<Plugin[]> => fetch("/be/catalog", { cache: "no-store" }).then(j);
+export const getMe = (): Promise<{ email: string | null }> => fetch("/be/me", { cache: "no-store" }).then(j);
 export const getTranscript = (uri: string): Promise<string> =>
-  fetch(`/api/transcript?uri=${encodeURIComponent(uri)}`, { cache: "no-store" }).then((r) => r.text());
+  fetch(`/be/transcript?uri=${encodeURIComponent(uri)}`, { cache: "no-store" }).then((r) => r.text());
 
 export type LaunchSpec = {
   eval: string;
@@ -54,7 +54,7 @@ export type LaunchSpec = {
 };
 
 export const launchRun = (spec: LaunchSpec): Promise<{ run_id: string; status: string }> =>
-  fetch("/api/runs", {
+  fetch("/be/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(spec),
