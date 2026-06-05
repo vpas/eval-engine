@@ -8,9 +8,12 @@ metadata:
 data:
   config.yaml: |
     model_list:
-      - model_name: llama-3.1-8b
+      # wildcard passthrough: the worker sends e.g. "meta-llama/llama-3.1-8b-instruct" (the openai/
+      # prefix is stripped by Inspect's provider) and we route it to openrouter/<that model>. Keeping
+      # the real model id lets the worker price the call from the OpenRouter catalog.
+      - model_name: "*"
         litellm_params:
-          model: openrouter/meta-llama/llama-3.1-8b-instruct
+          model: openrouter/*
           api_key: os.environ/OPENROUTER_API_KEY
     litellm_settings:
       drop_params: true

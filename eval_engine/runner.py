@@ -56,11 +56,15 @@ def _openrouter_prices() -> dict[str, tuple[float, float]]:
 
 
 def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Cost from tokens × catalog price. Prototype stand-in for the LiteLLM gateway, which is the
-    design's source-of-truth for cost (per-run hard-cap attribution). Only openrouter/* priced here."""
-    if not model.startswith("openrouter/"):
+    """Cost from tokens × OpenRouter catalog price. Prices both **direct** ``openrouter/<id>`` and
+    **gateway** ``openai/<id>`` calls: in this deployment the LiteLLM gateway fronts OpenRouter at the
+    same catalog price, so ``openai/<id>`` == ``openrouter/<id>`` in dollar terms (the gateway routes
+    ``*`` → ``openrouter/*``). The production-canonical cost is the gateway's own per-``run_id`` tally
+    (DESIGN §8 / A5); querying that at finalize is the deferred refinement — see docs/DEPLOYMENT.md."""
+    prefix, _, mid = model.partition("/")
+    if prefix not in ("openrouter", "openai") or not mid:
         return 0.0
-    prompt, completion = _openrouter_prices().get(model.split("/", 1)[1], (0.0, 0.0))
+    prompt, completion = _openrouter_prices().get(mid, (0.0, 0.0))
     return tokens_in * prompt + tokens_out * completion
 
 
