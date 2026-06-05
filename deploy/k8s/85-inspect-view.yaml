@@ -13,6 +13,7 @@ spec:
     metadata:
       labels: { app: inspect-view }
     spec:
+      enableServiceLinks: false   # k8s injects INSPECT_VIEW_PORT=tcp://… which collides with --port
       nodeSelector: { eval-engine/role: system }
       containers:
         - name: inspect-view

@@ -152,6 +152,25 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] `deploy/k8s/80-frontend.yaml`; oauth2-proxy upstream rewired → the frontend (inherits Google
       auth + forwards `X-Auth-Request-Email`). Verified serving + proxy + still-gated through the ingress.
 
+### M11 — Inspect log viewer (rich trace UI)  ☑
+- [x] Workers write Inspect `.eval` logs to `gs://<bucket>/eval-logs` (gcsfs); `deploy/k8s/85-inspect-view.yaml`
+      runs `inspect view start` over them (`enableServiceLinks:false` — the `INSPECT_VIEW_PORT` service-link
+      env collided with `--port`). Verified serving (`Inspect View: gs://…/eval-logs · :7575`).
+- Access (until ingress-integrated): `kubectl -n eval-engine port-forward svc/inspect-view 7575:7575` → http://localhost:7575.
+
+### Agentic / K8s sandbox in-cluster — SCAFFOLDED, blocked on cluster setup (documented)
+Built the whole path: image has **helm 3.16 + inspect-k8s-sandbox**; harness `sandbox: k8s`;
+`deploy/k8s/90-sandbox-rbac.yaml` (eval-sandbox ns + worker SA + Role incl. `cilium.io`); a values
+override (`deploy/sandbox/k8s-agent-env-values.yaml`). Fixed **3 blockers** the `agent-env` chart assumes
+(it targets GKE **Dataplane-V2/Cilium** + GKE **Sandbox/gVisor**): the `CiliumNetworkPolicy` CRD, the
+`cilium.io` RBAC, and `runtimeClassName: CLUSTER_DEFAULT` (no gVisor pool) — after which **`helm install`
++ a real sandbox pod were created**. A 4th blocker remains in the worker (the Python k8s client's
+in-cluster config: `ConfigException: No configuration found`). **The clean path is a cluster built for it**
+— GKE Dataplane-V2 + a GKE-Sandbox (gVisor) node pool (terraform `datapath_provider=ADVANCED_DATAPATH`
++ a `sandbox_config` pool), i.e. a cluster recreation. That's the right next step; piecemeal-patching
+the cost-minimal cluster is fighting the tool. The prototype already proved the agentic *contract* on
+local Docker; this is purely the cloud-infra exercise.
+
 ### Canonical A5 (gateway cost tally) — DEFERRED (documented)
 The pragmatic A5 (real `cost_usd` from the OpenRouter catalog the gateway fronts) is done and correct.
 The *canonical* form (gateway's own per-`run_id` spend as the source) needs a LiteLLM spend-DB +
