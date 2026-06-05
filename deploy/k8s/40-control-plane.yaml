@@ -1,0 +1,75 @@
+# Control plane: FastAPI (launch + status/results) and the single Orchestrator (admit/finalize).
+# Both on the always-on system node. Postgres = Neon (secret), ClickHouse = in-cluster Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-engine-api
+  namespace: eval-engine
+  labels: { app: eval-engine-api }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: eval-engine-api } }
+  template:
+    metadata:
+      labels: { app: eval-engine-api }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: api
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
+          imagePullPolicy: Always
+          # default CMD = uvicorn eval_engine.api:app --port 8077
+          ports:
+            - { name: http, containerPort: 8077 }
+          env:
+            - { name: EVAL_ENGINE_BACKEND, value: postgres }
+            - name: EVAL_ENGINE_PG_DSN
+              valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
+            - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
+            - { name: EVAL_ENGINE_CH_PORT, value: "8123" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8077 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "384Mi" }
+            limits:   { memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eval-engine-api
+  namespace: eval-engine
+spec:
+  selector: { app: eval-engine-api }
+  ports:
+    - { name: http, port: 8077, targetPort: 8077 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-engine-orch
+  namespace: eval-engine
+  labels: { app: eval-engine-orch }
+spec:
+  replicas: 1                       # single orchestrator (leader-election is a later refinement)
+  selector: { matchLabels: { app: eval-engine-orch } }
+  template:
+    metadata:
+      labels: { app: eval-engine-orch }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: orchestrator
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "eval_engine.orchestrator"]
+          env:
+            - { name: EVAL_ENGINE_BACKEND, value: postgres }
+            - name: EVAL_ENGINE_PG_DSN
+              valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
+            - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
+            - { name: EVAL_ENGINE_CH_PORT, value: "8123" }
+          resources:
+            requests: { cpu: "100m", memory: "384Mi" }
+            limits:   { memory: "1Gi" }

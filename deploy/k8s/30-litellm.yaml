@@ -1,0 +1,71 @@
+# LiteLLM gateway — all model traffic goes through here (DESIGN §8). For the e2e it fronts OpenRouter;
+# Redis backs distributed rate-limit/usage state. Workers call it via the OpenAI-compatible API.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: eval-engine
+data:
+  config.yaml: |
+    model_list:
+      - model_name: llama-3.1-8b
+        litellm_params:
+          model: openrouter/meta-llama/llama-3.1-8b-instruct
+          api_key: os.environ/OPENROUTER_API_KEY
+    litellm_settings:
+      drop_params: true
+    router_settings:
+      redis_host: os.environ/REDIS_HOST
+      redis_port: os.environ/REDIS_PORT
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: eval-engine
+  labels: { app: litellm }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: litellm } }
+  template:
+    metadata:
+      labels: { app: litellm }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-stable
+          args: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+          ports:
+            - { name: http, containerPort: 4000 }
+          env:
+            - name: OPENROUTER_API_KEY
+              valueFrom: { secretKeyRef: { name: openrouter, key: key } }
+            - name: LITELLM_MASTER_KEY
+              valueFrom: { secretKeyRef: { name: litellm, key: master_key } }
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/litellm }
+          resources:
+            requests: { cpu: "200m", memory: "1Gi" }
+            limits:   { memory: "2560Mi" }   # LiteLLM proxy is memory-hungry at startup
+          readinessProbe:
+            httpGet: { path: /health/liveliness, port: 4000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: cfg
+          configMap: { name: litellm-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: eval-engine
+spec:
+  selector: { app: litellm }
+  ports:
+    - { name: http, port: 4000, targetPort: 4000 }
