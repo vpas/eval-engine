@@ -23,6 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               eval<span className="slash">·</span>engine
             </Link>
             <span className="spacer" />
+            <a href="/inspect/" target="_blank" className="navlink">traces ↗</a>
             <UserChip />
           </header>
           {children}
