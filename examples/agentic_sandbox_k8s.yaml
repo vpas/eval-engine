@@ -1,0 +1,36 @@
+# Agentic eval, K8s sandbox variant — the cloud counterpart of agentic_sandbox.yaml.
+# A real model drives a bash tool whose calls execute inside an EPHEMERAL, per-sample Kubernetes pod
+# (inspect-k8s-sandbox helm-installs the agent-env chart into the eval-sandbox namespace; the worker
+# has cross-namespace RBAC — deploy/k8s/90-sandbox-rbac.yaml). Only `sandbox: docker → k8s` changes
+# vs. the Docker variant — the harness contract is identical (docs/SANDBOXING.md §4/§7).
+#
+# Proof of in-sandbox execution: sb1's answer is a secret present ONLY in the sandbox pod
+# (k8s-agent-env-values.yaml env), never in the worker or the prompt; sb2 (compute 21+21) needs the
+# bash tool to run in the pod. A passing score is itself the proof.
+#
+# Model note: agentic harnesses need a capable NATIVE tool-caller. Through the LiteLLM gateway the
+# id is double-prefixed: `openai/<model>` (Inspect's OpenAI-compatible provider → the gateway) where
+# <model> = `openai/gpt-4o-mini` (the gateway routes `*` → `openrouter/*`). Needs OPENROUTER_API_KEY
+# on the gateway (already set in-cluster).
+#
+# Run in-cluster (the worker has helm + RBAC + the gateway):
+#   python -m eval_engine.cli run examples/agentic_sandbox_k8s.yaml
+# or submit via the API so the orchestrator/worker claim loop drives it (KEDA-scaled).
+eval: agentic_sandbox_k8s
+dataset: examples/sandbox_qa.jsonl
+model: openai/openai/gpt-4o-mini
+# batch_size 1 for agentic: one sample per Inspect eval → one sandbox pod at a time, no per-sample
+# sandbox concurrency to contend (the right default for high-variance agentic — DESIGN.md §"batch
+# size"). With batch_size>1, two samples run concurrently inside one eval and contend on the k8s
+# sandbox connection → deadlock; QA harnesses (uniform, sandbox-free) are the ones that batch large.
+batch_size: 1
+harness:
+  type: agentic
+  config:
+    tools: [bash]
+    sandbox: k8s
+    k8s_values: deploy/sandbox/k8s-agent-env-values.yaml
+scorers:
+  - type: includes
+    config:
+      ignore_case: true

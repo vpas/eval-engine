@@ -6,3 +6,11 @@
 services:
   default:
     runtimeClassName: CLUSTER_DEFAULT
+    # Mirror the Docker air-gap proof (deploy/sandbox/airgap-compose.yaml): a secret that exists ONLY
+    # inside the sandbox — never in the worker env nor the prompt. examples/sandbox_qa.jsonl sb1 can
+    # only be answered by reading it WITH the bash tool, so a passing score is itself proof the tool
+    # ran INSIDE this pod (not in the worker). Same value as the Docker compose so the dataset is
+    # sandbox-provider-agnostic (docker|k8s).
+    env:
+      - name: EE_SANDBOX_SECRET
+        value: "in-sandbox-7f3a9c"

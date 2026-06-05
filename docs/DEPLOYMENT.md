@@ -6,7 +6,7 @@
 >
 > Status legend: ☐ todo · ◐ in progress · ☑ done · ⊘ deferred.
 
-Last updated: 2026-06-04.
+Last updated: 2026-06-05.
 
 ---
 
@@ -204,18 +204,45 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
       The `merge_slashes off;` `http-snippet` on the `ingress-nginx-controller` ConfigMap is harmless
       leftover defense-in-depth (not load-bearing — the relative names mean there are no `//` to collapse).
 
-### Agentic / K8s sandbox in-cluster — SCAFFOLDED, blocked on cluster setup (documented)
+### Agentic / K8s sandbox in-cluster — WORKING (in-cluster proof, runc isolation)  ☑
+The full agentic path now runs **end-to-end on the cluster**: a real model drives a `bash` tool whose
+calls execute **inside an ephemeral, per-sample Kubernetes pod** that `inspect-k8s-sandbox` helm-installs
+into the `eval-sandbox` namespace, then tears down on exit.
+
 Built the whole path: image has **helm 3.16 + inspect-k8s-sandbox**; harness `sandbox: k8s`;
 `deploy/k8s/90-sandbox-rbac.yaml` (eval-sandbox ns + worker SA + Role incl. `cilium.io`); a values
 override (`deploy/sandbox/k8s-agent-env-values.yaml`). Fixed **3 blockers** the `agent-env` chart assumes
 (it targets GKE **Dataplane-V2/Cilium** + GKE **Sandbox/gVisor**): the `CiliumNetworkPolicy` CRD, the
 `cilium.io` RBAC, and `runtimeClassName: CLUSTER_DEFAULT` (no gVisor pool) — after which **`helm install`
-+ a real sandbox pod were created**. A 4th blocker remains in the worker (the Python k8s client's
-in-cluster config: `ConfigException: No configuration found`). **The clean path is a cluster built for it**
-— GKE Dataplane-V2 + a GKE-Sandbox (gVisor) node pool (terraform `datapath_provider=ADVANCED_DATAPATH`
-+ a `sandbox_config` pool), i.e. a cluster recreation. That's the right next step; piecemeal-patching
-the cost-minimal cluster is fighting the tool. The prototype already proved the agentic *contract* on
-local Docker; this is purely the cloud-infra exercise.
++ a real sandbox pod were created**.
+
+The **"4th blocker"** from the previous pass (worker Python k8s client → `ConfigException: No
+configuration found`) is **gone**: it was an artifact of the stale frozen image, resolved by the
+`inspect-ai>=0.3.235` rebuild (which also pulled a newer `k8s_sandbox` + kubernetes client that loads
+in-cluster config correctly). Verified the worker pod mounts its SA token and sees
+`KUBERNETES_SERVICE_HOST`; no code change was needed.
+
+**Proof (2026-06-05):**
+- **Synchronous** (`cli run`, single sample) — passed 100%; events show the `agent-env-…` StatefulSet
+  scheduled in `eval-sandbox`, image pulled, container ran, torn down.
+- **Distributed** (the real path: `POST /runs` → orchestrator admit → worker claim → execute → finalize),
+  `examples/agentic_sandbox_k8s.yaml`, dataset `examples/sandbox_qa.jsonl` — **2/2 passed, accuracy 1.0**.
+  `sb1`'s answer is `in-sandbox-7f3a9c`, a secret present **only** in the sandbox pod (injected via the
+  chart values `services.default.env`, absent from the worker env and the prompt) — so a passing `sb1`
+  is itself proof the tool ran **inside** the pod. `sb2` (compute 21+21) proves in-pod execution too.
+- **Agentic uses `batch_size: 1`** (one sample per Inspect eval → one sandbox pod, no concurrency).
+  This is the right default for high-variance agentic (DESIGN.md §"batch size"); with `batch_size>1`
+  two samples run concurrently inside one eval and **deadlock contending on the k8s sandbox** (observed:
+  worker blocked in asyncio, ~3 model calls then silence, sandbox pod idle). QA harnesses (uniform,
+  sandbox-free) are the ones that batch large.
+
+**Isolation caveat:** `CLUSTER_DEFAULT` = **runc**, weaker than the production **T2 gVisor** tier. This
+cluster has no GKE-Sandbox (gVisor) pool and no Dataplane-V2 (both ~free but **set at cluster creation**,
+so a full prod run = a cluster rebuild — see `docs/FUTURE.md` §4). Switchability is cheap where it counts:
+a **gVisor node pool can be added to this cluster later** (`--sandbox type=gvisor`) and the runtime flipped
+back in `k8s-agent-env-values.yaml` with **no recreation**; only the Dataplane-V2 / native
+`CiliumNetworkPolicy` air-gap is creation-locked (standard `NetworkPolicy` via the Calico addon is an
+in-place alternative). So the cheap proof is a real superset-later, not a dead end.
 
 ### Canonical A5 (gateway cost tally) — DEFERRED (documented)
 The pragmatic A5 (real `cost_usd` from the OpenRouter catalog the gateway fronts) is done and correct.
