@@ -18,6 +18,12 @@ class RunSpec(BaseModel):
     scorers: list[PluginRef]
     limit: int | None = None
     batch_size: int = 50  # ledger claim batch (worker grabs this many sample-tasks at a time)
+    # Sampling for statistical comparability (DESIGN §14, FR8). epochs = repeat each sample N times
+    # (Inspect reduces to a per-sample score) → stabler scores + a basis for variance/CIs. Outputs are
+    # comparable, not bitwise (hosted models are non-deterministic even at temperature 0 / fixed seed).
+    epochs: int = 1
+    temperature: float | None = None
+    seed: int | None = None
     # Cost cap for the whole run (USD). When committed cost reaches it, remaining queued samples are
     # marked terminal `budget_skipped` (a DISTINCT terminal class — not `failed`, so it neither burns
     # retries nor inflates failed_samples; DESIGN §8). None = uncapped. The canonical form is the

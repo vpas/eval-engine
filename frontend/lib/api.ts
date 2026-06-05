@@ -23,7 +23,7 @@ export type RunDetail = {
 };
 
 export type Results = {
-  summary: { samples: number; passed: number; accuracy: number; mean_score: number; tokens: number; cost_usd: number };
+  summary: { samples: number; passed: number; accuracy: number; accuracy_ci?: [number, number]; mean_score: number; tokens: number; cost_usd: number };
   by_category: { category: string; n: number; passed: number; accuracy: number }[];
   samples: { sample_id: string; passed: number; category: string | null; score: number; transcript_uri: string }[];
 };

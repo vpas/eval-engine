@@ -69,9 +69,15 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   records it, and a budget-capped run finalizes with status `budget_exceeded`. Tested on SQLite +
   Postgres (`test_budget_stop`); e2e on the cluster (run capped mid-flight, remaining samples skipped).
 
-- [ ] **4. Epochs + confidence intervals.** §14, FR8. Today: no repeat-sample support, no CIs. This is
-  the "outputs comparable, not bitwise" contract. *Done when:* RunSpec `sampling{n,seed,temperature}`
-  drives epoch repeats; aggregate metrics report a CI.
+- [x] **4. Epochs + confidence intervals.** §14, FR8. *Done (2026-06-05):* `RunSpec.epochs` +
+  `temperature`/`seed`; `runner._execute_batch` passes `epochs` to `inspect_eval` (Inspect repeats
+  each sample N× and reduces to one per-sample row — ledger/analytics unchanged) and threads
+  temperature/seed into the `GenerateConfig`. `runner.wilson_ci` computes a 95% Wilson score interval
+  on the pass rate (stable at small n / extreme rates, never escapes [0,1]); surfaced as
+  `summary.accuracy_ci` in the API and shown under the accuracy metric in the dashboard
+  ("95% CI lo–hi%"). Tested (`test_epochs_and_ci`): epochs reduce 3×-repeated samples to 3 rows;
+  CI(50/100)=[0.404,0.596]. Caveat: per-sample cost reflects the reduced sample, so epoch cost is
+  approximate (the canonical gateway tally is the deferred "A5").
 
 - [ ] **5. Commit protocol: ack-before-flip.** §8, `ORCHESTRATION.md` §5. Today the order is reversed
   (`worker.py`: `commit_result` flips ledger `done`, *then* `_batch_load` inserts to ClickHouse).

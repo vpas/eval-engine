@@ -74,6 +74,20 @@ def _split_model(model: str) -> tuple[str, str]:
     return tuple(model.split("/", 1)) if "/" in model else ("", model)
 
 
+def wilson_ci(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a pass-rate proportion (FR8, DESIGN §14). Better than the normal
+    approximation at small n / extreme rates (and never escapes [0,1]). z=1.96 → 95%. Returns
+    (low, high); a zero-sample run is (0, 0)."""
+    import math
+    if n <= 0:
+        return (0.0, 0.0)
+    p = passed / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 def _score_value(value) -> float:
     if value in (CORRECT, "C", 1, 1.0, True):
         return 1.0
@@ -158,9 +172,18 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     solver, sandbox = built if isinstance(built, tuple) else (built, None)
     scorers = [plugins.build("scorer", s.model_dump())[0] for s in spec.scorers]
     task = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)
+    # Sampling (DESIGN §14): epochs repeat each sample (Inspect reduces to one per-sample score);
+    # temperature/seed go into the GenerateConfig that `eval` builds from **kwargs.
+    epochs = spec.epochs if spec.epochs and spec.epochs > 1 else None
+    gen: dict = {}
+    if spec.temperature is not None:
+        gen["temperature"] = spec.temperature
+    if spec.seed is not None:
+        gen["seed"] = spec.seed
     log = inspect_eval(
-        task, model=_model_for(spec, len(ids)), display="none",
+        task, model=_model_for(spec, len(ids) * max(1, spec.epochs)), display="none",
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
+        epochs=epochs, **gen,
     )[0]
 
     eval_log_uri = getattr(log, "location", "") or ""  # the .eval log holding this shard's samples

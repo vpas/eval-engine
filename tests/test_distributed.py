@@ -49,6 +49,30 @@ def test_worker_orchestrator_split():
     print(f"worker/orchestrator split ✓  (run {run_id}: {passed}/{n} passed, ledger pruned)")
 
 
+def test_epochs_and_ci():
+    """Epochs repeat each sample (Inspect reduces to one per-sample row) and the Wilson CI brackets
+    the pass rate (DESIGN §14, FR8)."""
+    lo, hi = runner.wilson_ci(50, 100)
+    assert abs(lo - 0.404) < 0.01 and abs(hi - 0.596) < 0.01, (lo, hi)
+    assert runner.wilson_ci(0, 0) == (0.0, 0.0)
+    lo, hi = runner.wilson_ci(10, 10)
+    assert hi <= 1.0 and lo > 0.7, (lo, hi)  # never escapes [0,1]
+
+    spec = RunSpec(
+        eval="epochs_qa", dataset="examples/qa.jsonl", model="mockllm/model", mock_output="Paris",
+        epochs=3, batch_size=3,
+        harness=PluginRef(type="single_turn"),
+        scorers=[PluginRef(type="includes", config={"ignore_case": True})],
+    )
+    db.init()
+    run_id = runner.run(spec)
+    n, passed, *_ = db.analytics.run_summary(run_id)
+    assert n == 3, f"epochs should reduce to one row per sample, got n={n}"  # 3 samples, not 9
+    ci = runner.wilson_ci(50, 100)
+    print(f"epochs+CI ✓  (epochs=3 → {n} reduced rows; wilson_ci(50,100)=[{ci[0]:.3f},{ci[1]:.3f}])")
+
+
 if __name__ == "__main__":
     test_worker_orchestrator_split()
+    test_epochs_and_ci()
     print("ALL PASS ✓")

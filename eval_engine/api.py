@@ -122,9 +122,11 @@ def get_results(run_id: str):
     if not control.get_run(run_id):
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
     n, passed, mean, tokens, cost = analytics.run_summary(run_id)
+    ci_lo, ci_hi = runner.wilson_ci(int(passed), int(n))  # 95% Wilson CI on the pass rate (FR8)
     return {
         "summary": {
             "samples": n, "passed": passed, "accuracy": (passed / n) if n else 0.0,
+            "accuracy_ci": [ci_lo, ci_hi],
             "mean_score": mean, "tokens": tokens, "cost_usd": cost,
         },
         "by_category": [

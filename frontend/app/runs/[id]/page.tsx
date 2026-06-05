@@ -62,7 +62,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
       </div>
 
       <div className="metrics">
-        <Metric k="accuracy" v={su ? `${Math.round(su.accuracy * 100)}%` : "—"} sub={su ? `${su.passed}/${su.samples} passed` : ""} big />
+        <Metric k="accuracy" v={su ? `${Math.round(su.accuracy * 100)}%` : "—"} sub={su ? `${su.passed}/${su.samples} passed${su.accuracy_ci ? ` · 95% CI ${Math.round(su.accuracy_ci[0] * 100)}–${Math.round(su.accuracy_ci[1] * 100)}%` : ""}` : ""} big />
         <Metric k="mean score" v={su ? su.mean_score.toFixed(3) : "—"} />
         <Metric k="tokens" v={su ? su.tokens.toLocaleString() : "—"} />
         <Metric k="cost" v={su ? fmtCost(su.cost_usd) : "—"} sub="via gateway" />
