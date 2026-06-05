@@ -151,8 +151,12 @@ def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> Non
     control.mark_loaded(run_id, ids)
 
 
-def launch(spec: RunSpec) -> str:
-    """CONTROL-PLANE action: create the run + expand the ledger (queued). Returns run_id."""
+def launch(spec: RunSpec, created_by: str | None = None) -> str:
+    """CONTROL-PLANE action: create the run + expand the ledger (queued). Returns run_id.
+
+    ``created_by`` is the authenticated user's email (from the OIDC proxy header), recorded for
+    attribution; None when unauthenticated (e.g. local CLI/dev).
+    """
     dataset, dataset_hash = load_jsonl(spec.dataset, spec.limit)
     samples_by_id = {str(s.id): s for s in dataset}
     provider, model_id = _split_model(spec.model)
@@ -164,6 +168,7 @@ def launch(spec: RunSpec) -> str:
         "scorers": [s.type for s in spec.scorers], "total": len(samples_by_id),
         "dataset_hash": dataset_hash,
         "spec_json": spec.model_dump_json(),  # so a separate worker/orchestrator can rehydrate it
+        "created_by": created_by,             # authenticated email (OIDC proxy header), attribution
     })
     control.expand_tasks(
         run_id,

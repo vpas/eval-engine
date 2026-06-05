@@ -29,8 +29,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
-  accuracy DOUBLE PRECISION, dataset_hash TEXT, spec_json TEXT, created_at TIMESTAMPTZ DEFAULT now(),
-  finished_at TIMESTAMPTZ);
+  accuracy DOUBLE PRECISION, dataset_hash TEXT, spec_json TEXT, created_by TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
+-- idempotent migration for tables created before created_by existed
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -75,11 +77,11 @@ def new_run_id() -> str:
 def create_run(meta: dict) -> None:
     _conn().execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,dataset_hash,spec_json) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s)",
+        "status,total,done,failed,dataset_hash,spec_json,created_by) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s)",
         (meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
          meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), meta["total"],
-         meta["dataset_hash"], meta.get("spec_json")),
+         meta["dataset_hash"], meta.get("spec_json"), meta.get("created_by")),
     )
 
 
@@ -117,7 +119,8 @@ def finalize_run(run_id: str, done: int, failed: int, accuracy: float) -> None:
 
 def list_runs():
     return _conn().execute(
-        "SELECT id, eval_id, model, accuracy, total, created_at FROM runs ORDER BY created_at DESC"
+        "SELECT id, eval_id, model, accuracy, total, created_at, created_by "
+        "FROM runs ORDER BY created_at DESC"
     ).fetchall()
 
 

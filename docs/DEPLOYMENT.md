@@ -142,7 +142,7 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] **Ingress** (`62-ingress.yaml`) on the nip.io host, TLS, all traffic → oauth2-proxy → api.
 - [x] Verified: unauth `/` → 403; `/oauth2/start` → 302 to Google with the right client/redirect.
 - [ ] **Browser login confirmation** (user): sign in at `https://35-202-212-111.nip.io`.
-- [ ] **Follow-on:** API reads `X-Auth-Request-Email` → `created_by` on runs (closes part of D6).
+- [x] **`created_by` wired** — API reads `X-Auth-Request-Email` → stored on each run + shown in the dashboard "by" column (closes part of D6).
 - Cost: ingress LB ~$18/mo (the external-access tax). The api Service stays ClusterIP — reachable
   only through the authenticated proxy.
 

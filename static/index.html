@@ -61,7 +61,7 @@
       <button id="launch">▶ Launch run</button>
     </div>
     <h2>Runs</h2>
-    <table><thead><tr><th>eval</th><th>model</th><th>acc</th><th>n</th></tr></thead>
+    <table><thead><tr><th>eval</th><th>model</th><th>acc</th><th>n</th><th>by</th></tr></thead>
       <tbody id="runs"></tbody></table>
   </div>
   <div class="col right">
@@ -92,7 +92,8 @@ async function loadRuns(){
     const tr = document.createElement('tr');
     tr.className = 'run' + (r.id===selected?' sel':'');
     const acc = r.accuracy==null ? '·' : (r.accuracy*100).toFixed(0)+'%';
-    tr.innerHTML = `<td>${r.eval}</td><td class="mono">${r.model}</td><td>${acc}</td><td>${r.total}</td>`;
+    const by = r.created_by ? r.created_by.split('@')[0] : '·';
+    tr.innerHTML = `<td>${r.eval}</td><td class="mono">${r.model}</td><td>${acc}</td><td>${r.total}</td><td title="${r.created_by||''}">${by}</td>`;
     tr.onclick = ()=>select(r.id);
     tb.appendChild(tr);
   }

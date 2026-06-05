@@ -23,7 +23,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers TEXT, status TEXT, total INT, done INT, failed INT,
-  accuracy REAL, dataset_hash TEXT, spec_json TEXT, created_at TEXT, finished_at TEXT);
+  accuracy REAL, dataset_hash TEXT, spec_json TEXT, created_by TEXT, created_at TEXT, finished_at TEXT);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -63,12 +63,13 @@ def create_run(meta: dict) -> None:
     con = _con()
     con.execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,accuracy,dataset_hash,spec_json,created_at,finished_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "status,total,done,failed,accuracy,dataset_hash,spec_json,created_by,created_at,finished_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
             meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), "queued",
-            meta["total"], 0, 0, None, meta["dataset_hash"], meta.get("spec_json"), _now(), None,
+            meta["total"], 0, 0, None, meta["dataset_hash"], meta.get("spec_json"),
+            meta.get("created_by"), _now(), None,
         ),
     )
     con.commit()
@@ -120,7 +121,7 @@ def finalize_run(run_id: str, done: int, failed: int, accuracy: float) -> None:
 def list_runs():
     con = _con()
     rows = con.execute(
-        "SELECT id, eval_id, model, accuracy, total, created_at FROM runs ORDER BY created_at DESC"
+        "SELECT id, eval_id, model, accuracy, total, created_at, created_by FROM runs ORDER BY created_at DESC"
     ).fetchall()
     con.close()
     return rows

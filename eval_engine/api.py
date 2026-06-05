@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 from . import builtins, db, plugins, runner  # noqa: F401  populate registry
@@ -67,8 +67,13 @@ def catalog():
 
 
 @app.post("/runs", status_code=202)
-def create_run(spec: RunSpec, bg: BackgroundTasks):
-    """Validate + create the run, expand the ledger, kick off background execution."""
+def create_run(spec: RunSpec, bg: BackgroundTasks,
+               x_auth_request_email: str | None = Header(default=None)):
+    """Validate + create the run, expand the ledger, kick off background execution.
+
+    ``X-Auth-Request-Email`` is injected by the OIDC proxy (oauth2-proxy) — the authenticated
+    user, recorded as the run's ``created_by``. Absent on the internal/port-forward path.
+    """
     try:
         plugins.get("harness", spec.harness.type, spec.harness.version)
         for s in spec.scorers:
@@ -76,7 +81,7 @@ def create_run(spec: RunSpec, bg: BackgroundTasks):
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
 
-    run_id = runner.launch(spec)
+    run_id = runner.launch(spec, created_by=x_auth_request_email)
     if INLINE_EXEC:
         bg.add_task(runner.execute, run_id, spec)  # local dev only; cluster uses orchestrator+workers
     return {"run_id": run_id, "status": "queued"}
@@ -84,7 +89,7 @@ def create_run(spec: RunSpec, bg: BackgroundTasks):
 
 @app.get("/runs")
 def list_runs():
-    cols = ["id", "eval", "model", "accuracy", "total", "created_at"]
+    cols = ["id", "eval", "model", "accuracy", "total", "created_at", "created_by"]
     return [dict(zip(cols, r)) for r in control.list_runs()]
 
 
