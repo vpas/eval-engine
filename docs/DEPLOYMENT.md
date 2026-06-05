@@ -156,7 +156,10 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] Workers write Inspect `.eval` logs to `gs://<bucket>/eval-logs` (gcsfs); `deploy/k8s/85-inspect-view.yaml`
       runs `inspect view start` over them (`enableServiceLinks:false` — the `INSPECT_VIEW_PORT` service-link
       env collided with `--port`). Verified serving (`Inspect View: gs://…/eval-logs · :7575`).
-- Access (until ingress-integrated): `kubectl -n eval-engine port-forward svc/inspect-view 7575:7575` → http://localhost:7575.
+- [x] **Wired into the OIDC ingress** at **`/inspect/`**: the Next.js frontend proxies `/inspect/*` →
+      inspect-view (its assets/API are relative, so the prefix strips cleanly; `skipTrailingSlashRedirect`
+      keeps the trailing slash, no redirect). A **"traces ↗"** link in the dashboard header. No
+      port-forward needed — live at **https://35-202-212-111.nip.io/inspect/** behind Google auth.
 
 ### Agentic / K8s sandbox in-cluster — SCAFFOLDED, blocked on cluster setup (documented)
 Built the whole path: image has **helm 3.16 + inspect-k8s-sandbox**; harness `sandbox: k8s`;
