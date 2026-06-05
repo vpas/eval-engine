@@ -153,10 +153,37 @@ def test_retry_backoff():
     print("  [retry-backoff] re-queue ✓  not_before blocks claim ✓  attempt-cap → terminal ✓")
 
 
+def test_budget_stop():
+    """When committed cost reaches the budget, remaining queued samples become the DISTINCT terminal
+    `budget_skipped` (not `failed`), are never re-claimed, and are archived (DESIGN §8, FR6)."""
+    run_id = _make_run(5)
+    ids = control.claim_batch(run_id, "W", 2)            # run 2 of 5 at $0.40 each → cost $0.80
+    for sid in ids:
+        control.commit_result(run_id, sid, {**_fake_result(), "cost_usd": 0.40})
+    assert abs(control.run_cost(run_id) - 0.80) < 1e-9, control.run_cost(run_id)
+
+    skipped = control.budget_stop(run_id)               # budget already blown → skip the queued 3
+    assert skipped == 3, skipped
+    c = control.counts(run_id)
+    assert c.get("done") == 2 and c.get("budget_skipped") == 3 and c.get("queued", 0) == 0, c
+    assert "failed" not in c, "budget skip must NOT inflate failed_samples"
+    assert control.claim_batch(run_id, "W", 9) == [], "budget_skipped task re-claimed"
+
+    control.archive_and_prune(run_id)                   # recorded on prune
+    con = control._con()
+    arch = dict(con.execute(
+        "SELECT error_type, count(*) FROM failed_task_archive WHERE run_id=? GROUP BY error_type",
+        (run_id,)).fetchall())
+    con.close()
+    assert arch == {"budget_exceeded": 3}, arch
+    print("  [budget] cost gauge ✓  queued→budget_skipped (not failed) ✓  claim-terminal ✓  archived ✓")
+
+
 if __name__ == "__main__":
     _use_temp_db()
     print("concurrency tests (ledger claim/commit):")
     test_exactly_once()
     test_lease_reclaim()
     test_retry_backoff()
+    test_budget_stop()
     print("\nALL PASS ✓")

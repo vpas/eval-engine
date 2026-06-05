@@ -59,9 +59,15 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   orchestrator's `queued==0` finalize gate). Tested on SQLite + Postgres (`test_retry_backoff`):
   re-queue → `not_before` blocks the claim → attempt-cap → terminal; `exactly-once` unaffected.
 
-- [ ] **3. Budget caps + `BudgetExceeded` terminal class.** FR6, §8. Today: cost is priced from the
-  catalog but never capped. *Done when:* RunSpec carries a budget; a gateway/worker budget reject is a
-  distinct terminal signal (not a 429/retry) that doesn't burn attempts or inflate `failed_samples`.
+- [x] **3. Budget caps + `BudgetExceeded` terminal class.** FR6, §8. *Done (2026-06-05):*
+  `RunSpec.budget_usd`. Control-plane enforcement (the canonical gateway per-call reject is the
+  deferred "A5"): `control.run_cost` gauges committed cost; when it reaches the budget, the
+  orchestrator (and the single-process `runner.execute`) call `control.budget_stop`, which converts
+  still-`queued` tasks to a **distinct terminal `budget_skipped`** status (error_type
+  `budget_exceeded`) — *not* `failed`, so it neither inflates `failed_samples` nor burns retries;
+  in-flight samples finish. The finalize gate counts `budget_skipped` as terminal, `archive_and_prune`
+  records it, and a budget-capped run finalizes with status `budget_exceeded`. Tested on SQLite +
+  Postgres (`test_budget_stop`); e2e on the cluster (run capped mid-flight, remaining samples skipped).
 
 - [ ] **4. Epochs + confidence intervals.** §14, FR8. Today: no repeat-sample support, no CIs. This is
   the "outputs comparable, not bitwise" contract. *Done when:* RunSpec `sampling{n,seed,temperature}`

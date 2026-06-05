@@ -130,11 +130,11 @@ def set_status(run_id: str, status: str) -> None:
     _conn().execute("UPDATE runs SET status=%s WHERE id=%s", (status, run_id))
 
 
-def finalize_run(run_id: str, done: int, failed: int, accuracy: float) -> None:
+def finalize_run(run_id: str, done: int, failed: int, accuracy: float,
+                 status: str = "completed") -> None:
     _conn().execute(
-        "UPDATE runs SET status='completed', done=%s, failed=%s, accuracy=%s, finished_at=now() "
-        "WHERE id=%s",
-        (done, failed, accuracy, run_id),
+        "UPDATE runs SET status=%s, done=%s, failed=%s, accuracy=%s, finished_at=now() WHERE id=%s",
+        (status, done, failed, accuracy, run_id),
     )
 
 
@@ -225,6 +225,27 @@ def retry_or_fail(run_id: str, sample_id: str, error_type: str, max_attempts: in
     return "retry"
 
 
+def run_cost(run_id: str) -> float:
+    """Committed cost-so-far (sum over ``done`` ledger rows) — the live budget gauge during a run."""
+    row = _conn().execute(
+        "SELECT coalesce(sum(cost_usd), 0) FROM sample_tasks WHERE run_id=%s AND status='done'",
+        (run_id,),
+    ).fetchone()
+    return float(row[0] or 0.0)
+
+
+def budget_stop(run_id: str) -> int:
+    """Budget reached: convert still-``queued`` tasks to the DISTINCT terminal ``budget_skipped``
+    (error_type ``budget_exceeded``) — NOT ``failed``, so it neither inflates ``failed_samples`` nor
+    burns retries (DESIGN §8). In-flight ``running`` tasks finish naturally. Returns # skipped."""
+    rows = _conn().execute(
+        "UPDATE sample_tasks SET status='budget_skipped', error_type='budget_exceeded' "
+        "WHERE run_id=%s AND status='queued' RETURNING sample_id",
+        (run_id,),
+    ).fetchall()
+    return len(rows)
+
+
 def fetch_unloaded(run_id: str, only_ids: list[str] | None = None):
     cols = ("SELECT sample_id, group_key, passed, primary_score, scores, tokens_in, tokens_out, "
             "cost_usd, latency_ms, error_type, transcript_uri, attempts FROM sample_tasks "
@@ -264,7 +285,7 @@ def archive_and_prune(run_id: str) -> None:
     con.execute(
         "INSERT INTO failed_task_archive(run_id,sample_id,error_type,attempts) "
         "SELECT run_id,sample_id,error_type,attempts FROM sample_tasks "
-        "WHERE run_id=%s AND status='failed' ON CONFLICT DO NOTHING",
+        "WHERE run_id=%s AND status IN ('failed','budget_skipped') ON CONFLICT DO NOTHING",
         (run_id,),
     )
     con.execute("DELETE FROM sample_tasks WHERE run_id=%s", (run_id,))

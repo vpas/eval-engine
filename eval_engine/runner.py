@@ -244,10 +244,12 @@ def _finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
     (by the single-process runner, or by the distributed coordinator after all workers join)."""
     cnt = control.counts(run_id)
     done, failed = cnt.get("done", 0), cnt.get("failed", 0)
+    budget_skipped = cnt.get("budget_skipped", 0)  # distinct terminal class (not a failure)
     n, passed, *_ = analytics.run_summary(run_id)
     accuracy = (passed / n) if n else 0.0
+    status = "budget_exceeded" if budget_skipped else "completed"
     control.archive_and_prune(run_id)
-    control.finalize_run(run_id, done, failed, accuracy)
+    control.finalize_run(run_id, done, failed, accuracy, status=status)
     return done, failed, accuracy
 
 
@@ -265,6 +267,8 @@ def execute(run_id: str, spec: RunSpec) -> None:
             for sid in ids:
                 _settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
             _batch_load(run_id, spec)
+            if spec.budget_usd and control.run_cost(run_id) >= spec.budget_usd:
+                control.budget_stop(run_id)  # cap reached → skip remaining queued (terminal, not failed)
             continue
         # Nothing claimable right now. If tasks remain (queued behind a not_before backoff, or
         # running), wait out the backoff and re-claim — don't finalize early. (The distributed path

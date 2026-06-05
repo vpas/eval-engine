@@ -30,11 +30,18 @@ def tick() -> None:
         print(f"[orch] admitted {run_id}", flush=True)
 
     for run_id in db.control.active_runs(("running",)):
+        spec = RunSpec.model_validate_json(db.control.get_spec(run_id))
+        # Budget cap (DESIGN §8): once committed cost reaches the cap, stop scheduling — convert
+        # still-queued samples to the distinct terminal `budget_skipped` (in-flight ones finish).
+        if spec.budget_usd and db.control.run_cost(run_id) >= spec.budget_usd:
+            skipped = db.control.budget_stop(run_id)
+            if skipped:
+                print(f"[orch] {run_id} hit budget ${spec.budget_usd:.4f} → skipped {skipped} queued "
+                      f"(budget_exceeded)", flush=True)
         total = db.control.run_total(run_id)
         c = db.control.counts(run_id)
-        terminal = c.get("done", 0) + c.get("failed", 0)
+        terminal = c.get("done", 0) + c.get("failed", 0) + c.get("budget_skipped", 0)
         if total > 0 and terminal >= total and c.get("queued", 0) == 0 and c.get("running", 0) == 0:
-            spec = RunSpec.model_validate_json(db.control.get_spec(run_id))
             runner._batch_load(run_id, spec)  # safety sweep: ensure all done rows are in analytics
             done, failed, acc = runner._finalize(run_id, spec)
             print(f"[orch] finalized {run_id}: done={done} failed={failed} acc={acc:.3f}", flush=True)
