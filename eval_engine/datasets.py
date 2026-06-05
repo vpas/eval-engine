@@ -73,6 +73,7 @@ def load_jsonl(path: str, limit: int | None = None) -> tuple[MemoryDataset, str]
                 id=str(rec.get("id", i)),
                 input=rec["input"],
                 target=rec.get("target", ""),
+                choices=rec.get("choices"),  # multiple_choice harness (a lettered choice list)
                 metadata=rec.get("metadata", {}),
             )
         )

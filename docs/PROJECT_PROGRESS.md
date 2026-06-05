@@ -146,8 +146,12 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 - [ ] **11. Two-lane (interactive/batch) admission + per-run cap.** §8, `SCHEDULER.md`. A v1 item
   distinct from the deferred fair-share scheduler; today the orchestrator admits *all* queued runs.
 
-- [ ] **12. `multiple_choice` harness.** §7. Today only `single_turn` + `agentic` (scorers: `includes`,
-  `match`, `llm_judge`).
+- [x] **12. `multiple_choice` harness.** §7. *Done (2026-06-05):* `multiple_choice` harness (Inspect's
+  MC solver, optional `cot`) + a `choice` scorer (grades the selected letter against the target);
+  `datasets.load_jsonl` now reads a `choices` list into the Inspect `Sample`. Example
+  `examples/mcq.{jsonl,yaml}`. Catalog now spans the QA, agentic, and multiple-choice eval shapes
+  (harnesses: `single_turn`, `multiple_choice`, `agentic`; scorers: `includes`, `match`, `choice`,
+  `llm_judge`). Tested (`test_multiple_choice_plugins`).
 
 - [ ] **13. Audit log.** §8 (auth: audit), §13. None today.
 

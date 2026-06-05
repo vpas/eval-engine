@@ -56,7 +56,21 @@ def test_dataset_snapshot():
     print("snapshot ✓  content-addressed ✓  idempotent ✓  loads back to same samples ✓ (FR1/§13)")
 
 
+def test_multiple_choice_plugins():
+    """The multiple_choice harness + choice scorer register, and the loader reads a `choices` list
+    and letter `target` into the Inspect Sample (FR for the MC eval shape; DESIGN §7)."""
+    from eval_engine import builtins, datasets, plugins  # noqa: F401  builtins populates the registry
+
+    cat = {(p["kind"], p["name"]) for p in plugins.catalog()}
+    assert ("harness", "multiple_choice") in cat and ("scorer", "choice") in cat, cat
+    ds, _ = datasets.load_jsonl("examples/mcq.jsonl")
+    s = ds.samples[0]
+    assert s.choices == ["London", "Paris", "Berlin", "Madrid"] and s.target == "B", (s.choices, s.target)
+    print(f"multiple_choice ✓  choice scorer ✓  loader reads choices ✓ ({len(ds.samples)} MC samples)")
+
+
 if __name__ == "__main__":
     test_registry()
     test_dataset_snapshot()
+    test_multiple_choice_plugins()
     print("ALL PASS ✓")

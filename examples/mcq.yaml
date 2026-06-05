@@ -1,0 +1,12 @@
+# Multiple-choice eval: the multiple_choice harness presents lettered choices (A/B/C/D), the model
+# selects one, and the `choice` scorer grades the selection against the target letter. Dataset samples
+# carry a `choices` list + a letter `target` (examples/mcq.jsonl). Needs OPENROUTER_API_KEY for a real
+# model; or use model: mockllm/model with mock_output to dry-run the plumbing.
+eval: mcq_demo
+dataset: examples/mcq.jsonl
+model: openrouter/openai/gpt-4o-mini
+batch_size: 3
+harness:
+  type: multiple_choice
+scorers:
+  - type: choice

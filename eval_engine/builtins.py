@@ -9,8 +9,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from inspect_ai.scorer import Scorer, includes, match, model_graded_qa
-from inspect_ai.solver import Solver, basic_agent, generate
+from inspect_ai.scorer import Scorer, choice, includes, match, model_graded_qa
+from inspect_ai.solver import Solver, basic_agent, generate, multiple_choice
 from inspect_ai.tool import bash, python
 from inspect_ai.util import SandboxEnvironmentSpec
 
@@ -28,6 +28,17 @@ class SingleTurnConfig(BaseModel):
 @harness("single_turn", "1.0.0", SingleTurnConfig, description="One-shot generate; no tools.")
 def single_turn(cfg: SingleTurnConfig) -> Solver:
     return generate()
+
+
+class MultipleChoiceConfig(BaseModel):
+    cot: bool = False  # let the model reason (chain-of-thought) before selecting
+
+
+@harness("multiple_choice", "1.0.0", MultipleChoiceConfig,
+         description="Multiple-choice: present lettered choices, model selects one (pair with the "
+                     "'choice' scorer; dataset samples need a `choices` list + letter `target`).")
+def multiple_choice_harness(cfg: MultipleChoiceConfig) -> Solver:
+    return multiple_choice(cot=cfg.cot)
 
 
 class AgenticConfig(BaseModel):
@@ -108,6 +119,21 @@ class MatchConfig(BaseModel):
 )
 def match_scorer(cfg: MatchConfig) -> Scorer:
     return match(location=cfg.location, ignore_case=cfg.ignore_case)
+
+
+class ChoiceConfig(BaseModel):
+    pass
+
+
+@scorer(
+    "choice",
+    "1.0.0",
+    ChoiceConfig,
+    primary_metric="accuracy",
+    description="Score a multiple_choice selection against the target letter(s).",
+)
+def choice_scorer(cfg: ChoiceConfig) -> Scorer:
+    return choice()
 
 
 class LLMJudgeConfig(BaseModel):
