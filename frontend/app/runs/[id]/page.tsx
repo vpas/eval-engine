@@ -1,16 +1,26 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getRun, getResults, getTranscript, type RunDetail, type Results } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { getRun, getResults, getTranscript, rerunRun, type RunDetail, type Results } from "@/lib/api";
 import { StatusPill, fmtCost } from "@/components/ui";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
 
 export default function RunDetailPage({ params }: { params: { id: string } }) {
   const id = params.id;
+  const router = useRouter();
   const [run, setRun] = useState<RunDetail | null>(null);
   const [res, setRes] = useState<Results | null>(null);
   const [open, setOpen] = useState<{ sid: string; uri: string } | null>(null);
+  const [rerunning, setRerunning] = useState(false);
+
+  const doRerun = useCallback(() => {
+    setRerunning(true);
+    rerunRun(id)
+      .then((r) => router.push(`/runs/${r.run_id}`))
+      .catch(() => setRerunning(false));
+  }, [id, router]);
 
   const refresh = useCallback(() => {
     getRun(id).then(setRun).catch(() => {});
@@ -44,6 +54,12 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
           <span className="mono" style={{ fontSize: 18, color: "var(--signal)", fontWeight: 600 }}>{id}</span>
           {run && <StatusPill status={run.status} />}
           <span style={{ flex: 1 }} />
+          {run && (
+            <button className="btn" onClick={doRerun} disabled={rerunning}
+                    title="Clone this run's spec → a new run with identical pinned inputs">
+              {rerunning ? "re-running…" : "↻ re-run"}
+            </button>
+          )}
           {run && <span className="tag">{run.eval_id}</span>}
           {run && <span className="mono muted" style={{ fontSize: 13 }}>{run.model}</span>}
         </div>

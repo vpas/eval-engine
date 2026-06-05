@@ -137,8 +137,11 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   pinned snapshot. Tested: content-addressed + idempotent + loads back to the same samples; endpoint
   enrichment verified. (Native GCS calls here are replaced by the S3-API abstraction in #14.)
 
-- [ ] **10. Reproduce / "re-run".** FR10, §9.9. Clone a past RunSpec → a new Run with identical pinned
-  inputs (endpoint + dashboard button).
+- [x] **10. Reproduce / "re-run".** FR10, §9.9. *Done (2026-06-05):* `POST /runs/{id}/rerun` clones the
+  stored RunSpec → a new Run with identical pinned inputs (eval@version, dataset content hash, model +
+  params + seed, epochs, budget, image digest from #3/#4/#7/#9), returning `{run_id, rerun_of}`. A
+  `↻ re-run` button on the dashboard run-detail header fires it and navigates to the clone. Tested
+  (TestClient: clone preserves `eval_version`, 404 on missing run).
 
 - [ ] **11. Two-lane (interactive/batch) admission + per-run cap.** §8, `SCHEDULER.md`. A v1 item
   distinct from the deferred fair-share scheduler; today the orchestrator admits *all* queued runs.

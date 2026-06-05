@@ -59,3 +59,7 @@ export const launchRun = (spec: LaunchSpec): Promise<{ run_id: string; status: s
     headers: { "content-type": "application/json" },
     body: JSON.stringify(spec),
   }).then(j);
+
+// Reproduce a past run: clone its RunSpec → a new run with identical pinned inputs (FR10).
+export const rerunRun = (id: string): Promise<{ run_id: string; status: string; rerun_of: string }> =>
+  fetch(`/be/runs/${id}/rerun`, { method: "POST" }).then(j);

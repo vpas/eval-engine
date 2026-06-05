@@ -87,6 +87,20 @@ def create_run(spec: RunSpec, bg: BackgroundTasks,
     return {"run_id": run_id, "status": "queued"}
 
 
+@app.post("/runs/{run_id}/rerun", status_code=202)
+def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = Header(default=None)):
+    """Reproduce a past run (FR10, §9.9): clone its stored RunSpec → a new Run with identical pinned
+    inputs (eval@version, dataset content hash, model + params + seed, epochs, budget, image digest)."""
+    spec_json = control.get_spec(run_id)
+    if not spec_json:
+        raise HTTPException(status_code=404, detail=f"no run {run_id}")
+    spec = RunSpec.model_validate_json(spec_json)
+    new_id = runner.launch(spec, created_by=x_auth_request_email)
+    if INLINE_EXEC:
+        bg.add_task(runner.execute, new_id, spec)
+    return {"run_id": new_id, "status": "queued", "rerun_of": run_id}
+
+
 @app.get("/runs")
 def list_runs():
     cols = ["id", "eval", "model", "accuracy", "total", "created_at", "created_by", "status"]
