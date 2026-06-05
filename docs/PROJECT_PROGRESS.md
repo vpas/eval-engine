@@ -181,6 +181,18 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 
 ---
 
+## Bugs found during the backlog work (not in the original gap analysis)
+
+- [ ] **B1. Orchestrator leader-election stalls on every rollout (pooled Postgres).** The leader is a
+  session-scoped Postgres advisory lock (`acquire_leader`). On a managed/pooled PG (Neon + pgbouncer),
+  a killed orchestrator pod's connection **lingers idle** and keeps holding the lock, so the new pod
+  sits in `standby` and **nothing finalizes / no live metrics** until the old connection times out
+  (minutes). Observed 2026-06-05: a deploy left the MC run stuck `running` with all samples `done`;
+  manually `pg_terminate_backend`-ing the idle lock holder let the new orch take over and finalize.
+  *Fix:* on standby, detect + terminate a stale leader (idle lock holder past a threshold) before
+  contending — or move to a heartbeat/TTL lease instead of a raw session advisory lock. Until then,
+  the manual mitigation is to terminate the idle advisory-lock backend after an orchestrator rollout.
+
 ## Explicitly out of scope (deferred — see `docs/FUTURE.md`)
 
 Not gaps; deferred behind a measured trigger: fair-share scheduler, vLLM direct/bypass path, microVM
