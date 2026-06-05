@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
-from .models import RunSpec
+from .models import DatasetSpec, EvalSpec, ModelSpec, RunSpec
 
 # In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
 # orchestrator/worker pods execute. Local single-process dev (sqlite) keeps the convenient inline
@@ -141,3 +141,71 @@ def get_results(run_id: str):
             for sid, p, gk, sc, uri in analytics.samples(run_id)
         ],
     }
+
+
+# --- Entity registry (FR1–3): register + list + get for datasets / evals / models. Versions are
+# immutable (register a new version rather than mutate), so there is no PUT/DELETE — the reproducible,
+# content-addressed stance of DESIGN §13/§14. POSTs are typed (Pydantic) so the body is validated.
+
+def _register(kind: str, spec, email: str | None):
+    control.register_entity(kind, spec.id, spec.version, spec.model_dump(), email)
+    return {"id": spec.id, "version": spec.version}
+
+
+def _get(kind: str, ent_id: str):
+    e = control.get_entity(kind, ent_id)
+    if not e:
+        raise HTTPException(status_code=404, detail=f"no {kind} {ent_id}")
+    return e
+
+
+@app.post("/datasets", status_code=201)
+def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Header(default=None)):
+    return _register("dataset", spec, x_auth_request_email)
+
+
+@app.get("/datasets")
+def list_datasets():
+    return control.list_entities("dataset")
+
+
+@app.get("/datasets/{ds_id}")
+def get_dataset(ds_id: str):
+    return _get("dataset", ds_id)
+
+
+@app.post("/evals", status_code=201)
+def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Header(default=None)):
+    # Validate referenced plugins exist (an eval bundles a harness + scorers).
+    try:
+        plugins.get("harness", spec.default_harness.type, spec.default_harness.version)
+        for s in spec.default_scorers:
+            plugins.get("scorer", s.type, s.version)
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return _register("eval", spec, x_auth_request_email)
+
+
+@app.get("/evals")
+def list_evals():
+    return control.list_entities("eval")
+
+
+@app.get("/evals/{eval_id}")
+def get_eval(eval_id: str):
+    return _get("eval", eval_id)
+
+
+@app.post("/models", status_code=201)
+def register_model(spec: ModelSpec, x_auth_request_email: str | None = Header(default=None)):
+    return _register("model", spec, x_auth_request_email)
+
+
+@app.get("/models")
+def list_models():
+    return control.list_entities("model")
+
+
+@app.get("/models/{model_id}")
+def get_model(model_id: str):
+    return _get("model", model_id)

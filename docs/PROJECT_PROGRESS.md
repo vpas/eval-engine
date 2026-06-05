@@ -117,8 +117,16 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 
 ### Tier 2 — platform surface (FR1–3, FR10)
 
-- [ ] **8. Dataset / Eval / Model registration + CRUD.** FR1–3. Today only `/catalog` (plugins) exists;
-  no entity registration. Datasets are loaded by file path + hashed inline (`datasets.py`).
+- [x] **8. Dataset / Eval / Model registration + CRUD.** FR1–3. *Done (2026-06-05):* typed entity
+  specs (`DatasetSpec` / `EvalSpec` / `ModelSpec`) + a versioned registry (`control.register_entity`
+  / `list_entities` / `get_entity`, backed by a generic `entities(kind,id,version,body)` table on
+  PG + SQLite). API: `POST/GET /datasets`, `/evals`, `/models` (+ `GET /{id}` → latest version);
+  versions are immutable (re-register a new version, no PUT/DELETE — the content-addressed stance of
+  §13/§14), and `POST /evals` validates the bundled harness/scorers exist (422 otherwise). Tested:
+  `test_registry` (both backends) + a FastAPI TestClient smoke (register/list/get/validation/404).
+  **Follow-up (not blocking):** the dashboard launch form still reads `/catalog`; a picker over
+  registered evals/datasets/models — and launching a run *from* a registered eval (its dataset +
+  default harness/scorers) — lands naturally with #10 (reproduce/launch).
 
 - [ ] **9. Dataset versioning — content-addressed snapshots.** §13. Store an immutable dataset snapshot
   in object storage + a Postgres pointer (today: hash of local file bytes only).

@@ -10,6 +10,39 @@ class PluginRef(BaseModel):
     config: dict = Field(default_factory=dict)
 
 
+# --- Registered entities (DESIGN §7, FR1–3). Kept orthogonal so any valid combination composes into
+# a RunSpec. Versions are immutable — re-registering an id mints a new version (the content-addressed,
+# reproducible stance of §13/§14), so there is no in-place update/delete, only register + list + get.
+
+class DatasetSpec(BaseModel):
+    """A registered, versioned dataset (FR1)."""
+    id: str
+    version: int = 1
+    source: str = "jsonl"                      # jsonl | hf | s3 | db …
+    uri: str                                   # path/URI the loader resolves
+    description: str = ""
+
+
+class EvalSpec(BaseModel):
+    """A versioned eval bundle = dataset + default harness + default scorer(s) + config (FR2)."""
+    id: str
+    version: int = 1
+    dataset: str                               # dataset id (the registered DatasetSpec.id)
+    default_harness: PluginRef
+    default_scorers: list[PluginRef]
+    description: str = ""
+
+
+class ModelSpec(BaseModel):
+    """A registered target/model (FR3): a logical name → provider + model id + default params."""
+    id: str                                    # logical name, e.g. "gpt-4o-mini-prod"
+    version: int = 1
+    provider: str                              # openai | openrouter | vllm | mockllm
+    model_id: str                              # the provider's model id
+    params: dict = Field(default_factory=dict)  # default temperature/seed/… for this target
+    description: str = ""
+
+
 class RunSpec(BaseModel):
     eval: str
     eval_version: int = 1          # pin eval@version (DESIGN §7 — the eval is a versioned bundle)

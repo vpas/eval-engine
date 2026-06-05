@@ -37,6 +37,10 @@ CREATE INDEX IF NOT EXISTS ix_tasks_claim ON sample_tasks(run_id, status);
 CREATE TABLE IF NOT EXISTS failed_task_archive(
   run_id TEXT, sample_id TEXT, error_type TEXT, attempts INT,
   PRIMARY KEY(run_id, sample_id));
+
+CREATE TABLE IF NOT EXISTS entities(
+  kind TEXT, id TEXT, version INT, body TEXT, created_by TEXT, created_at TEXT,
+  PRIMARY KEY(kind, id, version));
 """
 
 
@@ -369,6 +373,53 @@ def ledger_size(run_id: str | None = None) -> int:
         n = con.execute("SELECT count(*) FROM sample_tasks").fetchone()[0]
     con.close()
     return n
+
+
+# --------------------------------------------------------------------------- entity registry (FR1–3)
+
+def register_entity(kind: str, ent_id: str, version: int, body: dict, created_by: str | None = None) -> None:
+    """Register an immutable entity version (datasets/evals/models). Re-registering (kind,id,version)
+    overwrites in dev; bump the version for a real revision."""
+    con = _con()
+    con.execute(
+        "INSERT INTO entities(kind,id,version,body,created_by,created_at) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(kind,id,version) DO UPDATE SET body=excluded.body, created_by=excluded.created_by",
+        (kind, ent_id, version, json.dumps(body), created_by, _now()),
+    )
+    con.commit()
+    con.close()
+
+
+def list_entities(kind: str) -> list[dict]:
+    """Latest version of each id of this kind."""
+    con = _con()
+    rows = con.execute(
+        "SELECT id, version, body, created_by, created_at FROM entities e WHERE kind=? AND version=("
+        "  SELECT max(version) FROM entities WHERE kind=e.kind AND id=e.id) ORDER BY id", (kind,),
+    ).fetchall()
+    con.close()
+    return [{"id": r[0], "version": r[1], "body": json.loads(r[2]), "created_by": r[3],
+             "created_at": r[4]} for r in rows]
+
+
+def get_entity(kind: str, ent_id: str, version: int | None = None) -> dict | None:
+    """A specific entity version, or the latest when ``version`` is None."""
+    con = _con()
+    if version is None:
+        row = con.execute(
+            "SELECT id, version, body, created_by, created_at FROM entities WHERE kind=? AND id=? "
+            "ORDER BY version DESC LIMIT 1", (kind, ent_id),
+        ).fetchone()
+    else:
+        row = con.execute(
+            "SELECT id, version, body, created_by, created_at FROM entities WHERE kind=? AND id=? "
+            "AND version=?", (kind, ent_id, version),
+        ).fetchone()
+    con.close()
+    if not row:
+        return None
+    return {"id": row[0], "version": row[1], "body": json.loads(row[2]), "created_by": row[3],
+            "created_at": row[4]}
 
 
 def archive_and_prune(run_id: str) -> None:
