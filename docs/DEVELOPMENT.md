@@ -34,12 +34,13 @@ k8s-sandbox stand-in) — see "Agentic execution + sandboxing" below and `docs/S
 python3 -m pip install --user virtualenv
 python3 -m virtualenv .venv
 .venv/bin/pip install -e .          # base deps incl. psycopg + clickhouse-connect (the backends)
-bash infra/up.sh                    # docker Postgres :5433 + ClickHouse :8123 (required)
+bash infra/up.sh                    # docker Postgres :5433 + ClickHouse :8123 (to run the app)
 ```
 
 There is no in-memory/SQLite stand-in — the engine talks to Postgres + ClickHouse directly, so
-`infra/up.sh` must be running. Connection defaults point at the local docker stack
-(`EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD` override them).
+`infra/up.sh` must be running **to run the app**. (Running the *tests* needs no manual step — the
+suite self-provisions its own backends; see [Tests](#tests).) Connection defaults point at the
+local docker stack (`EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD` override them).
 
 ## Run
 
@@ -88,7 +89,7 @@ concern by design.
 
 ```bash
 docker pull python:3.11-slim                          # pre-pull so the air-gapped container starts
-.venv/bin/python tests/test_sandbox_agentic.py   # deterministic, no API key
+.venv/bin/pytest tests/e2e/test_sandbox_agentic.py    # deterministic, no API key
 
 # real-model demo (needs OPENROUTER_API_KEY):
 .venv/bin/python -m eval_engine.cli run examples/agentic_sandbox.yaml
@@ -155,15 +156,20 @@ progress bar driven by the ledger. Vanilla HTML/JS, no build step.
 | Layer | What | Needs |
 |---|---|---|
 | `unit` | pure logic — pricing, Wilson CI, lane classification, plugins, models, dataset parsing | nothing (fast) |
-| `integration` | one module vs its real backend in isolation — the **ledger** (claim/lease/retry/budget/cap/live-rollup) and the **registry** (entities/snapshot/audit) | Postgres + ClickHouse (`infra/up.sh`) |
-| `e2e` | the full **spine** (launch → admit → drain → finalize) + the agentic Docker sandbox | backends + docker |
+| `integration` | one module vs its real backend in isolation — the **ledger** (claim/lease/retry/budget/cap/live-rollup) and the **registry** (entities/snapshot/audit) | Postgres + ClickHouse (auto-provisioned) |
+| `e2e` | the full **spine** (launch → admit → drain → finalize) + the agentic Docker sandbox | backends (auto-provisioned) + docker |
+
+Integration/e2e backends are **self-provisioned**: a session fixture (`tests/conftest.py`) reuses a
+reachable Postgres + ClickHouse if one is up (CI service containers, or your own `infra/up.sh`) and
+otherwise starts the docker stack itself and tears down only what it started — so plain `pytest`
+works with no manual step, and unit-only runs never touch docker.
 
 ```bash
 make install            # pip install -e '.[test,openrouter]'
 make test-unit          # fast, no backends
-make test-int           # integration (auto-starts infra/up.sh)
+make test-int           # integration (backends auto-provisioned)
 make test               # everything
-# or directly:
+# or directly — no manual infra/up.sh needed:
 .venv/bin/pytest -m unit            # by marker (auto-applied from the dir)
 .venv/bin/pytest tests/integration/test_ledger.py
 ```

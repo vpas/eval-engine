@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Bring up the real backends (Postgres + ClickHouse) for the prototype.
-# Then run with:  EVAL_ENGINE_BACKEND=postgres eval-engine run examples/capitals_qa.yaml
+# Bring up the real backends (Postgres + ClickHouse) for local app dev.
+# Then run with:  eval-engine run examples/capitals_qa.yaml
+# (The test suite self-provisions these — see tests/conftest.py — so this is only for running the app.)
 set -euo pipefail
 
 docker rm -f ee-postgres ee-clickhouse >/dev/null 2>&1 || true

@@ -3,13 +3,26 @@
 The DB fixtures here are deliberately NOT autouse — unit tests (``tests/unit/``) must stay I/O-free.
 The ``tests/integration/`` and ``tests/e2e/`` conftests opt every test in that dir into ``clean_db``,
 which TRUNCATEs the control tables before each test so tests never share state (the flakiness the old
-ad-hoc suite had). Connection defaults point at the local docker stack (``infra/up.sh``).
+ad-hoc suite had).
+
+The backends are self-provisioned: the ``_backends`` session fixture (pulled in transitively by every
+integration/e2e test, never by unit tests) reuses a reachable Postgres + ClickHouse if one is already
+up (CI service containers, or a dev who ran ``infra/up.sh``) and otherwise starts the docker stack
+itself, tearing down only what it started. So ``pytest`` "just works" with no manual step.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import urllib.request
+from pathlib import Path
+
+import psycopg
 import pytest
 
 from eval_engine import analytics, control
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def pytest_collection_modifyitems(items):
@@ -26,9 +39,40 @@ def pytest_collection_modifyitems(items):
 _CONTROL_TABLES = "runs, sample_tasks, failed_task_archive, entities, audit_log"
 
 
+def _backends_reachable() -> bool:
+    """True iff Postgres AND ClickHouse both accept a connection at the app's configured endpoints."""
+    try:
+        psycopg.connect(control.DSN, connect_timeout=2).close()
+    except Exception:
+        return False
+    host = os.environ.get("EVAL_ENGINE_CH_HOST", "localhost")
+    port = os.environ.get("EVAL_ENGINE_CH_PORT", "8123")
+    try:
+        urllib.request.urlopen(f"http://{host}:{port}/ping", timeout=2).read()
+    except Exception:
+        return False
+    return True
+
+
 @pytest.fixture(scope="session")
-def _schema():
-    """Create the Postgres + ClickHouse schema once per session (needs infra/up.sh)."""
+def _backends():
+    """Ensure the backends are up for the whole session. Reuse them if already reachable; otherwise
+    start the docker stack via ``infra/up.sh`` (the single source of container config) and stop it
+    via ``infra/down.sh`` at session end. Only what *this* fixture started is torn down — a dev's
+    own ``infra/up.sh`` containers are left running."""
+    if _backends_reachable():
+        yield
+        return
+    subprocess.run(["bash", str(_REPO_ROOT / "infra" / "up.sh")], check=True)  # waits for readiness
+    try:
+        yield
+    finally:
+        subprocess.run(["bash", str(_REPO_ROOT / "infra" / "down.sh")], check=True)
+
+
+@pytest.fixture(scope="session")
+def _schema(_backends):
+    """Create the Postgres + ClickHouse schema once per session."""
     control.init()
     analytics.init()
 
