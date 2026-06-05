@@ -167,7 +167,8 @@ def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) 
         "lease_expires_at=now() + make_interval(secs => %s) "
         "FROM ("
         "  SELECT run_id, sample_id FROM sample_tasks"
-        "  WHERE run_id=%s AND (status='queued' OR"
+        "  WHERE run_id=%s AND ("
+        "        (status='queued' AND (not_before IS NULL OR not_before <= now())) OR"
         "        (status='running' AND lease_expires_at < now()))"
         "  ORDER BY sample_id LIMIT %s"
         "  FOR UPDATE SKIP LOCKED"
@@ -194,6 +195,34 @@ def mark_failed(run_id: str, sample_id: str, error_type: str) -> None:
         "UPDATE sample_tasks SET status='failed', error_type=%s WHERE run_id=%s AND sample_id=%s",
         (error_type, run_id, sample_id),
     )
+
+
+def retry_or_fail(run_id: str, sample_id: str, error_type: str, max_attempts: int = 3,
+                  base_seconds: float = 2.0, cap_seconds: float = 60.0) -> str:
+    """A transient sample failure: re-queue with exponential ``not_before`` backoff if we're under
+    the attempt cap (the claim already incremented ``attempts``); otherwise terminal ``failed``
+    (ORCHESTRATION §7, FR5). Re-queuing clears the lease so the row is immediately *eligible* but
+    not claimable until ``not_before`` — so a poison sample backs off instead of head-of-line
+    blocking. Returns ``'retry'`` or ``'failed'``."""
+    row = _conn().execute(
+        "SELECT attempts FROM sample_tasks WHERE run_id=%s AND sample_id=%s", (run_id, sample_id)
+    ).fetchone()
+    attempts = int(row[0]) if row and row[0] is not None else max_attempts
+    if attempts >= max_attempts:
+        _conn().execute(
+            "UPDATE sample_tasks SET status='failed', error_type=%s, claimed_by=NULL, "
+            "lease_expires_at=NULL WHERE run_id=%s AND sample_id=%s",
+            (error_type, run_id, sample_id),
+        )
+        return "failed"
+    delay = min(base_seconds * (2 ** max(0, attempts - 1)), cap_seconds)
+    _conn().execute(
+        "UPDATE sample_tasks SET status='queued', error_type=%s, claimed_by=NULL, "
+        "lease_expires_at=NULL, not_before=now() + make_interval(secs => %s) "
+        "WHERE run_id=%s AND sample_id=%s",
+        (error_type, delay, run_id, sample_id),
+    )
+    return "retry"
 
 
 def fetch_unloaded(run_id: str, only_ids: list[str] | None = None):

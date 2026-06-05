@@ -169,11 +169,11 @@ def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) 
         "UPDATE sample_tasks SET status='running', attempts=attempts+1, claimed_by=?, "
         "lease_expires_at=? WHERE rowid IN ("
         "  SELECT rowid FROM sample_tasks WHERE run_id=? AND ("
-        "    status='queued' OR (status='running' AND lease_expires_at IS NOT NULL "
-        "                        AND lease_expires_at < ?))"
+        "    (status='queued' AND (not_before IS NULL OR not_before <= ?)) OR"
+        "    (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))"
         "  ORDER BY sample_id LIMIT ?"
         ") RETURNING sample_id",
-        (worker, now + lease_seconds, run_id, now, n),
+        (worker, now + lease_seconds, run_id, now, now, n),
     ).fetchall()
     con.close()
     return [r[0] for r in rows]
@@ -204,6 +204,36 @@ def mark_failed(run_id: str, sample_id: str, error_type: str) -> None:
     )
     con.commit()
     con.close()
+
+
+def retry_or_fail(run_id: str, sample_id: str, error_type: str, max_attempts: int = 3,
+                  base_seconds: float = 2.0, cap_seconds: float = 60.0) -> str:
+    """Transient sample failure: re-queue with exponential ``not_before`` backoff if under the
+    attempt cap (the claim already bumped ``attempts``), else terminal ``failed`` (ORCHESTRATION §7,
+    FR5). Backoff means a poison sample doesn't head-of-line block. Returns ``'retry'``/``'failed'``."""
+    con = _con()
+    row = con.execute(
+        "SELECT attempts FROM sample_tasks WHERE run_id=? AND sample_id=?", (run_id, sample_id)
+    ).fetchone()
+    attempts = int(row[0]) if row and row[0] is not None else max_attempts
+    if attempts >= max_attempts:
+        con.execute(
+            "UPDATE sample_tasks SET status='failed', error_type=?, claimed_by=NULL, "
+            "lease_expires_at=NULL WHERE run_id=? AND sample_id=?",
+            (error_type, run_id, sample_id),
+        )
+        outcome = "failed"
+    else:
+        delay = min(base_seconds * (2 ** max(0, attempts - 1)), cap_seconds)
+        con.execute(
+            "UPDATE sample_tasks SET status='queued', error_type=?, claimed_by=NULL, "
+            "lease_expires_at=NULL, not_before=? WHERE run_id=? AND sample_id=?",
+            (error_type, time.time() + delay, run_id, sample_id),
+        )
+        outcome = "retry"
+    con.commit()
+    con.close()
+    return outcome
 
 
 def fetch_unloaded(run_id: str, only_ids: list[str] | None = None):

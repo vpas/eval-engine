@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import time
 import urllib.request
 from pathlib import Path
 
@@ -30,6 +31,26 @@ GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → tran
 # Inspect's rich `.eval` logs go to GCS too (so the Inspect log viewer can read them); local in dev.
 EVAL_LOG_DIR = f"gs://{GCS_BUCKET}/eval-logs" if GCS_BUCKET else str(control.DATA / "logs")
 _gcs_client = None
+
+# Per-sample retry policy (FR5, ORCHESTRATION §7). A transient sample failure re-queues with
+# exponential `not_before` backoff up to MAX_ATTEMPTS, then goes terminal `failed`. The claim already
+# increments attempts; backoff keeps a poison sample from head-of-line blocking the queue.
+MAX_ATTEMPTS = int(os.environ.get("EVAL_ENGINE_MAX_ATTEMPTS", "3"))
+RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0"))
+RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
+
+
+def _settle_result(run_id: str, sid: str, result: dict | None) -> str:
+    """Commit a clean result; retry-with-backoff a *transient* failure — a missing sample
+    (``no_result``) or one Inspect recorded an execution error on. A merely low-scoring (wrong but
+    error-free) sample is a clean result, not a failure. Returns ``'done'``/``'retry'``/``'failed'``."""
+    err = "no_result" if result is None else result.get("error_type")
+    if err:
+        return control.retry_or_fail(
+            run_id, sid, err, MAX_ATTEMPTS, RETRY_BASE_SECONDS, RETRY_CAP_SECONDS
+        )
+    control.commit_result(run_id, sid, result)
+    return "done"
 
 
 def _gcs():
@@ -143,7 +164,12 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
         tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
         completion = s.output.completion if s.output else ""
-        uri = _put_transcript(
+        # Inspect records an execution error (model/tool/sandbox exception) on the sample as `.error`
+        # — distinct from a low score. A non-empty error_type routes the sample to retry (`_settle_result`).
+        err = getattr(s, "error", None)
+        error_type = str(getattr(err, "message", err))[:200] if err else ""
+        # Don't waste a transcript write on a to-be-retried sample; the retry writes its own.
+        uri = "" if error_type else _put_transcript(
             run_id, sid,
             {"input": str(s.input), "output": completion, "target": str(s.target),
              "scores": score_vals, "eval_log_uri": eval_log_uri},  # for the Inspect viewer deep-link
@@ -156,7 +182,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
             "tokens_out": tokens_out,
             "cost_usd": _cost_usd(spec.model, tokens_in, tokens_out),  # prod: LiteLLM gateway
             "latency_ms": 0,
-            "error_type": "",
+            "error_type": error_type,
             "transcript_uri": uri,
         }
     return out
@@ -232,14 +258,21 @@ def execute(run_id: str, spec: RunSpec) -> None:
     control.set_status(run_id, "running")
 
     worker = "w0"
-    while ids := control.claim_batch(run_id, worker, spec.batch_size):
-        results = _execute_batch(spec, run_id, samples_by_id, ids)
-        for sid in ids:
-            if sid in results:
-                control.commit_result(run_id, sid, results[sid])
-            else:
-                control.mark_failed(run_id, sid, "no_result")
-        _batch_load(run_id, spec)
+    while True:
+        ids = control.claim_batch(run_id, worker, spec.batch_size)
+        if ids:
+            results = _execute_batch(spec, run_id, samples_by_id, ids)
+            for sid in ids:
+                _settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
+            _batch_load(run_id, spec)
+            continue
+        # Nothing claimable right now. If tasks remain (queued behind a not_before backoff, or
+        # running), wait out the backoff and re-claim — don't finalize early. (The distributed path
+        # relies on the orchestrator's finalize gate instead; this is the single-process equivalent.)
+        c = control.counts(run_id)
+        if c.get("queued", 0) == 0 and c.get("running", 0) == 0:
+            break
+        time.sleep(0.5)
 
     _finalize(run_id, spec)
 

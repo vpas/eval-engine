@@ -120,9 +120,43 @@ def _sum_attempts(run_id: str) -> int:
     return n
 
 
+def _status(run_id: str, sid: str) -> str:
+    con = control._con()
+    s = con.execute("SELECT status FROM sample_tasks WHERE run_id=? AND sample_id=?", (run_id, sid)).fetchone()[0]
+    con.close()
+    return s
+
+
+def test_retry_backoff():
+    """A transient failure re-queues with a not_before backoff (not claimable until it elapses),
+    up to the attempt cap, then goes terminal 'failed' (FR5, ORCHESTRATION §7)."""
+    run_id = _make_run(1)
+    sid = "s0000"
+
+    # attempt 1: claim → fail. max_attempts=2 so this re-queues (not terminal yet).
+    assert control.claim_batch(run_id, "W", 1) == [sid]
+    out = control.retry_or_fail(run_id, sid, "boom", max_attempts=2, base_seconds=0.5, cap_seconds=10)
+    assert out == "retry", out
+    assert _status(run_id, sid) == "queued"
+
+    # backoff active: NOT claimable until not_before elapses (poison sample doesn't head-of-line block).
+    assert control.claim_batch(run_id, "W", 1) == [], "claimed during backoff"
+    time.sleep(0.6)
+    assert control.claim_batch(run_id, "W", 1) == [sid], "not reclaimed after backoff"  # attempt 2
+
+    # attempt 2 fails → at the cap → terminal 'failed', and it stays out of the claimable set.
+    out = control.retry_or_fail(run_id, sid, "boom", max_attempts=2, base_seconds=0.5, cap_seconds=10)
+    assert out == "failed", out
+    assert _status(run_id, sid) == "failed"
+    time.sleep(0.6)
+    assert control.claim_batch(run_id, "W", 1) == [], "terminal-failed task re-claimed"
+    print("  [retry-backoff] re-queue ✓  not_before blocks claim ✓  attempt-cap → terminal ✓")
+
+
 if __name__ == "__main__":
     _use_temp_db()
     print("concurrency tests (ledger claim/commit):")
     test_exactly_once()
     test_lease_reclaim()
+    test_retry_backoff()
     print("\nALL PASS ✓")

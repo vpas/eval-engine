@@ -117,8 +117,30 @@ def test_lease_reclaim():
         _cleanup(run_id)
 
 
+def test_retry_backoff():
+    """Transient failure re-queues with a not_before backoff (unclaimable until it elapses), to the
+    attempt cap, then terminal 'failed' — on the REAL Postgres backend (FR5, ORCHESTRATION §7)."""
+    run_id = _make_run(1)
+    sid = "s00000"
+    try:
+        assert control.claim_batch(run_id, "W", 1) == [sid]               # attempt 1
+        assert control.retry_or_fail(run_id, sid, "boom", max_attempts=2, base_seconds=0.5) == "retry"
+        assert control.counts(run_id).get("queued", 0) == 1
+        assert control.claim_batch(run_id, "W", 1) == [], "claimed during backoff"
+        time.sleep(0.7)
+        assert control.claim_batch(run_id, "W", 1) == [sid], "not reclaimed after backoff"  # attempt 2
+        assert control.retry_or_fail(run_id, sid, "boom", max_attempts=2, base_seconds=0.5) == "failed"
+        assert control.counts(run_id).get("failed", 0) == 1
+        time.sleep(0.7)
+        assert control.claim_batch(run_id, "W", 1) == [], "terminal-failed task re-claimed"
+        print("  [retry-backoff] re-queue ✓  not_before blocks claim ✓  attempt-cap → terminal ✓")
+    finally:
+        _cleanup(run_id)
+
+
 if __name__ == "__main__":
     print("Postgres FOR UPDATE SKIP LOCKED concurrency tests:")
     test_exactly_once()
     test_lease_reclaim()
+    test_retry_backoff()
     print("\nALL PASS ✓")

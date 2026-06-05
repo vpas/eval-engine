@@ -34,10 +34,7 @@ def _drain_run(run_id: str) -> int:
             return processed
         results = runner._execute_batch(spec, run_id, samples_by_id, ids)
         for sid in ids:
-            if sid in results:
-                db.control.commit_result(run_id, sid, results[sid])
-            else:
-                db.control.mark_failed(run_id, sid, "no_result")
+            runner._settle_result(run_id, sid, results.get(sid))  # commit, or retry-with-backoff to N
         runner._batch_load(run_id, spec, ids)  # load only our shard (no loader race)
         processed += len(ids)
 

@@ -50,10 +50,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   fully-synchronized bursts can briefly overshoot the cap (read-then-increment race); converges to the
   cap over the window — acceptable for provider-quota protection.
 
-- [ ] **2. Per-sample retry with backoff to N.** FR5, §9.5. Today: `control_pg.mark_failed` is
-  immediately terminal; the `not_before` column exists but is never written. Lease-reclaim covers
-  *crashes*, not *failures*. *Done when:* a failed sample re-queues with `not_before` backoff up to a
-  max-attempts cap, then goes terminal; poison samples don't head-of-line block the claim.
+- [x] **2. Per-sample retry with backoff to N.** FR5, §9.5. *Done (2026-06-05):* the claim now
+  respects `not_before` (both backends); `control.retry_or_fail` re-queues a transient failure with
+  exponential `not_before` backoff up to `MAX_ATTEMPTS` (env `EVAL_ENGINE_MAX_ATTEMPTS`, default 3),
+  then terminal `failed`. `runner._execute_batch` captures Inspect's per-sample `.error` (an execution
+  error, distinct from a low score) and routes it via `_settle_result` to commit-or-retry; the
+  single-process `runner.execute` waits out backoffs before finalize (distributed path uses the
+  orchestrator's `queued==0` finalize gate). Tested on SQLite + Postgres (`test_retry_backoff`):
+  re-queue → `not_before` blocks the claim → attempt-cap → terminal; `exactly-once` unaffected.
 
 - [ ] **3. Budget caps + `BudgetExceeded` terminal class.** FR6, §8. Today: cost is priced from the
   catalog but never capped. *Done when:* RunSpec carries a budget; a gateway/worker budget reject is a
