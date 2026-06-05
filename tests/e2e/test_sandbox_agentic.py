@@ -84,9 +84,3 @@ def test_agentic_sandbox():
     print(f"  [agentic-sandbox] run {run_id} | agentic harness through the spine ✓ | "
           f"bash ran INSIDE the air-gapped container (read {SECRET!r} the worker lacks) ✓ | "
           f"analytics rows={n} passed={passed} ledger pruned ✓")
-
-
-if __name__ == "__main__":
-    print("Agentic harness + air-gapped Docker sandbox through the spine:")
-    test_agentic_sandbox()
-    print("\nALL PASS ✓")

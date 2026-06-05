@@ -193,27 +193,3 @@ def test_max_inflight_cap():
         print("  [max-inflight] per-run cap holds at 3 ✓  frees on completion ✓")
     finally:
         _cleanup(run_id)
-
-
-def test_lane_classification():
-    """Auto-classify interactive vs batch + pin max_inflight (SCHEDULER §2). Pure function — no DB."""
-    from eval_engine.models import PluginRef, RunSpec
-    from eval_engine.runner import _classify
-    base = dict(eval="e", dataset="d", harness=PluginRef(type="single_turn"), scorers=[])
-    assert _classify(RunSpec(**base, limit=10), 5000) == ("interactive", 5)  # a limit ⇒ interactive
-    assert _classify(RunSpec(**base), 50) == ("interactive", 5)              # small ⇒ interactive
-    assert _classify(RunSpec(**base), 5000) == ("batch", 50)                 # large ⇒ batch
-    assert _classify(RunSpec(**base, lane="batch"), 10)[0] == "batch"        # explicit override wins
-    print("  [lane] classify interactive/batch + max_inflight ✓  override ✓")
-
-
-if __name__ == "__main__":
-    print("Postgres FOR UPDATE SKIP LOCKED concurrency tests:")
-    test_exactly_once()
-    test_lease_reclaim()
-    test_retry_backoff()
-    test_budget_stop()
-    test_live_rollup()
-    test_max_inflight_cap()
-    test_lane_classification()
-    print("\nALL PASS ✓")

@@ -115,11 +115,10 @@ eval_engine/
   worker.py / orchestrator.py  the distributed split: claim loop / admit+finalize (leader-elected)
   api.py        FastAPI control plane: POST /runs, entity CRUD, rerun, GET status/results/catalog/audit
   cli.py        run | report | runs | catalog | ledger
-tests/
-  test_concurrency.py      exactly-once + lease-reclaim + retry/budget/cap (Postgres SKIP LOCKED)
-  test_distributed.py      launch → orchestrator admit → worker drain → finalize (full spine)
-  test_registry.py         entity registry + content-addressed snapshot + audit + multiple_choice
-  test_sandbox_agentic.py  agentic harness + tool exec inside an air-gapped Docker sandbox
+tests/                  pytest, layered (conftest.py = fixtures + per-test truncation isolation)
+  unit/               pure logic — pricing/Wilson-CI, lane classify, plugins, models, datasets (no backends)
+  integration/        test_ledger.py (claim/lease/retry/budget/cap) + test_registry.py (entities/snapshot/audit)
+  e2e/                test_spine.py (launch→admit→drain→finalize) + test_sandbox_agentic.py (agentic sandbox)
 infra/              up.sh / down.sh — docker Postgres + ClickHouse (the backends)
 deploy/sandbox/     airgap-compose.yaml — hardened, air-gapped agentic sandbox (k8s-sandbox stand-in)
 examples/           qa.jsonl + capitals_qa.yaml + capitals_openrouter.yaml + sandbox_qa.jsonl + agentic_sandbox.yaml
@@ -151,17 +150,28 @@ progress bar driven by the ledger. Vanilla HTML/JS, no build step.
 
 ## Tests
 
+**pytest**, layered (`tests/{unit,integration,e2e}/`) so a newcomer sees the shape at a glance:
+
+| Layer | What | Needs |
+|---|---|---|
+| `unit` | pure logic — pricing, Wilson CI, lane classification, plugins, models, dataset parsing | nothing (fast) |
+| `integration` | one module vs its real backend in isolation — the **ledger** (claim/lease/retry/budget/cap/live-rollup) and the **registry** (entities/snapshot/audit) | Postgres + ClickHouse (`infra/up.sh`) |
+| `e2e` | the full **spine** (launch → admit → drain → finalize) + the agentic Docker sandbox | backends + docker |
+
 ```bash
-bash infra/up.sh                                  # Postgres + ClickHouse (required for all but catalog)
-.venv/bin/python tests/test_concurrency.py        # ledger: exactly-once, lease-reclaim, retry, budget, cap
-.venv/bin/python tests/test_distributed.py        # full spine: launch → admit → drain → finalize
-.venv/bin/python tests/test_registry.py           # registry + snapshot + audit + multiple_choice
-docker pull python:3.11-slim && .venv/bin/python tests/test_sandbox_agentic.py   # agentic Docker sandbox
+make install            # pip install -e '.[test,openrouter]'
+make test-unit          # fast, no backends
+make test-int           # integration (auto-starts infra/up.sh)
+make test               # everything
+# or directly:
+.venv/bin/pytest -m unit            # by marker (auto-applied from the dir)
+.venv/bin/pytest tests/integration/test_ledger.py
 ```
 
-`test_concurrency` proves exactly-once claim (no double-claim, none dropped) and lease-based reclaim
-of tasks abandoned by a "crashed" worker, via the real `FOR UPDATE SKIP LOCKED` where all N workers
-claim *in parallel* (2000 samples / 12 workers, exactly-once, ~3.8k samples/s).
+Isolation is automatic: a root-`conftest.py` fixture TRUNCATEs the control tables before each
+integration/e2e test, so tests never share state. The ledger test proves exactly-once claim (no
+double-claim, none dropped) + lease reclaim via the real `FOR UPDATE SKIP LOCKED` where all N workers
+claim *in parallel* (2000 samples / 12 workers, ~3.8k samples/s).
 
 ## Distributed execution (K8s)
 

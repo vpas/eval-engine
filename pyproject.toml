@@ -30,9 +30,24 @@ openrouter = ["openai"]
 gcs = ["google-cloud-storage", "gcsfs"]
 # agentic sandboxing on Kubernetes (helm-deployed per-sample pods); needs helm in the image + RBAC
 k8s = ["inspect-k8s-sandbox"]
+# test suite (pytest). Integration/e2e tests also need infra/up.sh (Postgres + ClickHouse).
+test = ["pytest>=8"]
 
 [project.scripts]
 eval-engine = "eval_engine.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# layers as markers (also mirrored by the tests/{unit,integration,e2e}/ dirs):
+#   unit        — pure logic, no I/O (no Postgres/ClickHouse needed)
+#   integration — one module against its real backend in isolation (needs infra/up.sh)
+#   e2e         — the full spine / sandbox (needs infra/up.sh; sandbox also needs docker)
+markers = [
+  "unit: pure logic, no I/O (no backends needed)",
+  "integration: needs Postgres + ClickHouse (infra/up.sh)",
+  "e2e: full-spine or sandbox test (slower; needs infra/up.sh, sandbox needs docker)",
+]
 
 [tool.setuptools]
 packages = ["eval_engine"]

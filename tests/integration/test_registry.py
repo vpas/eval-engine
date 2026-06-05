@@ -78,11 +78,3 @@ def test_audit():
     assert a[0]["action"] == "dataset.register" and a[0]["actor"] == "u@x" and a[0]["target"] == "ds-xyz", a[0]
     assert a[0]["detail"] == {"version": 1} and any(e["action"] == "run.launch" for e in a)
     print("audit ✓  append-only who/what/when, newest-first ✓")
-
-
-if __name__ == "__main__":
-    test_registry()
-    test_dataset_snapshot()
-    test_multiple_choice_plugins()
-    test_audit()
-    print("ALL PASS ✓")

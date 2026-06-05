@@ -79,9 +79,3 @@ def test_epochs_and_ci():
     assert n == 3, f"epochs should reduce to one row per sample, got n={n}"  # 3 samples, not 9
     ci = runner.wilson_ci(50, 100)
     print(f"epochs+CI ✓  (epochs=3 → {n} reduced rows; wilson_ci(50,100)=[{ci[0]:.3f},{ci[1]:.3f}])")
-
-
-if __name__ == "__main__":
-    test_worker_orchestrator_split()
-    test_epochs_and_ci()
-    print("ALL PASS ✓")
