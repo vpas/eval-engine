@@ -28,7 +28,7 @@ resource "google_container_cluster" "primary" {
   depends_on = [google_project_service.apis]
 }
 
-# Always-on pool: hosts the control plane + ClickHouse/Redis + Ray head + KubeRay operator.
+# Always-on pool: hosts the control plane + Orchestrator + LiteLLM + ClickHouse/Redis + KEDA operator.
 resource "google_container_node_pool" "system" {
   name       = "system"
   location   = var.zone
@@ -44,8 +44,9 @@ resource "google_container_node_pool" "system" {
   }
 }
 
-# Worker pool: SPOT + autoscale 0..N. Tainted so ONLY Ray workers (with the matching toleration)
-# land here and the pool can scale to zero. Spot eviction is a non-event — lease-reclaim handles it.
+# Worker pool: SPOT + autoscale 0..N. Tainted so ONLY eval-engine workers (with the matching
+# toleration) land here and the pool can scale to zero. Spot eviction is a non-event — lease-reclaim
+# handles it. KEDA scales the worker Deployment on ledger queue depth; the pool autoscaler follows.
 resource "google_container_node_pool" "workers" {
   name     = "workers"
   location = var.zone

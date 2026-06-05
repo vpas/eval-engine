@@ -1,0 +1,39 @@
+# Test-grade single-pod Redis on the system node: gateway global rate-limit state + run stop-flags.
+# Ephemeral (no PVC) — rate-limit/stop-flag state is soft and rebuildable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: eval-engine
+  labels: { app: redis }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--save", "", "--appendonly", "no"]   # in-memory only
+          ports:
+            - { name: redis, containerPort: 6379 }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eval-engine
+spec:
+  selector: { app: redis }
+  ports:
+    - { name: redis, port: 6379, targetPort: 6379 }

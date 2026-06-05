@@ -1,0 +1,59 @@
+# Test-grade single-pod ClickHouse on the always-on system node. NOT HA; fine for the e2e.
+# Default user, no password (matches the prototype's analytics_ch.py). Small PVC for persistence.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-data
+  namespace: eval-engine
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: eval-engine
+  labels: { app: clickhouse }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }        # single PVC; don't run two pods at once
+  selector: { matchLabels: { app: clickhouse } }
+  template:
+    metadata:
+      labels: { app: clickhouse }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          ports:
+            - { name: http,   containerPort: 8123 }
+            - { name: native, containerPort: 9000 }
+          env:
+            - { name: CLICKHOUSE_DB, value: default }
+          resources:
+            requests: { cpu: "200m", memory: "512Mi" }
+            limits:   { memory: "1536Mi" }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+          readinessProbe:
+            httpGet: { path: /ping, port: 8123 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: clickhouse-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: eval-engine
+spec:
+  selector: { app: clickhouse }
+  ports:
+    - { name: http,   port: 8123, targetPort: 8123 }
+    - { name: native, port: 9000, targetPort: 9000 }

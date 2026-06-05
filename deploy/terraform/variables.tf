@@ -21,8 +21,8 @@ variable "cluster_name" {
 
 variable "system_machine_type" {
   type        = string
-  default     = "e2-medium" # 2 vCPU / 4GB — always-on pool: API, gateway, ClickHouse, Redis, Ray head, operator
-  description = "Always-on node. e2-small (~$12/mo) is cheaper but tight once ClickHouse is on it; e2-medium (~$24/mo) is the safe minimal."
+  default     = "e2-standard-4" # 4 vCPU / 16GB — always-on pool: API, Orchestrator, LiteLLM, ClickHouse, Redis, KEDA
+  description = "Always-on node. e2-medium (2 vCPU) is too small: GKE system daemons reserve ~640m of ~940m allocatable CPU, leaving no room for the always-on stack (~500m). e2-standard-4 (~3200m free) holds the whole stack with no trimming."
 }
 
 variable "worker_machine_type" {
