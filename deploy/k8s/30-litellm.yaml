@@ -8,16 +8,40 @@ metadata:
 data:
   config.yaml: |
     model_list:
-      # wildcard passthrough: the worker sends e.g. "meta-llama/llama-3.1-8b-instruct" (the openai/
-      # prefix is stripped by Inspect's provider) and we route it to openrouter/<that model>. Keeping
-      # the real model id lets the worker price the call from the OpenRouter catalog.
+      # Per-model rate limits (DESIGN §2/FR6). rpm/tpm are enforced by the Router; with redis in
+      # router_settings the usage counters are shared across ALL gateway replicas, so the cap is
+      # GLOBAL (cross-worker), not per-replica — the property DESIGN §12 says to load-test.
+      - model_name: "openai/gpt-4o-mini"        # the model our workers use (gateway sees it post-strip)
+        litellm_params:
+          model: openrouter/openai/gpt-4o-mini
+          api_key: os.environ/OPENROUTER_API_KEY
+          rpm: 60
+          tpm: 200000
+      # Dedicated limiter test model: mock_response → no upstream call (zero cost), so a load test
+      # exercises the rate limiter in isolation. Low rpm makes the global cap easy to observe.
+      - model_name: "ratelimit-test"
+        litellm_params:
+          model: openai/gpt-4o-mini
+          mock_response: "ok"
+          rpm: 6
+      # wildcard passthrough fallback: the worker sends e.g. "meta-llama/llama-3.1-8b-instruct" (the
+      # openai/ prefix is stripped by Inspect's provider) and we route it to openrouter/<that model>.
+      # An exact model_name above wins over this wildcard. Keeps the real model id for catalog pricing.
       - model_name: "*"
         litellm_params:
           model: openrouter/*
           api_key: os.environ/OPENROUTER_API_KEY
     litellm_settings:
       drop_params: true
+      num_retries: 0          # fail fast: over-limit → 429 immediately, don't retry/cooldown-wait (would hang)
+      request_timeout: 20
     router_settings:
+      # usage-based-routing-v2 + redis = distributed (cross-replica) usage tracking; pre-call checks
+      # filter a deployment that is over its rpm/tpm BEFORE routing → over-limit returns HTTP 429.
+      routing_strategy: usage-based-routing-v2
+      enable_pre_call_checks: true
+      num_retries: 0
+      allowed_fails: 0
       redis_host: os.environ/REDIS_HOST
       redis_port: os.environ/REDIS_PORT
     general_settings:
@@ -30,7 +54,7 @@ metadata:
   namespace: eval-engine
   labels: { app: litellm }
 spec:
-  replicas: 1
+  replicas: 2   # ≥2 (DESIGN §8); also makes the global (redis-shared) rate limit testable cross-replica
   selector: { matchLabels: { app: litellm } }
   template:
     metadata:
