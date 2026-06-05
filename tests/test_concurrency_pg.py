@@ -179,6 +179,21 @@ def test_live_rollup():
         _cleanup(run_id)
 
 
+def test_max_inflight_cap():
+    """Per-run concurrency cap on the REAL Postgres claim (SCHEDULER §3)."""
+    run_id = _make_run(10)
+    try:
+        control._conn().execute("UPDATE runs SET max_inflight=3 WHERE id=%s", (run_id,))
+        a = control.claim_batch(run_id, "W", 10)
+        assert len(a) == 3, len(a)
+        assert control.claim_batch(run_id, "W2", 10) == [], "claim exceeded max_inflight"
+        control.commit_result(run_id, a[0], _fake_result())
+        assert len(control.claim_batch(run_id, "W3", 10)) == 1, "headroom didn't free on completion"
+        print("  [max-inflight] per-run cap holds at 3 ✓  frees on completion ✓")
+    finally:
+        _cleanup(run_id)
+
+
 if __name__ == "__main__":
     print("Postgres FOR UPDATE SKIP LOCKED concurrency tests:")
     test_exactly_once()
@@ -186,4 +201,5 @@ if __name__ == "__main__":
     test_retry_backoff()
     test_budget_stop()
     test_live_rollup()
+    test_max_inflight_cap()
     print("\nALL PASS ✓")

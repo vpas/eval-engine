@@ -30,13 +30,15 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
   accuracy DOUBLE PRECISION, cost_usd DOUBLE PRECISION DEFAULT 0, dataset_hash TEXT, spec_json TEXT,
-  created_by TEXT, team TEXT, image_digest TEXT,
+  created_by TEXT, team TEXT, image_digest TEXT, lane TEXT, max_inflight INT,
   created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
 -- idempotent migrations for tables created before these columns existed
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS team TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS image_digest TEXT;  -- repro pin: worker code/image (DESIGN §14)
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS lane TEXT;          -- interactive | batch (SCHEDULER §2)
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS max_inflight INT;   -- per-run concurrency cap (SCHEDULER §3)
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -142,12 +144,12 @@ def new_run_id() -> str:
 def create_run(meta: dict) -> None:
     _conn().execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,dataset_hash,spec_json,created_by,team,image_digest) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s,%s,%s)",
+        "status,total,done,failed,dataset_hash,spec_json,created_by,team,image_digest,lane,max_inflight) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s,%s,%s,%s,%s)",
         (meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
          meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), meta["total"],
          meta["dataset_hash"], meta.get("spec_json"), meta.get("created_by"),
-         meta.get("team"), meta.get("image_digest")),
+         meta.get("team"), meta.get("image_digest"), meta.get("lane"), meta.get("max_inflight")),
     )
 
 
@@ -214,7 +216,7 @@ def list_runs():
 # Explicit column order for get_run (NOT SELECT * — the table has spec_json/created_by the API doesn't
 # map, so positional SELECT * would misalign created_at/finished_at). Keep in sync with api.get_run.
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
-            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, "
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, lane, "
             "created_at, finished_at")
 
 
@@ -243,13 +245,36 @@ def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) 
         "  WHERE run_id=%s AND ("
         "        (status='queued' AND (not_before IS NULL OR not_before <= now())) OR"
         "        (status='running' AND lease_expires_at < now()))"
-        "  ORDER BY sample_id LIMIT %s"
+        "  ORDER BY sample_id"
+        # Per-run concurrency cap (SCHEDULER §3): headroom = max_inflight − LIVE running (expired
+        # leases don't count, so reclaim still works). A run at its cap yields no claims → workers
+        # flow to runs with headroom. NULL max_inflight (legacy/uncapped) → effectively unbounded.
+        "  LIMIT LEAST(%s, GREATEST(0,"
+        "    coalesce((SELECT max_inflight FROM runs WHERE id=%s), 1000000000)"
+        "    - (SELECT count(*) FROM sample_tasks WHERE run_id=%s AND status='running'"
+        "       AND lease_expires_at > now())))"
         "  FOR UPDATE SKIP LOCKED"
         ") c WHERE t.run_id=c.run_id AND t.sample_id=c.sample_id "
         "RETURNING t.sample_id",
-        (worker, lease_seconds, run_id, n),
+        (worker, lease_seconds, run_id, n, run_id, run_id),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def lane_running_counts() -> dict[str, int]:
+    """Count of currently-RUNNING runs per lane — input to two-lane admission (SCHEDULER §2)."""
+    rows = _conn().execute(
+        "SELECT coalesce(lane, 'batch'), count(*) FROM runs WHERE status='running' GROUP BY lane"
+    ).fetchall()
+    return {r[0]: int(r[1]) for r in rows}
+
+
+def queued_runs_with_lane() -> list[tuple[str, str]]:
+    """Queued runs in FIFO (created_at) order with their lane — the admission candidates."""
+    rows = _conn().execute(
+        "SELECT id, coalesce(lane, 'batch') FROM runs WHERE status='queued' ORDER BY created_at"
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
 
 
 def commit_result(run_id: str, sample_id: str, r: dict) -> None:

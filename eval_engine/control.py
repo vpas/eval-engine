@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers TEXT, status TEXT, total INT, done INT, failed INT,
   accuracy REAL, cost_usd REAL DEFAULT 0, dataset_hash TEXT, spec_json TEXT, created_by TEXT,
-  team TEXT, image_digest TEXT, created_at TEXT, finished_at TEXT);
+  team TEXT, image_digest TEXT, lane TEXT, max_inflight INTEGER, created_at TEXT, finished_at TEXT);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -58,7 +58,8 @@ def _con() -> sqlite3.Connection:
     # EXISTS). Cheap PRAGMA check; mirrors the Postgres ALTER ... IF NOT EXISTS migrations.
     have = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
     for col, ddl in (("cost_usd", "cost_usd REAL DEFAULT 0"), ("team", "team TEXT"),
-                     ("image_digest", "image_digest TEXT")):
+                     ("image_digest", "image_digest TEXT"), ("lane", "lane TEXT"),
+                     ("max_inflight", "max_inflight INTEGER")):
         if col not in have:
             con.execute(f"ALTER TABLE runs ADD COLUMN {ddl}")
     return con
@@ -95,13 +96,14 @@ def create_run(meta: dict) -> None:
     con.execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
         "status,total,done,failed,accuracy,dataset_hash,spec_json,created_by,team,image_digest,"
-        "created_at,finished_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "lane,max_inflight,created_at,finished_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
             meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), "queued",
             meta["total"], 0, 0, None, meta["dataset_hash"], meta.get("spec_json"),
-            meta.get("created_by"), meta.get("team"), meta.get("image_digest"), _now(), None,
+            meta.get("created_by"), meta.get("team"), meta.get("image_digest"),
+            meta.get("lane"), meta.get("max_inflight"), _now(), None,
         ),
     )
     con.commit()
@@ -189,8 +191,28 @@ def list_runs():
 
 # Explicit column order (NOT SELECT * — must match api.get_run; the table also has spec_json/created_by).
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
-            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, "
+            "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, lane, "
             "created_at, finished_at")
+
+
+def lane_running_counts() -> dict[str, int]:
+    """Count of currently-RUNNING runs per lane — input to two-lane admission (SCHEDULER §2)."""
+    con = _con()
+    rows = con.execute(
+        "SELECT coalesce(lane, 'batch'), count(*) FROM runs WHERE status='running' GROUP BY lane"
+    ).fetchall()
+    con.close()
+    return {r[0]: int(r[1]) for r in rows}
+
+
+def queued_runs_with_lane() -> list[tuple[str, str]]:
+    """Queued runs in FIFO (created_at) order with their lane — the admission candidates."""
+    con = _con()
+    rows = con.execute(
+        "SELECT id, coalesce(lane, 'batch') FROM runs WHERE status='queued' ORDER BY created_at"
+    ).fetchall()
+    con.close()
+    return [(r[0], r[1]) for r in rows]
 
 
 def get_run(run_id: str):
@@ -229,9 +251,14 @@ def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) 
         "  SELECT rowid FROM sample_tasks WHERE run_id=? AND ("
         "    (status='queued' AND (not_before IS NULL OR not_before <= ?)) OR"
         "    (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))"
-        "  ORDER BY sample_id LIMIT ?"
+        "  ORDER BY sample_id"
+        # Per-run concurrency cap (SCHEDULER §3): LIMIT min(batch, max_inflight − LIVE running).
+        "  LIMIT min(?, max(0,"
+        "    coalesce((SELECT max_inflight FROM runs WHERE id=?), 1000000000)"
+        "    - (SELECT count(*) FROM sample_tasks WHERE run_id=? AND status='running'"
+        "       AND lease_expires_at IS NOT NULL AND lease_expires_at > ?)))"
         ") RETURNING sample_id",
-        (worker, now + lease_seconds, run_id, now, now, n),
+        (worker, now + lease_seconds, run_id, now, now, n, run_id, run_id, now),
     ).fetchall()
     con.close()
     return [r[0] for r in rows]

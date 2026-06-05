@@ -26,11 +26,36 @@ TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
 LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
 STALE_LEADER_SECONDS = float(os.environ.get("EVAL_ENGINE_STALE_LEADER_SECONDS", "20"))
 
+# Two-lane admission (SCHEDULER §2): a global cap on concurrently-running runs + a reserved interactive
+# slice that batch can borrow only when there's no interactive demand (and yields by attrition when
+# there is). Per-run progress is then guaranteed by the per-run max_inflight cap at the claim (§3).
+GLOBAL_MAX_RUNNING = int(os.environ.get("EVAL_ENGINE_GLOBAL_MAX_RUNNING", "50"))
+INTERACTIVE_RESERVE = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_RESERVE", "12"))  # ~25% of the global cap
+
+
+def _admit() -> None:
+    """Two-lane admission (SCHEDULER §2). Interactive runs may use any of the GLOBAL_MAX_RUNNING slots
+    (including the reserve); batch runs are capped below the reserve whenever there's interactive
+    demand (queued or running) — so a quick iteration run always gets slots, while running batch work
+    is never preempted (yield by attrition at the admission boundary, not mid-run)."""
+    running = db.control.lane_running_counts()
+    n_running = running.get("interactive", 0) + running.get("batch", 0)
+    queued = db.control.queued_runs_with_lane()  # FIFO by created_at
+    if not queued:
+        return
+    interactive_demand = running.get("interactive", 0) > 0 or any(ln == "interactive" for _, ln in queued)
+    batch_ceiling = GLOBAL_MAX_RUNNING - (INTERACTIVE_RESERVE if interactive_demand else 0)
+    for run_id, lane in queued:
+        if n_running >= GLOBAL_MAX_RUNNING:
+            break  # global admission cap (blast radius + shared provider quota)
+        if lane == "interactive" or n_running < batch_ceiling:
+            db.control.set_status(run_id, "running")
+            n_running += 1
+            print(f"[orch] admitted {run_id} (lane={lane})", flush=True)
+
 
 def tick() -> None:
-    for run_id in db.control.active_runs(("queued",)):
-        db.control.set_status(run_id, "running")
-        print(f"[orch] admitted {run_id}", flush=True)
+    _admit()
 
     for run_id in db.control.active_runs(("running",)):
         spec = RunSpec.model_validate_json(db.control.get_spec(run_id))

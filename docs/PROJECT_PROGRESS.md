@@ -143,8 +143,16 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `↻ re-run` button on the dashboard run-detail header fires it and navigates to the clone. Tested
   (TestClient: clone preserves `eval_version`, 404 on missing run).
 
-- [ ] **11. Two-lane (interactive/batch) admission + per-run cap.** §8, `SCHEDULER.md`. A v1 item
-  distinct from the deferred fair-share scheduler; today the orchestrator admits *all* queued runs.
+- [x] **11. Two-lane (interactive/batch) admission + per-run cap.** §8, `SCHEDULER.md`. *Done
+  (2026-06-05):* **(a)** the load-bearing per-run cap — `claim_batch` now claims only
+  `LEAST(batch, max_inflight − live_running)` (expired leases excluded, so reclaim still works), so a
+  big run can't eat the cluster and workers flow to runs with headroom. **(b)** Runs are classified at
+  launch (`runner._classify`): a `limit` or ≤`INTERACTIVE_MAX_SAMPLES` ⇒ `interactive` (small
+  `max_inflight`=5, many iterators progress), else `batch` (`max_inflight`=50); explicit `RunSpec.lane`
+  overrides. **(c)** The orchestrator's `_admit` does two-lane admission: a global cap on running runs
+  + a reserved interactive slice that batch borrows only when there's no interactive demand and yields
+  (by attrition, never mid-run) when there is. New `lane`/`max_inflight` columns. Tested on SQLite +
+  Postgres (`test_max_inflight_cap`, `test_lane_classification`); exactly-once (12 workers) unaffected.
 
 - [x] **12. `multiple_choice` harness.** §7. *Done (2026-06-05):* `multiple_choice` harness (Inspect's
   MC solver, optional `cot`) + a `choice` scorer (grades the selected letter against the target);

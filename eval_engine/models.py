@@ -55,6 +55,7 @@ class RunSpec(BaseModel):
     harness: PluginRef
     scorers: list[PluginRef]
     team: str | None = None        # ownership (DESIGN §7) — tenancy enforcement is deferred (FUTURE.md §9)
+    lane: str | None = None        # admission lane override: "interactive" | "batch"; else auto-classified (SCHEDULER §2)
     limit: int | None = None
     batch_size: int = 50  # ledger claim batch (worker grabs this many sample-tasks at a time)
     # Sampling for statistical comparability (DESIGN §14, FR8). epochs = repeat each sample N times

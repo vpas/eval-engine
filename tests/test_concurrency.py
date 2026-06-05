@@ -196,6 +196,35 @@ def test_live_rollup():
     print("  [live-rollup] done/passed/cost gauge ✓  written to runs row ✓  get_run cols aligned ✓")
 
 
+def test_max_inflight_cap():
+    """The per-run concurrency cap (SCHEDULER §3): a claim never exceeds max_inflight − live running,
+    so a big run can't eat the cluster; headroom frees as samples complete."""
+    run_id = _make_run(10)
+    con = control._con()
+    con.execute("UPDATE runs SET max_inflight=3 WHERE id=?", (run_id,))
+    con.commit()
+    con.close()
+
+    a = control.claim_batch(run_id, "W", 10)          # ask 10, capped to 3
+    assert len(a) == 3, len(a)
+    assert control.claim_batch(run_id, "W2", 10) == [], "claim exceeded max_inflight"  # at cap
+    control.commit_result(run_id, a[0], _fake_result())  # one completes → headroom = 1
+    assert len(control.claim_batch(run_id, "W3", 10)) == 1, "headroom didn't free on completion"
+    print("  [max-inflight] per-run cap holds at 3 ✓  frees on completion ✓")
+
+
+def test_lane_classification():
+    """Auto-classify interactive vs batch + pin max_inflight (SCHEDULER §2)."""
+    from eval_engine.models import PluginRef, RunSpec
+    from eval_engine.runner import _classify
+    base = dict(eval="e", dataset="d", harness=PluginRef(type="single_turn"), scorers=[])
+    assert _classify(RunSpec(**base, limit=10), 5000) == ("interactive", 5)  # a limit ⇒ interactive
+    assert _classify(RunSpec(**base), 50) == ("interactive", 5)              # small ⇒ interactive
+    assert _classify(RunSpec(**base), 5000) == ("batch", 50)                 # large ⇒ batch
+    assert _classify(RunSpec(**base, lane="batch"), 10)[0] == "batch"        # explicit override wins
+    print("  [lane] classify interactive/batch + max_inflight ✓  override ✓")
+
+
 if __name__ == "__main__":
     _use_temp_db()
     print("concurrency tests (ledger claim/commit):")
@@ -204,4 +233,6 @@ if __name__ == "__main__":
     test_retry_backoff()
     test_budget_stop()
     test_live_rollup()
+    test_max_inflight_cap()
+    test_lane_classification()
     print("\nALL PASS ✓")

@@ -39,6 +39,23 @@ _gcs_client = None
 # GIT_SHA → this env) and recorded on every run so a run's inputs include the exact code that ran it.
 IMAGE_DIGEST = os.environ.get("EVAL_ENGINE_IMAGE_DIGEST", "dev")
 
+# Two-lane admission (SCHEDULER §2): classify a run interactive vs batch at launch and pin its per-run
+# concurrency cap (max_inflight). Interactive = small subset/iteration runs (a `limit`, or ≤ N samples)
+# → small max_inflight so MANY iterators progress at once; batch = full runs → larger max_inflight.
+INTERACTIVE_MAX_SAMPLES = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_MAX_SAMPLES", "200"))
+INTERACTIVE_MAX_INFLIGHT = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_MAX_INFLIGHT", "5"))
+BATCH_MAX_INFLIGHT = int(os.environ.get("EVAL_ENGINE_BATCH_MAX_INFLIGHT", "50"))
+
+
+def _classify(spec: RunSpec, total: int) -> tuple[str, int]:
+    """Return (lane, max_inflight) for a run (SCHEDULER §2/§3)."""
+    if spec.lane in ("interactive", "batch"):
+        lane = spec.lane
+    else:
+        lane = "interactive" if (spec.limit is not None or total <= INTERACTIVE_MAX_SAMPLES) else "batch"
+    return lane, (INTERACTIVE_MAX_INFLIGHT if lane == "interactive" else BATCH_MAX_INFLIGHT)
+
+
 MAX_ATTEMPTS = int(os.environ.get("EVAL_ENGINE_MAX_ATTEMPTS", "3"))
 RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0"))
 RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
@@ -293,6 +310,7 @@ def launch(spec: RunSpec, created_by: str | None = None) -> str:
     provider, model_id = _split_model(spec.model)
 
     run_id = control.new_run_id()
+    lane, max_inflight = _classify(spec, len(samples_by_id))
     control.create_run({
         "id": run_id, "eval_id": spec.eval, "eval_version": spec.eval_version, "model": spec.model,
         "provider": provider, "model_id": model_id, "harness": spec.harness.type,
@@ -302,6 +320,7 @@ def launch(spec: RunSpec, created_by: str | None = None) -> str:
         "created_by": created_by,             # authenticated email (OIDC proxy header), attribution
         "team": spec.team,                    # ownership (tenancy-ready; enforcement deferred)
         "image_digest": IMAGE_DIGEST,         # repro pin: the worker code/image that ran this (§14)
+        "lane": lane, "max_inflight": max_inflight,  # admission lane + per-run cap (SCHEDULER §2/§3)
     })
     control.expand_tasks(
         run_id,
