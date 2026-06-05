@@ -10,9 +10,11 @@
 .env.*
 .mcp.json
 *.log
-# the Dockerfile copies only eval_engine/ static/ examples/ pyproject.toml — keep the rest out of context
-deploy/
+# keep most of deploy/ out of the context, but the image needs deploy/sandbox/ (helm values)
+deploy/terraform/
+deploy/k8s/
 docs/
 infra/
 tests/
+frontend/
 get_helm.sh

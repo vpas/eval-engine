@@ -1,0 +1,38 @@
+# Inspect's official log viewer — the rich agent-trace UI. Serves the .eval logs the workers write to
+# GCS (gs://<bucket>/eval-logs). Read-only; reads via gcsfs (ADC = node SA). On the system node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inspect-view
+  namespace: eval-engine
+  labels: { app: inspect-view }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: inspect-view } }
+  template:
+    metadata:
+      labels: { app: inspect-view }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: inspect-view
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
+          imagePullPolicy: Always
+          command: ["inspect", "view", "start",
+                    "--host", "0.0.0.0", "--port", "7575",
+                    "--log-dir", "gs://eval-engine-eval-engine/eval-logs", "--recursive"]
+          ports:
+            - { name: http, containerPort: 7575 }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "768Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inspect-view
+  namespace: eval-engine
+spec:
+  selector: { app: inspect-view }
+  ports:
+    - { name: http, port: 7575, targetPort: 7575 }

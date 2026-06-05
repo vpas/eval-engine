@@ -27,6 +27,8 @@ from .models import RunSpec
 
 TRANSCRIPTS = control.DATA / "transcripts"  # local object-store stand-in (dev)
 GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → transcripts go to GCS
+# Inspect's rich `.eval` logs go to GCS too (so the Inspect log viewer can read them); local in dev.
+EVAL_LOG_DIR = f"gs://{GCS_BUCKET}/eval-logs" if GCS_BUCKET else str(control.DATA / "logs")
 _gcs_client = None
 
 
@@ -128,7 +130,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     task = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)
     log = inspect_eval(
         task, model=_model_for(spec, len(ids)), display="none",
-        log_dir=str(control.DATA / "logs"),
+        log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
     )[0]
 
     out: dict[str, dict] = {}

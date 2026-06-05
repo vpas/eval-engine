@@ -21,8 +21,9 @@ dependencies = [
 postgres = ["psycopg[binary]", "clickhouse-connect"]
 # real models via OpenRouter (Inspect's openrouter/ provider needs the openai client)
 openrouter = ["openai"]
-# transcript object store on GCS (ADC = the GKE node service account)
-gcs = ["google-cloud-storage"]
+# transcript object store on GCS (ADC = the GKE node service account); gcsfs so Inspect can read/write
+# its .eval logs to gs:// (for the Inspect log viewer)
+gcs = ["google-cloud-storage", "gcsfs"]
 # agentic sandboxing on Kubernetes (helm-deployed per-sample pods); needs helm in the image + RBAC
 k8s = ["inspect-k8s-sandbox"]
 

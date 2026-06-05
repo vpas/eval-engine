@@ -34,7 +34,7 @@ class AgenticConfig(BaseModel):
     tools: list[str] = ["bash"]                            # sandbox tools to expose: bash | python
     sandbox: str = "docker"                                # "docker" (local) | "k8s" (cluster)
     compose_file: str = "deploy/sandbox/airgap-compose.yaml"  # docker only: hardened AIR-GAPPED spec
-    k8s_values: str | None = None                          # k8s only: optional Helm values (default chart if None)
+    k8s_values: str | None = "deploy/sandbox/k8s-agent-env-values.yaml"  # k8s: Helm values (cluster-specific runtime)
     message_limit: int = 12                                # cap the agent loop
     tool_timeout: int = 30
 
@@ -60,10 +60,13 @@ def agentic(cfg: AgenticConfig) -> tuple[Solver, SandboxEnvironmentSpec]:
 
     if cfg.sandbox == "k8s":
         # In-cluster: inspect-k8s-sandbox helm-installs an ephemeral pod per sample (SANDBOXING.md).
-        # Default chart ("agent-env") if no values file given. Needs helm + RBAC on the worker.
+        # Needs helm + RBAC on the worker; a values file tunes the chart to this cluster's runtime.
         import k8s_sandbox  # noqa: F401  registers the "k8s" sandbox provider with Inspect
-        return solver, (SandboxEnvironmentSpec("k8s", cfg.k8s_values) if cfg.k8s_values
-                        else SandboxEnvironmentSpec("k8s"))
+        values = Path(cfg.k8s_values) if cfg.k8s_values else None
+        if values and not values.is_absolute():
+            values = PROTOTYPE_ROOT / values
+        return solver, (SandboxEnvironmentSpec("k8s", str(values))
+                        if values and values.exists() else SandboxEnvironmentSpec("k8s"))
 
     compose = Path(cfg.compose_file)
     if not compose.is_absolute():

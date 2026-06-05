@@ -29,6 +29,7 @@ RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
 COPY eval_engine/ ./eval_engine/
 COPY static/ ./static/
 COPY examples/ ./examples/
+COPY deploy/sandbox/ ./deploy/sandbox/
 RUN pip install -e '.[postgres,openrouter,gcs,k8s]' --no-deps
 
 EXPOSE 8077

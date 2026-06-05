@@ -1,0 +1,8 @@
+# Helm values for inspect-k8s-sandbox's agent-env chart on THIS cluster.
+# Our GKE cluster has no GKE Sandbox (gVisor) node pool, so override the chart's default
+# runtimeClassName (gvisor) with the chart's magic "CLUSTER_DEFAULT" string → the sandbox pod runs
+# on a normal node (runc), no gVisor nodeSelector. Weaker isolation than gVisor; acceptable for the
+# in-cluster proof. Production T2 isolation = a GKE Sandbox node pool (docs/SANDBOXING.md, FUTURE.md §4).
+services:
+  default:
+    runtimeClassName: CLUSTER_DEFAULT
