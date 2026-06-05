@@ -1,6 +1,6 @@
 # Workers — claim→execute→commit→load over the ledger. On the SPOT pool (toleration + nodeSelector),
 # so scheduling a worker scales the pool 0→1. Model calls go through the LiteLLM gateway.
-# replicas:1 for now; KEDA autoscaling on queue depth lands in M5.
+# replicas is managed by KEDA (deploy/k8s/70-keda.yaml): 0 when idle, up to 3 on ledger depth.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +8,7 @@ metadata:
   namespace: eval-engine
   labels: { app: eval-engine-worker }
 spec:
-  replicas: 1
+  replicas: 0
   selector: { matchLabels: { app: eval-engine-worker } }
   template:
     metadata:

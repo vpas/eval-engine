@@ -1,0 +1,34 @@
+# KEDA autoscaling for the worker Deployment. Scales on ledger depth read straight from Postgres:
+# count of NON-terminal tasks (queued OR running) — so workers stay up while in-flight work exists and
+# scale to 0 only once a run finalizes (which prunes the ledger). 1 worker per ~20 pending tasks.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-pg-auth
+  namespace: eval-engine
+spec:
+  secretTargetRef:
+    - parameter: connection      # full DSN; same secret the app uses
+      name: eval-pg
+      key: dsn
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: eval-engine-worker
+  namespace: eval-engine
+spec:
+  scaleTargetRef:
+    name: eval-engine-worker
+  minReplicaCount: 0             # scale to zero when idle → spot node drains
+  maxReplicaCount: 3
+  pollingInterval: 20            # seconds
+  cooldownPeriod: 60            # wait 60s of idle before scaling to 0
+  triggers:
+    - type: postgresql
+      metadata:
+        query: "SELECT count(*) FROM sample_tasks WHERE status IN ('queued','running')"
+        targetQueryValue: "20"
+        activationTargetQueryValue: "0"   # any pending work activates 0→1
+      authenticationRef:
+        name: keda-pg-auth

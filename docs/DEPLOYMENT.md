@@ -90,8 +90,8 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] **ClickHouse network-access fix:** the `:24.8` image pins `default` to localhost; a
       `clickhouse-users` ConfigMap opens it to the pod network.
 - [ ] **`openrouter` secret** (the API key) — needed for M4/M6, not yet created.
-- ⚠ **Rotate the Neon credential** — it was inadvertently printed (base64) to the session; rotate the
-      `neondb_owner` password in the Neon console and re-create the `eval-pg` secret.
+- **Neon credential** — was printed (base64) to a session once; **rotation skipped by decision** (it's
+      a throwaway testing DB and the exposure was only to Anthropic, not public). Accepted risk.
 
 ### M2 — Build & push the image  ☑
 - [x] `gcloud auth configure-docker us-central1-docker.pkg.dev`.
@@ -117,11 +117,13 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [ ] **Deferred (A5):** wire the gateway's per-`run_id` cost tally into analytics. Today `cost_usd=0`
       in our table for gateway calls (the worker only self-prices `openrouter/*` direct calls).
 
-### M5 — Workers + KEDA  ◐
-- [x] Worker Deployment on the spot pool (`deploy/k8s/50-worker.yaml`) — scheduling it autoscaled the
-      pool **0→1** (verified).
-- [ ] Install KEDA (Helm) + a `ScaledObject` (PostgreSQL scaler on `count(*) … WHERE status='queued'`
-      + `maxReplicas`) so workers (and the spot node) scale to **0** when idle. Today: manual `replicas`.
+### M5 — Workers + KEDA  ☑
+- [x] Worker Deployment on the spot pool (`deploy/k8s/50-worker.yaml`).
+- [x] KEDA (Helm) + `ScaledObject` (`deploy/k8s/70-keda.yaml`): PostgreSQL scaler on
+      `count(*) … WHERE status IN ('queued','running')` (keeps workers up while in-flight, not just
+      queued), min 0 / max 3, `TriggerAuthentication` → `eval-pg` DSN.
+- [x] **Verified end-to-end:** idle → worker scales to **0** (spot node drains); a run → KEDA scales
+      **0→1**, processes, finalizes, scales back to **0**.
 
 ### M6 — QA e2e  ☑
 - [x] **Mock run** through the full path: api→Neon ledger→spot worker→ClickHouse→finalize (1/3, ledger
