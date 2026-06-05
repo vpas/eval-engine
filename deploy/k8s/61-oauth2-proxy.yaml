@@ -32,7 +32,7 @@ spec:
             - --provider=google
             - --email-domain=*
             - --authenticated-emails-file=/etc/oauth2-proxy/emails
-            - --upstream=http://eval-engine-api:8077
+            - --upstream=http://eval-engine-frontend:3000
             - --http-address=0.0.0.0:4180
             - --redirect-url=https://35-202-212-111.nip.io/oauth2/callback
             - --cookie-secure=true

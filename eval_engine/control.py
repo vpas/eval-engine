@@ -129,7 +129,7 @@ def finalize_run(run_id: str, done: int, failed: int, accuracy: float) -> None:
 def list_runs():
     con = _con()
     rows = con.execute(
-        "SELECT id, eval_id, model, accuracy, total, created_at, created_by FROM runs ORDER BY created_at DESC"
+        "SELECT id, eval_id, model, accuracy, total, created_at, created_by, status FROM runs ORDER BY created_at DESC"
     ).fetchall()
     con.close()
     return rows

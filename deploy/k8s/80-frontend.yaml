@@ -1,0 +1,41 @@
+# Next.js dashboard. Sits behind oauth2-proxy (which now upstreams here instead of the api), and
+# proxies /api/* to the eval-engine-api Service in-cluster. On the always-on system node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-engine-frontend
+  namespace: eval-engine
+  labels: { app: eval-engine-frontend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: eval-engine-frontend } }
+  template:
+    metadata:
+      labels: { app: eval-engine-frontend }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: frontend
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - { name: BACKEND_URL, value: "http://eval-engine-api:8077" }
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "192Mi" }
+            limits:   { memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eval-engine-frontend
+  namespace: eval-engine
+spec:
+  selector: { app: eval-engine-frontend }
+  ports:
+    - { name: http, port: 3000, targetPort: 3000 }

@@ -89,7 +89,7 @@ def create_run(spec: RunSpec, bg: BackgroundTasks,
 
 @app.get("/runs")
 def list_runs():
-    cols = ["id", "eval", "model", "accuracy", "total", "created_at", "created_by"]
+    cols = ["id", "eval", "model", "accuracy", "total", "created_at", "created_by", "status"]
     return [dict(zip(cols, r)) for r in control.list_runs()]
 
 
