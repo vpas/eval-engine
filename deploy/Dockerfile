@@ -10,9 +10,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     EVAL_ENGINE_BACKEND=postgres
 
-# Only curl/ca-certs needed — psycopg[binary], clickhouse-connect, duckdb all ship wheels.
+# curl/ca-certs for wheels; helm for the agentic k8s sandbox (inspect-k8s-sandbox shells out to it).
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64
 
 WORKDIR /app
 
@@ -20,14 +22,14 @@ WORKDIR /app
 #    drop the stub so only third-party deps remain. This is what makes code edits rebuild fast.
 COPY pyproject.toml ./
 RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
-    && pip install '.[postgres,openrouter,gcs]' \
+    && pip install '.[postgres,openrouter,gcs,k8s]' \
     && pip uninstall -y eval-engine
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
 COPY eval_engine/ ./eval_engine/
 COPY static/ ./static/
 COPY examples/ ./examples/
-RUN pip install -e '.[postgres,openrouter,gcs]' --no-deps
+RUN pip install -e '.[postgres,openrouter,gcs,k8s]' --no-deps
 
 EXPOSE 8077
 

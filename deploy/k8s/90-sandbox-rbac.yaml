@@ -1,0 +1,48 @@
+# Agentic sandboxing: inspect-k8s-sandbox helm-installs an ephemeral pod per sample into the
+# eval-sandbox namespace. The worker runs as a dedicated ServiceAccount with rights to manage those
+# resources there (cross-namespace: SA lives in eval-engine, Role/binding in eval-sandbox).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eval-sandbox
+  labels: { eval-engine/purpose: sandbox }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eval-engine-worker
+  namespace: eval-engine
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-manager
+  namespace: eval-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "pods/attach", "pods/portforward",
+                "services", "configmaps", "secrets", "persistentvolumeclaims", "events"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["*"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: worker-sandbox-manager
+  namespace: eval-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-manager
+subjects:
+  - kind: ServiceAccount
+    name: eval-engine-worker
+    namespace: eval-engine

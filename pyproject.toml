@@ -23,6 +23,8 @@ postgres = ["psycopg[binary]", "clickhouse-connect"]
 openrouter = ["openai"]
 # transcript object store on GCS (ADC = the GKE node service account)
 gcs = ["google-cloud-storage"]
+# agentic sandboxing on Kubernetes (helm-deployed per-sample pods); needs helm in the image + RBAC
+k8s = ["inspect-k8s-sandbox"]
 
 [project.scripts]
 eval-engine = "eval_engine.cli:main"

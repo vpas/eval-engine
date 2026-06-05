@@ -14,6 +14,7 @@ spec:
     metadata:
       labels: { app: eval-engine-worker }
     spec:
+      serviceAccountName: eval-engine-worker     # RBAC to manage agentic sandbox pods (90-sandbox-rbac)
       nodeSelector: { eval-engine/role: worker }
       tolerations:
         - { key: eval-engine/worker, operator: Equal, value: "true", effect: NoSchedule }
@@ -29,6 +30,7 @@ spec:
             - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
             - { name: EVAL_ENGINE_CH_PORT, value: "8123" }
             - { name: EVAL_ENGINE_GCS_BUCKET, value: eval-engine-eval-engine }   # write transcripts to GCS
+            - { name: INSPECT_K8S_DEFAULT_NAMESPACE, value: eval-sandbox }       # agentic sandbox pods land here
             # model calls via the gateway (OpenAI-compatible) → LiteLLM → OpenRouter
             - { name: OPENAI_BASE_URL, value: "http://litellm:4000/v1" }
             - name: OPENAI_API_KEY
