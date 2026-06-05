@@ -61,6 +61,27 @@ def _conn() -> psycopg.Connection:
     return con
 
 
+_leader_con: psycopg.Connection | None = None
+
+
+def acquire_leader(key: int) -> bool:
+    """Try to grab a session-scoped advisory lock on a DEDICATED connection (held for the process
+    lifetime → released automatically if this process/connection dies). Returns True if we're leader."""
+    global _leader_con
+    if _leader_con is None or _leader_con.closed:
+        _leader_con = psycopg.connect(DSN, autocommit=True)
+    return bool(_leader_con.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()[0])
+
+
+def leader_alive() -> bool:
+    """Liveness of the leader connection holding the advisory lock (False ⟹ we lost leadership)."""
+    try:
+        _leader_con.execute("SELECT 1")  # type: ignore[union-attr]
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def init() -> None:
     global _init_done
     if not _init_done:

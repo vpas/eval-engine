@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
@@ -106,6 +106,15 @@ def get_run(run_id: str):
     # live progress from the ledger (empty once finalized/pruned)
     meta["progress"] = control.counts(run_id)
     return meta
+
+
+@app.get("/transcript")
+def transcript(uri: str):
+    """Serve a sample transcript by URI (GCS in-cluster, local in dev) — dashboard drill-in."""
+    body = runner.get_transcript(uri)
+    if body is None:
+        raise HTTPException(status_code=404, detail="transcript not available")
+    return Response(content=body, media_type="application/json")
 
 
 @app.get("/runs/{run_id}/results")

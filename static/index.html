@@ -151,7 +151,10 @@ async function renderRun(){
   html += `<div class="panel"><h2>Samples</h2><table>
     <thead><tr><th>sample</th><th>result</th><th>category</th><th>score</th></tr></thead><tbody>`;
   for(const s of res.samples){
-    html += `<tr><td class="mono">${s.sample_id}</td>
+    const sid = s.transcript_uri
+      ? `<a href="/transcript?uri=${encodeURIComponent(s.transcript_uri)}" target="_blank">${s.sample_id} ↗</a>`
+      : s.sample_id;
+    html += `<tr><td class="mono">${sid}</td>
       <td class="${s.passed?'pass':'fail'}">${s.passed?'✓ pass':'✗ fail'}</td>
       <td>${s.category||'-'}</td><td>${s.score.toFixed(2)}</td></tr>`;
   }

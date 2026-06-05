@@ -21,6 +21,7 @@ from . import db, runner
 from .models import RunSpec
 
 TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
+LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
 
 
 def tick() -> None:
@@ -41,8 +42,16 @@ def tick() -> None:
 
 def main() -> None:
     db.init()
-    print(f"[orch] up (backend={db.BACKEND})", flush=True)
+    # Leader election: block as a standby until we hold the advisory lock, so running >1 orchestrator
+    # replica is safe (only the leader ticks). A standby takes over when the leader's lock releases.
+    while not db.control.acquire_leader(LEADER_KEY):
+        print("[orch] standby — another orchestrator holds leadership", flush=True)
+        time.sleep(10)
+    print(f"[orch] up, leader (backend={db.BACKEND})", flush=True)
     while True:
+        if not db.control.leader_alive():
+            print("[orch] lost leadership; exiting to re-contend", flush=True)
+            return  # k8s restarts the pod → it re-enters as a standby
         tick()
         time.sleep(TICK_SECONDS)
 

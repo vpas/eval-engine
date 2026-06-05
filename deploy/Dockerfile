@@ -20,14 +20,14 @@ WORKDIR /app
 #    drop the stub so only third-party deps remain. This is what makes code edits rebuild fast.
 COPY pyproject.toml ./
 RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
-    && pip install '.[postgres,openrouter]' \
+    && pip install '.[postgres,openrouter,gcs]' \
     && pip uninstall -y eval-engine
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
 COPY eval_engine/ ./eval_engine/
 COPY static/ ./static/
 COPY examples/ ./examples/
-RUN pip install -e '.[postgres,openrouter]' --no-deps
+RUN pip install -e '.[postgres,openrouter,gcs]' --no-deps
 
 EXPOSE 8077
 

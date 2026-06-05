@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import urllib.request
 from pathlib import Path
 
@@ -24,7 +25,17 @@ from .db import analytics, control
 from .datasets import load_jsonl
 from .models import RunSpec
 
-TRANSCRIPTS = control.DATA / "transcripts"  # object-store stand-in (prod: S3 + zstd)
+TRANSCRIPTS = control.DATA / "transcripts"  # local object-store stand-in (dev)
+GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → transcripts go to GCS
+_gcs_client = None
+
+
+def _gcs():
+    global _gcs_client
+    if _gcs_client is None:
+        from google.cloud import storage  # ADC = the GKE node SA (cloud-platform scope)
+        _gcs_client = storage.Client()
+    return _gcs_client
 
 
 def _split_model(model: str) -> tuple[str, str]:
@@ -80,11 +91,29 @@ def _model_for(spec: RunSpec, n: int):
 
 
 def _put_transcript(run_id: str, sample_id: str, payload: dict) -> str:
+    """Persist a transcript; return its URI. GCS (gs://…) in-cluster, local file in dev."""
+    body = json.dumps(payload, ensure_ascii=False)
+    if GCS_BUCKET:
+        key = f"runs/{run_id}/transcripts/{sample_id}.json"
+        _gcs().bucket(GCS_BUCKET).blob(key).upload_from_string(body, content_type="application/json")
+        return f"gs://{GCS_BUCKET}/{key}"
     d = TRANSCRIPTS / run_id
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{sample_id}.json"  # prod: .json.zst
-    path.write_text(json.dumps(payload, ensure_ascii=False))
+    path.write_text(body)
     return str(path)
+
+
+def get_transcript(uri: str) -> str | None:
+    """Read back a transcript by URI (gs://<our-bucket>/… or a local path). For the dashboard drill-in."""
+    if uri.startswith("gs://"):
+        bucket, _, key = uri[len("gs://"):].partition("/")
+        if not GCS_BUCKET or bucket != GCS_BUCKET:  # only ever serve our own bucket
+            return None
+        blob = _gcs().bucket(bucket).blob(key)
+        return blob.download_as_text() if blob.exists() else None
+    p = Path(uri)
+    return p.read_text() if p.exists() else None
 
 
 def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:

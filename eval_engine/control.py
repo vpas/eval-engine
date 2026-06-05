@@ -53,6 +53,14 @@ def new_run_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def acquire_leader(key: int) -> bool:
+    return True  # single-process local backend: always leader (no contention)
+
+
+def leader_alive() -> bool:
+    return True
+
+
 def _now() -> str:
     return datetime.datetime.utcnow().isoformat(timespec="seconds")
 

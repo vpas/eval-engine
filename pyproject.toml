@@ -21,6 +21,8 @@ dependencies = [
 postgres = ["psycopg[binary]", "clickhouse-connect"]
 # real models via OpenRouter (Inspect's openrouter/ provider needs the openai client)
 openrouter = ["openai"]
+# transcript object store on GCS (ADC = the GKE node service account)
+gcs = ["google-cloud-storage"]
 
 [project.scripts]
 eval-engine = "eval_engine.cli:main"
