@@ -133,6 +133,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
     )[0]
 
+    eval_log_uri = getattr(log, "location", "") or ""  # the .eval log holding this shard's samples
     out: dict[str, dict] = {}
     for s in log.samples or []:
         sid = str(s.id)
@@ -145,7 +146,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         uri = _put_transcript(
             run_id, sid,
             {"input": str(s.input), "output": completion, "target": str(s.target),
-             "scores": score_vals},
+             "scores": score_vals, "eval_log_uri": eval_log_uri},  # for the Inspect viewer deep-link
         )
         out[sid] = {
             "passed": 1 if primary >= 0.5 else 0,

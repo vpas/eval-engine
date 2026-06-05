@@ -19,7 +19,8 @@ spec:
         - name: inspect-view
           image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
           imagePullPolicy: Always
-          command: ["inspect", "view", "start",
+          # patched entrypoint (normalizes gcsfs datetime mtime so listing gs:// logs doesn't crash)
+          command: ["python", "-m", "eval_engine.view_main", "view", "start",
                     "--host", "0.0.0.0", "--port", "7575",
                     "--log-dir", "gs://eval-engine-eval-engine/eval-logs", "--recursive"]
           ports:

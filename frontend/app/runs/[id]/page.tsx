@@ -135,6 +135,12 @@ function TranscriptDrawer({ sid, uri, onClose }: { sid: string; uri: string; onC
         <div className="drawer-h">
           <strong style={{ fontFamily: "var(--mono)", fontSize: 13 }}>{sid}</strong>
           <span style={{ flex: 1 }} />
+          {data?.eval_log_uri && (
+            <a className="btn" target="_blank"
+               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri).split("/").pop() || "")}`}>
+              full trace ↗
+            </a>
+          )}
           <button className="btn ghost" onClick={onClose}>close</button>
         </div>
         {err && <div className="empty" style={{ color: "var(--fail)" }}>{err}</div>}
