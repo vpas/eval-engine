@@ -114,8 +114,12 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
       (key from the `openrouter` secret), **Redis-backed**. (Bumped mem to 2.5Gi — OOMKilled at 1Gi.)
 - [x] Workers call the gateway OpenAI-compatible (`OPENAI_BASE_URL=http://litellm:4000/v1`); a run with
       `model: openai/llama-3.1-8b` routes worker → LiteLLM → OpenRouter.
-- [ ] **Deferred (A5):** wire the gateway's per-`run_id` cost tally into analytics. Today `cost_usd=0`
-      in our table for gateway calls (the worker only self-prices `openrouter/*` direct calls).
+- [x] **A5 (pragmatic): `cost_usd` is now real for gateway calls.** LiteLLM uses wildcard passthrough
+      (`*`→`openrouter/*`), and `runner._cost_usd` prices `openai/<id>` from the OpenRouter catalog —
+      identical $ since the gateway fronts OpenRouter at catalog price. Verified: a gateway run shows
+      `cost_usd=1.59e-06`. **Deferred (canonical A5):** the gateway's own per-`run_id` tally as the
+      source (LiteLLM spend-DB + `run_id`-tagged requests + query at finalize) — needs tagging threaded
+      through Inspect; worker-catalog price == gateway price here, so cost is correct meanwhile.
 
 ### M5 — Workers + KEDA  ☑
 - [x] Worker Deployment on the spot pool (`deploy/k8s/50-worker.yaml`).
