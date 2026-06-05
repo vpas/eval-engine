@@ -1,5 +1,24 @@
 # Test-grade single-pod ClickHouse on the always-on system node. NOT HA; fine for the e2e.
-# Default user, no password (matches the prototype's analytics_ch.py). Small PVC for persistence.
+# Default user, no password (matches analytics_ch.py). Small PVC for persistence.
+#
+# The :24.8 image ships a default-user.xml restricting `default` to localhost (::1/127.0.0.1), which
+# blocks in-cluster Service access. This ConfigMap overrides `default`'s networks to allow the pod
+# network (test-grade — empty password, cluster-internal only).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-users
+  namespace: eval-engine
+data:
+  network-access.xml: |
+    <clickhouse>
+      <users>
+        <default>
+          <networks replace="replace"><ip>::/0</ip></networks>
+        </default>
+      </users>
+    </clickhouse>
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -32,13 +51,14 @@ spec:
           ports:
             - { name: http,   containerPort: 8123 }
             - { name: native, containerPort: 9000 }
-          env:
-            - { name: CLICKHOUSE_DB, value: default }
+          # No CLICKHOUSE_* env on purpose: that triggers the image's "managed config" mode and
+          # breaks passwordless `default`. Vanilla = default user, empty password (test-grade).
           resources:
             requests: { cpu: "200m", memory: "512Mi" }
             limits:   { memory: "1536Mi" }
           volumeMounts:
             - { name: data, mountPath: /var/lib/clickhouse }
+            - { name: users, mountPath: /etc/clickhouse-server/users.d/network-access.xml, subPath: network-access.xml }
           readinessProbe:
             httpGet: { path: /ping, port: 8123 }
             initialDelaySeconds: 10
@@ -46,6 +66,8 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: clickhouse-data }
+        - name: users
+          configMap: { name: clickhouse-users }
 ---
 apiVersion: v1
 kind: Service

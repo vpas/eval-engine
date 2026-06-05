@@ -82,32 +82,40 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] Fixed terraform comments: Ray/KubeRay → KEDA/Deployment.
 - **Cost starts here.** Verify the spot pool is at 0 nodes when idle.
 
-### M1 — Stateful backends  ◐  (manifests staged in `deploy/k8s/`)
+### M1 — Stateful backends  ☑
 - [ ] **Postgres (Neon):** create the free project; put the connection string in a k8s Secret
       (`eval-pg`). (Do **not** paste it into this doc or chat.) — **needs your Neon signup.**
 - [x] **ClickHouse:** manifest `deploy/k8s/10-clickhouse.yaml` (single pod + 10Gi PVC, `clickhouse:8123`).
       → apply once the cluster is up.
 - [x] **Redis:** manifest `deploy/k8s/11-redis.yaml` (single pod, `redis:6379`).
 - [x] **Namespace:** `deploy/k8s/00-namespace.yaml` (`eval-engine`).
+- [x] **Schema init:** `deploy/k8s/20-schema-init-job.yaml` ran `db.init()` → PG tables (runs,
+      sample_tasks, failed_task_archive) on Neon + `sample_results` on ClickHouse. **Done.**
+- [x] **ClickHouse network access fix:** the `:24.8` image restricts `default` to localhost; a
+      `clickhouse-users` ConfigMap (`deploy/k8s/10-clickhouse.yaml`) opens it to the pod network.
+- ⚠ **Rotate the Neon credential** — it was inadvertently printed (base64) to the session; rotate the
+      `neondb_owner` password in the Neon console and re-create the `eval-pg` secret.
 - [ ] Namespace `eval-engine`; Secrets: `eval-pg`, `openrouter` (the OpenRouter API key).
 - [ ] **Schema init:** run the Postgres DDL (`SCHEMA.md` §1) + ClickHouse table (`SCHEMA.md` §2) — a
       one-shot `kubectl run` Job using the app image's `db.init` / a migration command.
 
-### M2 — Build & push the image  ☐
-- [ ] `gcloud auth configure-docker us-central1-docker.pkg.dev`.
-- [ ] Build + push `us-central1-docker.pkg.dev/eval-engine/eval-engine/app:<sha>` (the `deploy/Dockerfile`).
-- [ ] Confirm the image runs `uvicorn eval_engine.api:app` and exits cleanly with no DB (lazy init).
+### M2 — Build & push the image  ☑
+- [x] `gcloud auth configure-docker us-central1-docker.pkg.dev`.
+- [◐] Build + push `us-central1-docker.pkg.dev/eval-engine/eval-engine/app:<sha>` + `:latest`
+      (`deploy/Dockerfile`, context = repo root).
+- [ ] Confirm the image runs `uvicorn eval_engine.api:app` and the `python -m eval_engine.{worker,
+      orchestrator}` entrypoints.
 
-### M3 — App-side distributed split (code)  ☐
-- [ ] **Worker entrypoint** — claim→execute→commit loop over the ledger; poll-while (queued OR
-      running>0); **no** finalize. Honor the `run:<id>:stop` Redis flag. (Adapt `ray_executor` worker
-      loop, drop Ray.)
-- [ ] **Orchestrator entrypoint** — on launch: validate + expand ledger (two-lane admission, fixed
-      per-run cap); tick loop: reconcile counts → `runs` row, read gateway cost, finalize when all
-      terminal (aggregate → `run_summary`, archive failed, prune). Single replica (leader election can
-      be a later refinement — one replica is fine for the e2e).
-- [ ] **API entrypoint** — `POST /runs` writes RunSpec + Run(queued) only (no inline execute).
-- [ ] Local smoke against Docker PG+CH (the existing `infra/up.sh`) before cloud.
+### M3 — App-side distributed split (code)  ☑
+- [x] **RunSpec persistence** — `runs.spec_json` + `control.get_spec/active_runs/run_total` (both backends).
+- [x] **Worker** (`eval_engine.worker`) — claim→execute→commit→load loop over active runs; pod name = claimer id.
+- [x] **Orchestrator** (`eval_engine.orchestrator`) — admit queued→running; finalize when terminal
+      (gate on authoritative `total`; safety-sweep load → aggregate → archive → prune → completed). One replica.
+- [x] **API** — `POST /runs` launches only in the cluster (inline execute kept for local sqlite dev via env toggle).
+- [x] **Local smoke** — `tests/test_distributed.py`: launch→admit→drain→finalize, exactly-once, ledger
+      pruned — passes on **both sqlite and real Postgres+ClickHouse** (via `infra/up.sh`).
+- Deferred to a later pass (not needed for the QA e2e): the `run:<id>:stop` Redis flag (cancel/budget),
+  two-lane admission + per-run cap, live-metrics on the `runs` row.
 
 ### M4 — Model gateway (LiteLLM)  ☐
 - [ ] LiteLLM Deployment + Service `litellm:4000`, configured to proxy **OpenRouter** (key from the

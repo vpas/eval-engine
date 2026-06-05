@@ -1,0 +1,32 @@
+# One-shot schema init: runs the app's own db.init() (idempotent CREATE TABLE IF NOT EXISTS) against
+# Neon Postgres (DSN from the eval-pg secret) + the in-cluster ClickHouse. Re-runnable any time.
+#   kubectl -n eval-engine apply -f deploy/k8s/20-schema-init-job.yaml
+#   kubectl -n eval-engine wait --for=condition=complete job/schema-init --timeout=120s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: schema-init
+  namespace: eval-engine
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600          # auto-clean 10 min after completion
+  template:
+    metadata:
+      labels: { app: schema-init }
+    spec:
+      restartPolicy: Never
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: schema-init
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
+          imagePullPolicy: Always
+          command: ["python", "-c", "from eval_engine import db; db.init(); print('schema initialized (PG + ClickHouse)')"]
+          env:
+            - { name: EVAL_ENGINE_BACKEND, value: postgres }
+            - name: EVAL_ENGINE_PG_DSN
+              valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
+            - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
+            - { name: EVAL_ENGINE_CH_PORT, value: "8123" }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
