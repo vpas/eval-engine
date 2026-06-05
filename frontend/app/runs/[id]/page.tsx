@@ -137,7 +137,7 @@ function TranscriptDrawer({ sid, uri, onClose }: { sid: string; uri: string; onC
           <span style={{ flex: 1 }} />
           {data?.eval_log_uri && (
             <a className="btn" target="_blank"
-               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri).split("/").pop() || "")}`}>
+               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri))}`}>
               full trace ↗
             </a>
           )}
