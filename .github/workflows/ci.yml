@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# cancel superseded runs on the same ref
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit + integration + e2e-spine
+    runs-on: ubuntu-latest
+
+    # Postgres + ClickHouse as service containers — same images/ports as infra/up.sh, with the
+    # user/pass/db that control.py's default DSN expects, so the suite needs NO env and NO secrets
+    # (the tests use mockllm + these local containers — no real model calls, no GKE, no GCS).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: evalengine
+          POSTGRES_PASSWORD: evalengine
+          POSTGRES_DB: evalengine
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U evalengine"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:24
+        ports:
+          - 8123:8123
+        options: --ulimit nofile=262144:262144
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + test deps
+        run: pip install -e '.[test]'
+
+      - name: Wait for ClickHouse
+        run: for i in $(seq 1 30); do curl -sf http://localhost:8123/ping && exit 0; sleep 2; done; exit 1
+
+      # Whole suite EXCEPT the agentic sandbox e2e (Inspect's Docker sandbox → docker-in-docker is
+      # slow/fiddly in CI; it's a local/manual check). Unit needs nothing; integration + e2e-spine
+      # use the service containers above.
+      - name: Run tests
+        run: pytest --ignore=tests/e2e/test_sandbox_agentic.py -q

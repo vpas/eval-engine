@@ -1,5 +1,7 @@
 # eval-engine
 
+[![CI](https://github.com/vpas/eval-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/vpas/eval-engine/actions/workflows/ci.yml)
+
 A modular, distributed engine for **model evaluations** at scale, plus a web dashboard to
 author, launch, monitor, and analyze runs. Composability is the core principle: *model*,
 *harness*, *dataset*, and *scorer* are independent blocks, and any valid combination works —
