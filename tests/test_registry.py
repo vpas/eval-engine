@@ -38,6 +38,25 @@ def test_registry():
     print("registry ✓  register+version (latest+pinned) ✓  list ✓  get dataset/eval/model ✓ (FR1–3)")
 
 
+def test_dataset_snapshot():
+    """A dataset is content-addressed at registration: snapshot the bytes to immutable storage keyed
+    by their hash (write-once / idempotent), and the snapshot loads back to the same samples (FR1, §13)."""
+    from pathlib import Path
+
+    from eval_engine import datasets
+
+    h, snap = datasets.snapshot("examples/qa.jsonl")
+    assert h and (snap.startswith("gs://") or Path(snap).exists()), (h, snap)
+    assert h in snap, "snapshot key not content-addressed"
+    # idempotent: same content → same hash + same key (write-once)
+    assert datasets.snapshot("examples/qa.jsonl") == (h, snap)
+    # the snapshot loads back to the same 3 samples, and its content hash matches
+    ds, ch = datasets.load_jsonl(snap)
+    assert len(ds.samples) == 3 and ch == h, (len(ds.samples), ch, h)
+    print("snapshot ✓  content-addressed ✓  idempotent ✓  loads back to same samples ✓ (FR1/§13)")
+
+
 if __name__ == "__main__":
     test_registry()
+    test_dataset_snapshot()
     print("ALL PASS ✓")

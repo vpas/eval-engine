@@ -128,8 +128,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   registered evals/datasets/models — and launching a run *from* a registered eval (its dataset +
   default harness/scorers) — lands naturally with #10 (reproduce/launch).
 
-- [ ] **9. Dataset versioning — content-addressed snapshots.** §13. Store an immutable dataset snapshot
-  in object storage + a Postgres pointer (today: hash of local file bytes only).
+- [x] **9. Dataset versioning — content-addressed snapshots.** §13. *Done (2026-06-05):*
+  `datasets.snapshot(uri)` hashes a dataset's bytes and writes an **immutable, write-once** copy keyed
+  by the hash (`gs://<bucket>/datasets/<hash>.jsonl` in-cluster, a local `.data/datasets/` dir in dev);
+  `POST /datasets` calls it and pins `content_hash` + `snapshot_uri` on the registered `DatasetSpec`
+  (the Postgres pointer from #8) — so a dataset version is reproducible by content, not by a mutable
+  path. `datasets.load_jsonl` now reads a `gs://` snapshot too, so runs can execute against the
+  pinned snapshot. Tested: content-addressed + idempotent + loads back to the same samples; endpoint
+  enrichment verified. (Native GCS calls here are replaced by the S3-API abstraction in #14.)
 
 - [ ] **10. Reproduce / "re-run".** FR10, §9.9. Clone a past RunSpec → a new Run with identical pinned
   inputs (endpoint + dashboard button).

@@ -161,6 +161,15 @@ def _get(kind: str, ent_id: str):
 
 @app.post("/datasets", status_code=201)
 def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Header(default=None)):
+    # Content-address the data (FR1, §13): snapshot the bytes to immutable storage + pin the hash, so
+    # the version is reproducible by content. Best-effort — if the uri isn't readable from the API
+    # (e.g. a client-side path), register the metadata as-is.
+    from .datasets import snapshot
+    try:
+        content_hash, snapshot_uri = snapshot(spec.uri)
+        spec = spec.model_copy(update={"content_hash": content_hash, "snapshot_uri": snapshot_uri})
+    except Exception:  # noqa: BLE001
+        pass
     return _register("dataset", spec, x_auth_request_email)
 
 

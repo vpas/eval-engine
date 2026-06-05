@@ -15,12 +15,16 @@ class PluginRef(BaseModel):
 # reproducible stance of §13/§14), so there is no in-place update/delete, only register + list + get.
 
 class DatasetSpec(BaseModel):
-    """A registered, versioned dataset (FR1)."""
+    """A registered, versioned dataset (FR1, §13). Registration content-addresses the data: the bytes
+    are snapshotted to immutable object storage keyed by their hash, and `content_hash`/`snapshot_uri`
+    are pinned on the entity — so a dataset version is reproducible by content, not by a mutable path."""
     id: str
     version: int = 1
     source: str = "jsonl"                      # jsonl | hf | s3 | db …
-    uri: str                                   # path/URI the loader resolves
+    uri: str                                   # path/URI the registrar reads to snapshot
     description: str = ""
+    content_hash: str | None = None            # server-populated at registration (sha256 of the bytes)
+    snapshot_uri: str | None = None            # server-populated: immutable content-addressed copy
 
 
 class EvalSpec(BaseModel):
