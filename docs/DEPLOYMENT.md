@@ -14,8 +14,9 @@ Last updated: 2026-06-04.
 
 - **First milestone = one QA eval, real model, through the full distributed path**, results queryable
   in ClickHouse. Agentic/sandbox is explicitly out of this milestone.
-- **Cost-minimal:** zonal GKE (free control plane), one always-on `e2-medium`, spot workers that scale
-  to **0** when idle, **no Cloud NAT**, **no LoadBalancer** (port-forward). Idle target ≈ $15–26/mo.
+- **Cost-minimal:** zonal GKE (free control plane), one always-on `e2-standard-4` (the stack is
+  CPU-bound below that), spot workers that scale to **0** when idle, **no Cloud NAT**, **no
+  LoadBalancer** (port-forward). Always-on ≈ $98/mo; teardown/scale-down between sessions.
 - **Model provider for e2e = OpenRouter** (already validated in the prototype) routed **through the
   LiteLLM gateway** — that exercises the current design's "all traffic gateway-fronted + canonical
   cost" path without needing a self-hosted model.
@@ -27,14 +28,14 @@ Last updated: 2026-06-04.
 
 ```
 GKE zonal cluster (us-central1-a)
-├── system pool  (1× e2-medium, always on)
+├── system pool  (1× e2-standard-4, always on)
 │     ├── eval-engine-api        (FastAPI, Deployment)        — control plane
 │     ├── eval-engine-orch       (Orchestrator, 1 replica)    — admit→expand→reconcile→finalize
 │     ├── litellm                (gateway Deployment)         — all model traffic, Redis rate-limit
 │     ├── clickhouse             (single pod + PVC)            — analytics (~12B-row table; tiny in test)
 │     ├── redis                  (single pod)                  — gateway rate-limit + run stop-flags
 │     └── KEDA operator                                       — autoscaler
-├── workers pool (spot, 0..3 e2-medium, tainted)
+├── workers pool (spot, 0..3 e2-medium, tainted)  ← scale-to-zero
 │     └── eval-engine-worker     (Deployment, KEDA-scaled on count(queued))
 └── (no in-cluster Postgres)
 Managed Postgres: Neon serverless (free tier)  — metadata + ephemeral ledger
@@ -50,8 +51,7 @@ plane and orchestrator co-locate on the always-on node; only workers use spot.
 ## 2. What already exists (reuse, don't rebuild)
 
 - ☑ **Terraform** (`deploy/terraform/`) — zonal cluster, `system` + spot `workers` pools, GCS bucket,
-  Artifact Registry repo. *Validated, plan = 8 resources.* **Not yet applied.** (Comments still say
-  "Ray head/KubeRay" — fix to KEDA when we touch it.)
+  Artifact Registry repo. **Applied (M0).**
 - ☑ **Code promoted to repo root** (out of `prototype/`) — package `eval_engine/`, `tests/`,
   `examples/`, `static/`, `infra/` at root; `deploy/sandbox/`; `pyproject.toml` (name `eval-engine`).
   Ray removed (rejected approach). Verified working post-move (CLI, mock run, concurrency test).
@@ -73,38 +73,30 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 
 ## 3. Milestones
 
-### M0 — Infra up (`terraform apply`)  ◐
-- [x] Plan validated (8 resources). GCS bucket `eval-engine-eval-engine`, Artifact Registry
-      `us-central1-docker.pkg.dev/eval-engine/eval-engine`, and APIs created.
-- [◐] `terraform apply` running — cluster + system pool + spot workers pool provisioning.
-- [ ] `gcloud container clusters get-credentials eval-engine --zone us-central1-a` → kubeconfig.
-- [ ] `kubectl get nodes` shows the system node (workers pool at 0 — expected).
+### M0 — Infra up (`terraform apply`)  ☑
+- [x] `terraform apply` — cluster + system pool (**e2-standard-4**) + spot workers pool (0..3) + GCS
+      bucket `eval-engine-eval-engine` + Artifact Registry. Credentials fetched; `kubectl get nodes`
+      shows the one system node (workers at 0 — correct).
 - [x] Fixed terraform comments: Ray/KubeRay → KEDA/Deployment.
-- **Cost starts here.** Verify the spot pool is at 0 nodes when idle.
+- **Cost is live** (~$98/mo always-on). Spot workers at 0 when idle.
 
 ### M1 — Stateful backends  ☑
-- [ ] **Postgres (Neon):** create the free project; put the connection string in a k8s Secret
-      (`eval-pg`). (Do **not** paste it into this doc or chat.) — **needs your Neon signup.**
-- [x] **ClickHouse:** manifest `deploy/k8s/10-clickhouse.yaml` (single pod + 10Gi PVC, `clickhouse:8123`).
-      → apply once the cluster is up.
-- [x] **Redis:** manifest `deploy/k8s/11-redis.yaml` (single pod, `redis:6379`).
+- [x] **Postgres (Neon):** free project created; DSN in the `eval-pg` k8s secret (key `dsn`).
+- [x] **ClickHouse:** `deploy/k8s/10-clickhouse.yaml` (single pod + 10Gi PVC, `clickhouse:8123`) Running.
+- [x] **Redis:** `deploy/k8s/11-redis.yaml` (single pod, `redis:6379`) Running.
 - [x] **Namespace:** `deploy/k8s/00-namespace.yaml` (`eval-engine`).
-- [x] **Schema init:** `deploy/k8s/20-schema-init-job.yaml` ran `db.init()` → PG tables (runs,
-      sample_tasks, failed_task_archive) on Neon + `sample_results` on ClickHouse. **Done.**
-- [x] **ClickHouse network access fix:** the `:24.8` image restricts `default` to localhost; a
-      `clickhouse-users` ConfigMap (`deploy/k8s/10-clickhouse.yaml`) opens it to the pod network.
+- [x] **Schema init:** `deploy/k8s/20-schema-init-job.yaml` ran `db.init()` → PG ledger tables on Neon
+      + `sample_results` on ClickHouse. **Verified.**
+- [x] **ClickHouse network-access fix:** the `:24.8` image pins `default` to localhost; a
+      `clickhouse-users` ConfigMap opens it to the pod network.
+- [ ] **`openrouter` secret** (the API key) — needed for M4/M6, not yet created.
 - ⚠ **Rotate the Neon credential** — it was inadvertently printed (base64) to the session; rotate the
       `neondb_owner` password in the Neon console and re-create the `eval-pg` secret.
-- [ ] Namespace `eval-engine`; Secrets: `eval-pg`, `openrouter` (the OpenRouter API key).
-- [ ] **Schema init:** run the Postgres DDL (`SCHEMA.md` §1) + ClickHouse table (`SCHEMA.md` §2) — a
-      one-shot `kubectl run` Job using the app image's `db.init` / a migration command.
 
 ### M2 — Build & push the image  ☑
 - [x] `gcloud auth configure-docker us-central1-docker.pkg.dev`.
-- [◐] Build + push `us-central1-docker.pkg.dev/eval-engine/eval-engine/app:<sha>` + `:latest`
-      (`deploy/Dockerfile`, context = repo root).
-- [ ] Confirm the image runs `uvicorn eval_engine.api:app` and the `python -m eval_engine.{worker,
-      orchestrator}` entrypoints.
+- [x] Built + pushed `…/eval-engine/app:<sha>` + `:latest` (`deploy/Dockerfile`, context = repo root).
+- [x] Entrypoints verified to boot (`uvicorn … api`, `python -m eval_engine.{worker,orchestrator}`).
 
 ### M3 — App-side distributed split (code)  ☑
 - [x] **RunSpec persistence** — `runs.spec_json` + `control.get_spec/active_runs/run_total` (both backends).
