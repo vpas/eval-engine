@@ -9,6 +9,7 @@ Docs: http://localhost:8077/docs
 """
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +20,13 @@ from fastapi.responses import HTMLResponse
 from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
 from .models import RunSpec
+
+# In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
+# orchestrator/worker pods execute. Local single-process dev (sqlite) keeps the convenient inline
+# background execute so the dashboard works without standing up separate processes.
+INLINE_EXEC = os.environ.get(
+    "EVAL_ENGINE_API_INLINE_EXEC", "1" if db.BACKEND == "sqlite" else "0"
+) == "1"
 
 
 @asynccontextmanager
@@ -69,7 +77,8 @@ def create_run(spec: RunSpec, bg: BackgroundTasks):
         raise HTTPException(status_code=422, detail=str(e)) from None
 
     run_id = runner.launch(spec)
-    bg.add_task(runner.execute, run_id, spec)
+    if INLINE_EXEC:
+        bg.add_task(runner.execute, run_id, spec)  # local dev only; cluster uses orchestrator+workers
     return {"run_id": run_id, "status": "queued"}
 
 

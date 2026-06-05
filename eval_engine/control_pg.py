@@ -29,7 +29,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
-  accuracy DOUBLE PRECISION, dataset_hash TEXT, created_at TIMESTAMPTZ DEFAULT now(),
+  accuracy DOUBLE PRECISION, dataset_hash TEXT, spec_json TEXT, created_at TIMESTAMPTZ DEFAULT now(),
   finished_at TIMESTAMPTZ);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
@@ -75,12 +75,32 @@ def new_run_id() -> str:
 def create_run(meta: dict) -> None:
     _conn().execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,dataset_hash) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s)",
+        "status,total,done,failed,dataset_hash,spec_json) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s)",
         (meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
          meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), meta["total"],
-         meta["dataset_hash"]),
+         meta["dataset_hash"], meta.get("spec_json")),
     )
+
+
+def get_spec(run_id: str) -> str | None:
+    """The persisted RunSpec JSON, so a separate worker/orchestrator process can rehydrate it."""
+    row = _conn().execute("SELECT spec_json FROM runs WHERE id=%s", (run_id,)).fetchone()
+    return row[0] if row else None
+
+
+def active_runs(statuses: tuple[str, ...]) -> list[str]:
+    """Run ids currently in any of `statuses` — the work list for workers/orchestrator."""
+    rows = _conn().execute(
+        "SELECT id FROM runs WHERE status = ANY(%s) ORDER BY created_at", (list(statuses),)
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def run_total(run_id: str) -> int:
+    """Authoritative expected sample count (set at create) — the finalize gate vs. expansion races."""
+    row = _conn().execute("SELECT total FROM runs WHERE id=%s", (run_id,)).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 def set_status(run_id: str, status: str) -> None:

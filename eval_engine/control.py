@@ -23,7 +23,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers TEXT, status TEXT, total INT, done INT, failed INT,
-  accuracy REAL, dataset_hash TEXT, created_at TEXT, finished_at TEXT);
+  accuracy REAL, dataset_hash TEXT, spec_json TEXT, created_at TEXT, finished_at TEXT);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -63,16 +63,41 @@ def create_run(meta: dict) -> None:
     con = _con()
     con.execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,accuracy,dataset_hash,created_at,finished_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "status,total,done,failed,accuracy,dataset_hash,spec_json,created_at,finished_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
             meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), "queued",
-            meta["total"], 0, 0, None, meta["dataset_hash"], _now(), None,
+            meta["total"], 0, 0, None, meta["dataset_hash"], meta.get("spec_json"), _now(), None,
         ),
     )
     con.commit()
     con.close()
+
+
+def get_spec(run_id: str) -> str | None:
+    """The persisted RunSpec JSON, so a separate worker/orchestrator process can rehydrate it."""
+    con = _con()
+    row = con.execute("SELECT spec_json FROM runs WHERE id=?", (run_id,)).fetchone()
+    con.close()
+    return row[0] if row else None
+
+
+def active_runs(statuses: tuple[str, ...]) -> list[str]:
+    """Run ids currently in any of `statuses` — the work list for workers/orchestrator."""
+    con = _con()
+    q = "SELECT id FROM runs WHERE status IN (%s) ORDER BY created_at" % ",".join("?" * len(statuses))
+    rows = con.execute(q, statuses).fetchall()
+    con.close()
+    return [r[0] for r in rows]
+
+
+def run_total(run_id: str) -> int:
+    """Authoritative expected sample count (set at create) — the finalize gate vs. expansion races."""
+    con = _con()
+    row = con.execute("SELECT total FROM runs WHERE id=?", (run_id,)).fetchone()
+    con.close()
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 def set_status(run_id: str, status: str) -> None:

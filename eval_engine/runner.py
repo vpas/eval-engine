@@ -163,6 +163,7 @@ def launch(spec: RunSpec) -> str:
         "provider": provider, "model_id": model_id, "harness": spec.harness.type,
         "scorers": [s.type for s in spec.scorers], "total": len(samples_by_id),
         "dataset_hash": dataset_hash,
+        "spec_json": spec.model_dump_json(),  # so a separate worker/orchestrator can rehydrate it
     })
     control.expand_tasks(
         run_id,
