@@ -107,3 +107,21 @@ def make_run(_schema):
         control.expand_tasks(run_id, [(f"s{i:04d}", "cat") for i in range(n)])
         return run_id
     return _make
+
+
+@pytest.fixture
+def mock_spec():
+    """Factory for a deterministic single_turn mock RunSpec (no API key, always answers 'Paris' →
+    1/3 on examples/qa.jsonl). Override any field via kwargs, e.g. ``mock_spec(epochs=3)``."""
+    from eval_engine.models import PluginRef, RunSpec
+
+    def _make(**over) -> RunSpec:
+        base = dict(
+            eval="capitals_qa", dataset="examples/qa.jsonl", model="mockllm/model",
+            mock_output="Paris", batch_size=2,
+            harness=PluginRef(type="single_turn"),
+            scorers=[PluginRef(type="includes", config={"ignore_case": True})],
+        )
+        base.update(over)
+        return RunSpec(**base)
+    return _make

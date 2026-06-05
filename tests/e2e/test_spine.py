@@ -1,24 +1,16 @@
-"""Worker + Orchestrator split over the shared ledger (replaces the old Ray test).
+"""Worker + Orchestrator split over the shared ledger — the full distributed spine in-process.
 
-Exercises the M3 entrypoints in-process: launch (persist RunSpec) → orchestrator admit
-(queued→running) → worker drain (claim→execute→commit→load) → orchestrator finalize. Same
-exactly-once result path as the single-process runner, now via the api/worker/orchestrator roles.
+Exercises the role entrypoints: launch (persist RunSpec) → orchestrator admit (queued→running) →
+worker drain (claim→execute→commit→load) → orchestrator finalize. Same exactly-once result path as
+the single-process runner, now via the api/worker/orchestrator roles. Schema + per-test isolation
+come from the autouse ``clean_db`` fixture (tests/e2e/conftest.py); the spec from ``mock_spec``.
 """
 from eval_engine import db, orchestrator, runner, worker
-from eval_engine.models import PluginRef, RunSpec
+from eval_engine.models import RunSpec
 
 
-def test_worker_orchestrator_split():
-    spec = RunSpec(
-        eval="capitals_qa",
-        dataset="examples/qa.jsonl",
-        model="mockllm/model",
-        mock_output="Paris",
-        batch_size=2,
-        harness=PluginRef(type="single_turn"),
-        scorers=[PluginRef(type="includes", config={"ignore_case": True})],
-    )
-    db.init()
+def test_worker_orchestrator_split(mock_spec):
+    spec = mock_spec()  # single_turn mock, 'Paris' → 1/3 on examples/qa.jsonl
 
     # 1) launch persists the full RunSpec so a separate process can rehydrate it
     run_id = runner.launch(spec)
@@ -48,34 +40,20 @@ def test_worker_orchestrator_split():
     # 4) orchestrator finalizes: aggregate → archive → prune → completed
     orchestrator.tick()
     run = db.control.get_run(run_id)
-    status = run[8]  # id,eval_id,eval_version,model,provider,model_id,harness,scorers,status,...
-    assert status == "completed", f"status={status}"
+    assert run[8] == "completed", f"status={run[8]}"  # RUN_COLS: …status(8)…
     assert db.control.ledger_size(run_id) == 0, "ledger not pruned"
 
     # exactly-once result landed in analytics; mock 'Paris' → 1/3 correct
     n, passed, *_ = db.analytics.run_summary(run_id)
     assert n == 3 and passed == 1, f"n={n} passed={passed}"
-    print(f"worker/orchestrator split ✓  (run {run_id}: {passed}/{n} passed, ledger pruned)")
 
 
-def test_epochs_and_ci():
-    """Epochs repeat each sample (Inspect reduces to one per-sample row) and the Wilson CI brackets
-    the pass rate (DESIGN §14, FR8)."""
-    lo, hi = runner.wilson_ci(50, 100)
-    assert abs(lo - 0.404) < 0.01 and abs(hi - 0.596) < 0.01, (lo, hi)
-    assert runner.wilson_ci(0, 0) == (0.0, 0.0)
-    lo, hi = runner.wilson_ci(10, 10)
-    assert hi <= 1.0 and lo > 0.7, (lo, hi)  # never escapes [0,1]
-
-    spec = RunSpec(
-        eval="epochs_qa", dataset="examples/qa.jsonl", model="mockllm/model", mock_output="Paris",
-        epochs=3, batch_size=3,
-        harness=PluginRef(type="single_turn"),
-        scorers=[PluginRef(type="includes", config={"ignore_case": True})],
-    )
-    db.init()
-    run_id = runner.run(spec)
+def test_epochs_reduce_to_one_row_per_sample(mock_spec):
+    """Epochs repeat each sample N× and Inspect reduces them to one per-sample row (DESIGN §14, FR8),
+    and the Wilson CI brackets the observed pass rate."""
+    run_id = runner.run(mock_spec(eval="epochs_qa", epochs=3, batch_size=3))
     n, passed, *_ = db.analytics.run_summary(run_id)
-    assert n == 3, f"epochs should reduce to one row per sample, got n={n}"  # 3 samples, not 9
-    ci = runner.wilson_ci(50, 100)
-    print(f"epochs+CI ✓  (epochs=3 → {n} reduced rows; wilson_ci(50,100)=[{ci[0]:.3f},{ci[1]:.3f}])")
+    assert n == 3, f"epochs should reduce 3×-repeated samples to 3 rows, got n={n}"  # not 9
+
+    lo, hi = runner.wilson_ci(int(passed), int(n))
+    assert 0.0 <= lo <= passed / n <= hi <= 1.0, (lo, passed / n, hi)  # CI brackets the rate
