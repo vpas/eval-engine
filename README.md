@@ -7,18 +7,26 @@ across QA, multi-turn agentic, LLM-as-judge, and custom-code scoring.
 
 ## Design docs
 
+The docs describe the **current (v1) design**. Approaches considered and dropped are in
+[docs/ALTERNATIVES.md](docs/ALTERNATIVES.md); deferred/future work (with triggers) is in
+[docs/FUTURE.md](docs/FUTURE.md); the design-review history is archived under
+[docs/design_review_history/](docs/design_review_history/).
+
 | Doc | Contents |
 |---|---|
-| [DESIGN.md](DESIGN.md) | Architecture, scale envelope, component decisions, decision log (D1–D10) |
+| [DESIGN.md](DESIGN.md) | Architecture, scale envelope, component decisions, reproducibility |
 | [docs/SCHEMA.md](docs/SCHEMA.md) | Postgres DDL + ClickHouse table + dataset versioning |
-| [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) | Run FSM, ephemeral ledger, result path, weighted-fair scheduling, failure analysis |
+| [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) | Run FSM, ephemeral ledger, commit protocol, budget, failure analysis |
+| [docs/SCHEDULER.md](docs/SCHEDULER.md) | Two-lane admission + per-run concurrency cap |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | Extensibility contract (harness/scorer/loader/tool) |
 | [docs/SANDBOXING.md](docs/SANDBOXING.md) | Tiered K8s isolation for agentic evals |
+| [docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) | Considered & rejected; decisions reversed |
+| [docs/FUTURE.md](docs/FUTURE.md) | Deferred subsystems & roadmap (with re-introduction triggers) |
 
-**Stack (chosen):** Inspect AI kernel (Pure A) · LiteLLM single-egress gateway · Ray/KubeRay ·
-FastAPI control plane · Postgres metadata + ephemeral ledger · S3/MinIO artifacts ·
-ClickHouse analytics · Langfuse tracing · Next.js dashboard + Superset · Terraform/Helm on
-cloud Kubernetes, portable by interface.
+**Stack (chosen):** Inspect AI kernel (Pure A) · LiteLLM gateway (all traffic) · K8s Deployment +
+KEDA · FastAPI control plane · Postgres metadata + ephemeral ledger · S3/MinIO artifacts ·
+ClickHouse analytics · Next.js dashboard + embedded Inspect viewer + canned CH views · Terraform/Helm
+on cloud Kubernetes, portable by interface.
 
 ## Prototype
 
@@ -35,4 +43,4 @@ cd prototype && PYTHONPATH=. ../.venv/bin/eval-engine run examples/capitals_qa.y
 # dashboard:  PYTHONPATH=. ../.venv/bin/uvicorn eval_engine.api:app --port 8077
 ```
 
-Status: design v0.2 (decisions locked) · Phase 0/1 prototype working.
+Status: design v1 (current; reviewed three rounds) · Phase 0/1 prototype working.

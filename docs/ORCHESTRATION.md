@@ -1,8 +1,10 @@
-# Eval Engine — Orchestrator & Ledger State Machine (Draft v0.1)
+# Eval Engine — Orchestrator & Ledger State Machine (v1)
 
-> Companion to `DESIGN.md` v0.2 and `docs/SCHEMA.md`. This is the **core custom IP** — the
-> part most likely to harbor correctness bugs — so it's specified in detail. It resolves
-> open items §14.5 (budget), §14.6 (cancellation), and SCHEMA §4.3/§4.4 (prune & idempotency).
+> Companion to `DESIGN.md` and `docs/SCHEMA.md`. This is the **core custom IP** — the part most likely
+> to harbor correctness bugs — so it's specified in detail: the run lifecycle FSM, the claim/lease
+> semantics, the commit protocol, budget, cancellation, finalization, and the failure-mode walkthrough.
+> Admission (two-lane) is in `docs/SCHEDULER.md`; deferred work (weighted fair-share) is in
+> `docs/FUTURE.md`.
 
 ---
 
@@ -11,7 +13,7 @@
 **The Postgres ledger is the single source of truth for execution state.** No critical
 coordination state lives in worker memory. Any component can die at any time; recovery is
 "re-derive from the ledger." This is the whole reason we chose a ledger over an in-memory
-controller (D4) — we lean on it fully here.
+controller — we lean on it fully here.
 
 Three correctness goals drive everything below:
 1. **No completed sample is ever lost** (a crash never discards finished work).
@@ -25,15 +27,15 @@ Three correctness goals drive everything below:
 | Component | Cardinality | Owns |
 |---|---|---|
 | **Control Plane (FastAPI)** | N replicas | Accept launch → write `Run(queued)`; expose status/cancel; never touches execution. |
-| **RunScheduler** | 1 active (leader-elected) | Admission control + dataset→ledger **expansion**; `queued→running`. |
-| **Workers (Ray)** | many | **Claim** ledger tasks → run Inspect solver+scorer → commit result to ledger + transcript to object store. |
-| **ResultLoader** | 1+ (per active run or sharded) | **Batch-load** done-but-unloaded ledger rows → ClickHouse; mark loaded. |
-| **RunReconciler** | 1 active (leader-elected) | Derive progress, drive state transitions, enforce budget, honor cancel, **finalize** + prune. |
+| **Orchestrator** | 1 active (leader-elected) | One "derive state each tick" loop: **admit** (two-lane, `SCHEDULER.md`) → **expand** dataset→ledger → **reconcile** progress/state transitions → **enforce budget**, honor cancel → **finalize** + prune. |
+| **Workers (K8s Deployment, KEDA-scaled)** | many | **Claim** a shard → run one Inspect Task → **async-insert results straight to ClickHouse** + transcript→S3 → flip ledger rows `done`. |
 
-> Scheduler and Reconciler are leader-elected singletons (lease in Postgres or K8s `Lease`).
-> They're lightweight (they issue queries and transitions, not compute), so one active
-> instance each is fine; a standby takes over on lease expiry. Workers and ResultLoaders
-> scale horizontally.
+> The Orchestrator is a single leader-elected singleton (Postgres advisory lock). It's lightweight
+> (queries + transitions, not compute), so one active instance is fine; a standby takes over on lease
+> expiry. Admission and reconciliation are kept as **distinct functions** within the one loop, so if
+> weighted fair-share is ever needed (`FUTURE.md` §2) splitting it back out is a refactor, not a
+> redesign. Workers scale horizontally and async-insert results directly — there is **no separate
+> result-loader** (ClickHouse buffers server-side).
 
 ---
 
@@ -45,16 +47,16 @@ Three correctness goals drive everything below:
             ▼
         ┌────────┐  admission ok    ┌───────────┐  ledger fully written  ┌─────────┐
         │ queued │ ───────────────► │ expanding │ ─────────────────────► │ running │
-        └────────┘   (Scheduler)    └───────────┘      (Scheduler)        └────┬────┘
+        └────────┘   (Orchestrator)    └───────────┘      (Orchestrator)        └────┬────┘
             │                                                                  │
-            │ admission denied / invalid                  all tasks terminal   │  (Reconciler)
+            │ admission denied / invalid                  all tasks terminal   │  (Orchestrator)
             ▼                                             & all loaded         ▼
         ┌────────┐                                                       ┌────────────┐
         │ failed │ ◄──── fatal orchestration error (any state) ──────────│ finalizing │
         └────────┘                                                       └─────┬──────┘
                                                                                │ aggregates written,
         ┌───────────┐   cancel request / hard budget breach                    │ ledger pruned
-        │ cancelled │ ◄──── (Reconciler, from queued/expanding/running)        ▼
+        │ cancelled │ ◄──── (Orchestrator, from queued/expanding/running)        ▼
         └───────────┘                                                    ┌───────────┐
                                                                          │ completed │
                                                                          └───────────┘
@@ -64,61 +66,48 @@ Three correctness goals drive everything below:
 
 | From → To | Trigger | Who | Crash-recovery / idempotency |
 |---|---|---|---|
-| queued → expanding | admission: under concurrency cap, budget pre-check ok, RunSpec valid | Scheduler | Re-pick if still `queued`; transition is a single conditional UPDATE. |
-| expanding → running | ledger row count == expected `total_samples` | Scheduler | Expansion is idempotent (`INSERT … ON CONFLICT DO NOTHING`); on crash, resume and re-check count. |
-| running → finalizing | `done+failed == total_samples` **and** all loaded to ClickHouse **and** failed ≤ threshold | Reconciler | Condition is a pure query; safe to re-evaluate. |
-| running → failed | failed_samples > `max_failed` (fail-fast) | Reconciler | Idempotent set; workers stop via cancel flag. |
-| running → cancelled | user cancel **or** hard budget breach | Reconciler | Idempotent; drain logic below. |
-| finalizing → completed | aggregates computed + ledger pruned | Reconciler | Finalization fully idempotent (recompute, re-prune are no-ops on re-entry). |
-| any → failed | unrecoverable orchestration error | Scheduler/Reconciler | Terminal; records `error`. |
+| queued → expanding | admission: under concurrency cap, budget pre-check ok, RunSpec valid | Orchestrator | Re-pick if still `queued`; transition is a single conditional UPDATE. |
+| expanding → running | ledger row count == expected `total_samples` | Orchestrator | Expansion is idempotent (`INSERT … ON CONFLICT DO NOTHING`); on crash, resume and re-check count. |
+| running → finalizing | `done+failed == total_samples` (each `done` ⟹ durable in CH, §5.1) **and** failed ≤ threshold | Orchestrator | Condition is a pure query; safe to re-evaluate. |
+| running → failed | failed_samples > `max_failed` (fail-fast) | Orchestrator | Idempotent set; workers stop via cancel flag. |
+| running → cancelled | user cancel **or** hard budget breach | Orchestrator | Idempotent; drain logic below. |
+| finalizing → completed | aggregates computed + ledger pruned | Orchestrator | Finalization fully idempotent (recompute, re-prune are no-ops on re-entry). |
+| any → failed | unrecoverable orchestration error | Orchestrator | Terminal; records `error`. |
 
 ---
 
-## 4. The result path (execution → ledger → batch-load → ClickHouse → prune)
+## 4. The result path (execution → ClickHouse → ledger flip → prune)
 
-This is the spine, and its shape is forced by two facts: **(1)** ClickHouse performs badly
-with many tiny inserts (we'd be doing ~1B/month), and **(2)** we need exactly-once analytics
-despite at-least-once execution. The solution decouples them:
+The ledger is **skinny** — it carries only coordination (status/lease/attempts/error). Results never
+pass through widened ledger rows or a separate loader; workers **async-insert straight to ClickHouse**.
+
+ClickHouse performs badly with many tiny inserts (~1B/month) and we need exactly-once analytics
+despite at-least-once execution. The path:
 
 ```
- worker executes sample
-        │ 1. write structured result INTO the ledger row (UPSERT on PK) + transcript→S3
+ worker runs a SHARD (one Inspect Task)
+        │ 1. async-insert the shard's results → ClickHouse  +  transcripts → S3
+        ▼                                      (server-side buffering; no tiny inserts)
+ ClickHouse sample_results  (ReplacingMergeTree keyed (run_id,sample_id), version = load time)
+        │ 2. flip the shard's ledger rows status='done'   (tiny coordination update)
         ▼
- sample_tasks row: status='done', result columns filled, loaded=false   ◄── source of truth, exactly-once
-        │ 2. ResultLoader bulk-reads done & loaded=false, in batches
-        ▼
- ClickHouse sample_results  (one big INSERT per batch)                   ◄── analytics projection
-        │ 3. mark ledger rows loaded=true
-        ▼
- (at finalize) all loaded → compute aggregates → prune ledger            ◄── Postgres stays small
+ (at finalize) compute metrics ONCE over the deduped run partition → run_summary; prune ledger
 ```
 
-Why this works:
-- **Dedup happens in Postgres, before ClickHouse ever sees a row.** A re-executed task
-  (lease expiry → another worker) UPSERTs the *same PK* `(run_id, sample_id)`, overwriting
-  its own prior result. So at most one result per sample exists in the ledger → ClickHouse
-  receives no duplicates. *This resolves SCHEMA §4.4 — no ReplacingMergeTree gymnastics needed.*
-- **Batched inserts** keep ClickHouse happy (configurable: flush every ~10 s or ~50k rows).
-- **Near-real-time analytics**: the loader runs continuously during the run, so Superset
-  sees partial results within seconds, not only at finalize.
+Why this is exactly-once **and** cheap:
+- **Idempotency lives in ClickHouse, not Postgres.** A re-executed task (lease expiry → another
+  worker) writes the same `(run_id, sample_id)`; `ReplacingMergeTree` keeps the newest by load
+  time — a duplicate re-load collapses, a genuine re-execution's newer result wins. No fat payload
+  churns the ledger, which kills the dead-tuple/autovacuum bloat that a widened result row would cause.
+- **No insert-time materialized view for headline numbers.** Metrics are computed **once at finalize** over
+  the deduped run partition (`FINAL` is cheap — one run ≈ 100k rows) into `run_summary`. In-progress
+  numbers come from the **gateway** (cost) + **ledger status counts** (progress) — live data with
+  no MV that would double-count a re-load.
+- **Async inserts** keep ClickHouse happy without a separate loader or a ledger round-trip for the
+  payload.
 
-This requires extending the ledger to carry the result. Amendment to `sample_tasks`:
-
-```sql
-ALTER TABLE sample_tasks
-  ADD COLUMN passed         smallint,
-  ADD COLUMN primary_score  double precision,
-  ADD COLUMN scores         jsonb,
-  ADD COLUMN tokens_in      int,
-  ADD COLUMN tokens_out     int,
-  ADD COLUMN cost_usd       numeric(12,6),
-  ADD COLUMN latency_ms     int,
-  ADD COLUMN error_type     text,
-  ADD COLUMN transcript_uri text,
-  ADD COLUMN loaded         boolean NOT NULL DEFAULT false;
--- Loader hot path:
-CREATE INDEX ON sample_tasks (run_id) WHERE status='done' AND loaded=false;
-```
+The ledger therefore stays at its skinny SCHEMA §1.6 shape (status/lease/attempts/error only) — it
+is **not** widened with result columns.
 
 ---
 
@@ -137,23 +126,37 @@ while not shutting_down:
             with sandbox(task) as sbx:             # agentic: provision tier's ephemeral pod (SANDBOXING §7)
                 result = run_inspect(task, sbx)    # Inspect solver+scorer; model calls via LiteLLM,
                                                    #   tool/command execution inside sbx; pod torn down on exit
-            put_object(result.transcript_uri, zstd(result.transcript))   # idempotent: keyed path
-            commit_result(task, result)            # UPSERT result cols + status='done' (one txn)
+            commit_result(task, result)           # §5.1 ack-before-flip protocol
         except RetryableError as e:                # 429, timeout, transient tool/network
             if task.attempts >= MAX_ATTEMPTS:
                 mark_failed(task, e)               # permanent
             else:
                 release_for_retry(task, delay=backoff(task.attempts))   # status='queued', not_before=…
+        except BudgetExceeded as e:                # gateway budget reject — terminal, NOT a retry (§8)
+            mark_failed(task, e)
         except FatalError as e:                    # malformed sample, unrecoverable
             mark_failed(task, e)
 ```
 
-- `commit_result` is a **single transaction**: it writes the result columns *and* flips
-  `status='done'` together. So "result written" and "task done" can never disagree.
-- The dangerous interleaving — *transcript/result written, then worker dies before
-  `commit_result`* — is safe: the task stays `running`, its lease expires, another worker
-  re-executes and UPSERTs over the (orphaned, never-committed) state. The earlier object-store
-  write is overwritten at the same key. No duplicate reaches ClickHouse.
+A worker claims a **shard** and runs it as **one Inspect Task**.
+
+### 5.1 Commit protocol — ack-before-flip
+
+Per result, the commit is an **ordered, ack-gated, idempotent** write; the ledger flip is the single
+commit point and happens **only after ClickHouse durably has the row**:
+
+1. write transcript → S3 at the deterministic key (idempotent, overwrite-safe);
+2. async-insert the result → ClickHouse with `async_insert=1, wait_for_async_insert=1` — **block until
+   CH durably acks** (the row is in a part, not just buffered);
+3. **only then** flip the ledger row `status='done'`.
+
+> **Invariant:** `status='done'` ⟹ the result is durable in ClickHouse — so a crash never leaves a
+> `done` row with no result. Crash before any step → ledger stays `running` → lease expires → shard
+> re-executes → the S3 re-write hits the same key and the CH re-insert collapses via
+> `ReplacingMergeTree((run_id, sample_id))`. Atomicity is **ordering + idempotency** (write data
+> durably, then commit the pointer), not a distributed transaction. `wait_for_async_insert=1` still
+> server-side-batches across workers (one insert per shard; the ack wait amortizes over N samples), so
+> batching is preserved.
 
 ---
 
@@ -170,33 +173,59 @@ while not shutting_down:
 - **Permanent failure**: recorded with `error_type`; counts toward `failed_samples` and the
   fail-fast threshold (§7), but the run still completes (partial results are valid).
 
+- **Plain ordered claim + per-run cap.** The claim is the plain `ORDER BY sample_id` query, bounded by
+  `headroom = max_inflight − running_count` from the fixed per-run cap (`SCHEDULER.md` §3). At ~8
+  claims/s peak there is no thundering herd to engineer around, and `not_before` already removes the
+  poison-sample head-of-line. (Hash-bucketing is a deferred, purely-additive option for a different
+  workload shape — `FUTURE.md` §8.)
+- **Error taxonomy.** `RetryableError` (transient) retries; `FatalError` (deterministic) and the
+  terminal **`BudgetExceeded`** (gateway budget-stop, §8) do not.
+- **Heartbeat from a dedicated async task** so a blocked synchronous Inspect call can't starve the
+  heartbeat → wrongful reclaim; idempotent CH writes make any wrongful reclaim *waste*, not corruption.
+
 ---
 
 ## 7. Progress tracking & fail-fast
 
 - **No per-sample increment of a hot `runs.done_samples` row** (100k contended writes per run
-  is a bottleneck). Instead the **Reconciler derives counts periodically** (every few seconds)
+  is a bottleneck). Instead the **Orchestrator derives counts periodically** (every few seconds)
   per active run:
   ```sql
   SELECT status, count(*) FROM sample_tasks WHERE run_id=$1 GROUP BY status;
   ```
   and writes the rollup to `runs`. Cheap, contention-free, good enough for a progress bar.
+- **Live run numbers live on the Postgres `runs` row.** Each tick the Orchestrator writes progress
+  (ledger status **counts**) + **cost** (the gateway tally — the skinny ledger no longer carries
+  `cost_usd`). A **live score** is read **~once/minute, without `FINAL`**:
+  ```sql
+  SELECT avg(passed), avg(primary_score) FROM sample_results
+  WHERE eval_id = $E AND target_id = $T AND run_id = $X;     -- full sort-key prefix, see below
+  ```
+  The rare un-merged-duplicate skew is accepted for a *live* gauge (the finalize `run_summary` keeps
+  `FINAL`). **The full `(eval_id, target_id, run_id)` prefix is mandatory, not `run_id` alone:**
+  `run_id` is the 3rd `ORDER BY` column, so filtering on it alone can't use the primary index → a full
+  current-month partition scan (~1B rows). A run is one eval × one model, so the Orchestrator already
+  holds `eval_id`+`target_id` and passes the full prefix to hit a tight index range. Clients read live
+  *and* final numbers from `runs` (`runs.status` distinguishes them); CH `run_summary` is the finalize
+  analytics record.
 - **Fail-fast**: if `failed_samples > max_failed` (absolute or fraction, per RunSpec), the
-  Reconciler transitions `running → failed` and sets the stop flag — don't burn budget
+  Orchestrator transitions `running → failed` and sets the stop flag — don't burn budget
   finishing a run that's clearly broken (e.g. bad model creds 429-ing everything).
 
 ---
 
-## 8. Budget enforcement (resolves §14.5)
+## 8. Budget enforcement
 
 Two layers, defense in depth:
-- **Gateway hard cap (authoritative):** LiteLLM tracks spend per `run_id` tag (passed as a
-  header via Inspect). A per-run `max_usd` is enforced *at the gateway* — once exceeded, the
-  proxy rejects further calls for that run, so spend physically cannot overshoot by more than
-  in-flight requests.
-- **Reconciler soft stop (fast + graceful):** the Reconciler sums `cost_usd` from the ledger
-  each tick; nearing budget it **sets `run:<id>:stop` in Redis**, which workers check per
-  sample (§5) and stop claiming — a clean drain rather than a wall of gateway 429s.
+- **Gateway hard cap (authoritative + canonical cost):** LiteLLM tracks spend per `run_id`
+  tag. A per-run `max_usd` is enforced *at the gateway* — once exceeded it rejects further calls
+  with a **distinct terminal `BudgetExceeded` signal (NOT a 429)**. Workers classify it as
+  **Fatal/budget-stop**, so it never burns retries or inflates `failed_samples` (which would trip
+  spurious fail-fast). The gateway's per-`run_id` tally is the **single source of truth for cost**
+  — workers do not recompute catalog-price cost (no two-sources-of-truth divergence).
+- **Orchestrator soft stop (fast + graceful):** the Orchestrator reads the **gateway's** run cost each
+  tick (not a ledger re-scan — the skinny ledger no longer carries `cost_usd`); nearing budget it
+  **sets `run:<id>:stop` in Redis**, which workers check (§5) and stop claiming — a clean drain.
 
 **Policy (per RunSpec `budget.on_exceed`):** `hard_stop` (default → `running→cancelled`,
 partial results kept) or `warn` (annotate run, keep going). Same machinery enforces
@@ -204,28 +233,31 @@ per-team budgets at admission (§3 queued→expanding pre-check).
 
 ---
 
-## 9. Cancellation semantics (resolves §14.6)
+## 9. Cancellation semantics
 
 **Default = graceful drain.** On cancel: set `run:<id>:stop`; workers finish their *current*
 sample (so no half-done work is wasted, and those results are recorded) but claim no more for
-that run; when no `running` tasks remain, Reconciler sets `cancelled`. Partial results stay
+that run; when no `running` tasks remain, Orchestrator sets `cancelled`. Partial results stay
 queryable and are loaded to ClickHouse normally.
 
-**Option = `hard_kill`** (RunSpec/cancel flag): abandon in-flight samples immediately
-(Ray cancels the tasks); in-flight samples are left `running` and simply not recorded.
-Faster stop, wastes the in-flight compute. Drain is the default because it's almost as fast
-and loses nothing.
+**Option = `hard_kill`** (RunSpec/cancel flag): abandon in-flight samples immediately (workers drop
+the current sample on the stop flag); they're left `running` and simply not recorded, then reclaimed
+by lease expiry. Faster stop, wastes the in-flight compute. Drain is the default because it's almost
+as fast and loses nothing.
 
 Cancellation from `queued`/`expanding` is immediate (no tasks running yet).
 
 ---
 
-## 10. Finalization & pruning (resolves SCHEMA §4.3)
+## 10. Finalization & pruning
 
 On `running → finalizing`:
-1. **Barrier**: wait until every `done` row has `loaded=true` (ResultLoader caught up).
-2. **Aggregate** from ClickHouse (`pass_rate`, mean scores, CIs, total cost/tokens) → write
-   `runs.aggregate_metrics`, `total_cost_usd`, etc. Idempotent (pure recompute).
+1. **Barrier**: all tasks are terminal (`done`/`failed`). Because of the ack-before-flip protocol
+   (§5.1), `done` already ⟹ the result is durable in ClickHouse — so there is no separate "loaded"
+   wait; reaching the barrier means the data is queryable.
+2. **Aggregate** from ClickHouse into `run_summary` (`pass_rate`, mean scores, CIs, tokens) using the
+   full sort-key prefix + `FINAL`; cost comes from the gateway tally → write `runs.aggregate_metrics`,
+   `total_cost_usd`, etc. Idempotent (pure recompute).
 3. **Archive failures, prune the rest**: copy *failed* task rows (small) to a durable
    `failed_task_archive` (run_id, sample_id, error_type, last_error, attempts) for post-hoc
    debugging; then `DELETE FROM sample_tasks WHERE run_id=$1`. Keeps Postgres tiny while
@@ -241,54 +273,31 @@ archive uses `ON CONFLICT DO NOTHING`, prune is naturally idempotent.
 
 | Failure | What happens | Why it's safe |
 |---|---|---|
-| Worker dies after `commit_result`, before next claim | Task is `done`; lease irrelevant | Result already durably committed; loader picks it up. |
-| Worker dies after transcript write, before `commit_result` | Task stays `running` → lease expires → re-executed | UPSERT overwrites orphaned state + object at same key; ClickHouse sees one row. |
+| Worker dies after the ledger flip, before next claim | Task is `done`; lease irrelevant | Result already durable in ClickHouse (ack-before-flip, §5.1). |
+| Worker dies after CH insert, before the ledger flip | Task stays `running` → lease expires → re-executed | Re-insert collapses via `ReplacingMergeTree((run_id,sample_id))`; object re-written at same key; ClickHouse sees one row. |
 | Two workers both think they hold a task | Impossible | `FOR UPDATE SKIP LOCKED` + lease; second sees it `running`/locked. |
-| Scheduler dies mid-expansion | Standby resumes; `ON CONFLICT DO NOTHING`; count re-checked | Expansion idempotent; running only after full count. |
-| Reconciler dies mid-finalize | Standby re-enters `finalizing` | All finalize steps idempotent. |
-| ResultLoader double-loads a batch | Mark `loaded=true` only after successful insert; on crash, unmarked rows reload | Dedup already guaranteed upstream (PK upsert), so a reloaded row is byte-identical; CH dedup via `(run_id,sample_id)` ordering collapses the rare repeat, or load is transactional per batch. |
+| Orchestrator dies mid-expansion | Standby resumes; `ON CONFLICT DO NOTHING`; count re-checked | Expansion idempotent; running only after full count. |
+| Orchestrator dies mid-finalize | Standby re-enters `finalizing` | All finalize steps idempotent. |
+| Worker re-inserts a shard after a crash | Async-insert again on reclaim | `ReplacingMergeTree((run_id,sample_id))` collapses the duplicate / keeps the newest; headline metrics are computed once at finalize, so nothing double-counts. |
 | Long agentic sample exceeds lease | Heartbeat extends lease | Not wrongly reclaimed. |
 | Worker dies leaving an orphaned sandbox pod | **Sweeper** reaps pods whose owning task's lease expired (pod labels carry run/sample id) | No sandbox accumulation; teardown guaranteed (SANDBOXING §7). |
 | Whole region/cluster restart | All `running` leases expire; runs resume from ledger | No run-level memory state to lose. |
 
-> The one residual: a ResultLoader crash *between* the ClickHouse insert and the `loaded=true`
-> mark will reload that batch. Upstream PK-dedup means the reloaded rows are identical, so the
-> safe options are (a) transactional batch (insert + mark in one logical unit via a staging
-> table + `ALTER … MOVE PARTITION`), or (b) ClickHouse `ReplacingMergeTree(version)` keyed on
-> `(run_id,sample_id)` with periodic `OPTIMIZE … FINAL`. **Recommend (b)** — simpler, and
-> queries that must be exact use `FINAL`/aggregation; the run-level MV is fed once at finalize
-> from deduped data anyway. *(This refines SCHEMA §2 — switch engine to ReplacingMergeTree.)*
+---
+
+## 12. Open questions
+- **Heartbeat granularity** — per-sample-step vs wall-clock timer; interaction with Inspect's own
+  timeouts.
+
+(Resolved earlier and now baked into the design: leader election = Postgres advisory locks; no separate
+result-loader — workers async-insert directly; CH exactly-once = `ReplacingMergeTree((run_id,sample_id))`
++ finalize-time `run_summary`.)
 
 ---
 
-## 12. Open questions for v0.3
-1. ~~**Leader election substrate**~~ — **RESOLVED: Postgres advisory locks** (`pg_try_advisory_lock`) for Scheduler/Reconciler leadership. One fewer dependency; we're already transactional in PG.
-2. **ResultLoader sharding** — one loader per active run, or a few global loaders sharded by `run_id` hash? Depends on concurrent-run count.
-3. ~~**Scheduling fairness**~~ — **RESOLVED: weighted-fair share per team.** Each team has a weight; the Scheduler allocates capacity (concurrent in-flight sample slots) across runs proportional to team weight, so a high-volume team can't starve others. (See §13.)
-4. **Heartbeat granularity** — per-sample step vs wall-clock timer; interaction with Inspect's own timeouts.
-5. **CH exactly-once** — ratify ReplacingMergeTree(version=attempt) + `FINAL`-on-exact-queries, vs staging-partition-move. (Leaning ReplacingMergeTree per §11.)
+## 13. Admission & scheduling
 
----
-
-## 13. Weighted-fair scheduling (resolved)
-
-When demand (queued/active runs) exceeds capacity (total concurrent sample slots the
-cluster can sustain — bounded by worker count and gateway rate limits), the Scheduler
-**allocates slots across runs proportional to each owning team's weight**, so no single
-team starves the others.
-
-- **Weight** lives on `teams.scheduling_weight` (default 1). A team's fair share of the
-  global slot budget = `weight / Σ active-team weights`.
-- **Mechanism (max-min weighted fair share):** each tick the Scheduler computes, per active
-  run, a target in-flight slot count from its team's share (split across that team's active
-  runs), and caps how many tasks workers may hold for each run via a per-run
-  `slot_budget` (enforced at claim time: a worker only claims for run R if R is under its
-  current `slot_budget`). Unused share spills to teams with backlog (work-conserving).
-- **Within a team**, runs share the team's slice by simple FIFO on `queued_at` (or an
-  optional per-run priority later).
-- **Admission cap** (queued→expanding) still bounds the *total* number of concurrently
-  *running* runs; weighted-fair governs slot allocation *among* admitted runs.
-
-This is intentionally a soft, periodically-recomputed allocation (not hard preemption) —
-cheap, good enough for fairness, and consistent with the "Reconciler derives state each
-tick" model. Strict preemption can come later if needed.
+v1 admission is **two-lane (interactive/batch)** with a borrowable interactive reserve + a fixed
+per-run concurrency cap — see **`docs/SCHEDULER.md`**. The `teams.scheduling_weight` column exists in
+the schema but is unused in v1; the weighted-fair-share allocator that would consume it is deferred —
+**`docs/FUTURE.md`** §2.

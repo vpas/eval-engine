@@ -140,9 +140,9 @@ launch form (harness/scorer dropdowns from `/catalog`), auto-refreshing runs lis
 results panel (accuracy/tokens/cost, accuracy-by-category, per-sample table) with a live
 progress bar driven by the ledger. Vanilla HTML/JS, no build step.
 
-> Prototype stand-in: production uses **Next.js + Superset** (DESIGN §6.6). This single page
-> proves the dashboard *function* (launch / list / drill-in) with zero build infra, same as
-> SQLite stands in for Postgres.
+> Prototype stand-in: production uses **Next.js + embedded Inspect viewer + canned ClickHouse
+> views** (DESIGN §6). This single page proves the dashboard *function* (launch / list / drill-in)
+> with zero build infra, same as SQLite stands in for Postgres.
 
 ## Concurrency test (the claim/idempotency correctness)
 

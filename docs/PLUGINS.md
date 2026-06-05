@@ -1,10 +1,11 @@
-# Eval Engine — Extensibility / Plugin Interface (Draft v0.1)
+# Eval Engine — Extensibility / Plugin Interface (v1)
 
-> Companion to `DESIGN.md` v0.2. Defines the contract for adding **harnesses, scorers,
-> dataset loaders, and tools** without touching the core — the extensibility guarantee.
-> Built on **Pure A** (D3): harnesses *are* Inspect `Solver`s, scorers *are* Inspect
-> `Scorer`s. The plugin layer is a thin, typed, discoverable wrapper around Inspect's own
-> registry — not a re-abstraction of it.
+> Companion to `DESIGN.md`. Defines the contract for adding **harnesses, scorers, dataset loaders,
+> and tools** without touching the core — the extensibility guarantee. Built on **Pure A**: harnesses
+> *are* Inspect `Solver`s, scorers *are* Inspect `Scorer`s. The plugin layer is a thin, typed,
+> discoverable wrapper around Inspect's own registry — not a re-abstraction of it. v1 uses a shared
+> **in-process registry** with JSON Schemas derived live; the Postgres catalog (for untrusted
+> third-party plugins) is deferred — `docs/FUTURE.md` §7.
 
 ---
 
@@ -17,9 +18,10 @@
 - **Versioned & reproducible.** A plugin declares a semantic `version`; the *actual code* is
   pinned by the deployment's `code_ref` (git sha / package version) recorded on the eval
   version. Reproducing a run = redeploying that `code_ref`.
-- **Discoverable without executing.** Plugins register via Python **entry points**; a sync
-  step imports their *metadata* and upserts a **catalog in Postgres**, so the control plane
-  serves the catalog to the dashboard without importing plugin code at request time.
+- **Discoverable.** Plugins register via Python **entry points** into a shared **in-process
+  registry**; the control plane derives each plugin's JSON Schema live from its Pydantic config to
+  drive the launch-wizard form. (For untrusted third-party plugins, a Postgres catalog lets the
+  control plane serve schemas *without importing plugin code* — deferred, `docs/FUTURE.md` §7.)
 - **Stay idiomatic to Inspect.** A harness returns an Inspect `Solver`; a scorer returns an
   Inspect `Scorer`. We don't wrap those types — we wrap *registration + config + metadata*.
 
@@ -100,7 +102,7 @@ def llm_judge(cfg: JudgeConfig) -> Scorer:
 Custom **programmatic** scorers are just a scorer plugin returning an Inspect `Scorer`
 built from a plain Python function — arbitrary scoring code, same contract. The `human`
 scorer ships as a registered stub (`primary_metric="human_score"`) so its outputs slot into
-the same schema; its UI is deferred (D10).
+the same schema; its UI is deferred.
 
 ### 3.3 Dataset loader & tool (sketch)
 
@@ -132,6 +134,14 @@ At import, the `@harness/@scorer/...` decorators populate an **in-process regist
 keyed by `(kind, name, version)`.
 
 ### 4.2 Catalog sync → Postgres
+
+> **⚠ DEFERRED for v1 — `docs/FUTURE.md` §7.** The Postgres catalog + `plugins sync` step + dual-registry
+> reconciliation exist to let the control plane serve config schemas **without importing plugin
+> code** — which earns its keep only with **untrusted third-party plugins**. v1's trust model is a
+> **single trusted team** (§7), so the control plane importing the same first-party plugin package
+> (same code, same image) is fine: **v1 shares the in-process registry and derives JSON Schemas
+> live** from the Pydantic config models. Reintroduce this catalog with the multi-tenant / untrusted-
+> plugin story (it's additive — a table + a sync step, no v1 reshape). The DDL below is the v3 target.
 
 A CLI/init step (run at image build & deploy) imports all entry-point modules and upserts
 each plugin's *metadata* into the catalog. This decouples the **control plane** (reads the
@@ -175,7 +185,7 @@ A RunSpec references plugins by `{type, version, config}` (SCHEMA §1.5):
 ```
 
 - **Validation (control plane, launch time):** look up each `(kind, type, version)` in the
-  catalog; validate `config` against its `config_schema`. Reject unknown/mismatched plugins
+  in-process registry; validate `config` against its derived `config_schema`. Reject unknown/mismatched plugins
   or invalid config *before* the run is created. The eval's `config_schema` (eval_versions)
   is the composition of its harness+scorer schemas, so the launch wizard renders a form
   straight from JSON Schema.
@@ -232,7 +242,7 @@ a real trust boundary:
 
 ---
 
-## 9. Open questions for v0.3
+## 9. Open questions
 1. **Compatibility policy for `code_ref` vs declared version** — exact match required, or a
    compatibility range? (Exact is simplest/safest; ranges ease ops.)
 2. **Tool ↔ harness coupling** — do tools need their own config-schema surfaced in the
@@ -242,4 +252,3 @@ a real trust boundary:
    `human`-stub)?
 4. **Plugin test contract** — a required self-test (golden sample) each plugin must pass in
    CI before `plugins sync` accepts it?
-```

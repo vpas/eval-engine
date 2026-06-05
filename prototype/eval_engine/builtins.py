@@ -49,8 +49,9 @@ def agentic(cfg: AgenticConfig) -> tuple[Solver, SandboxEnvironmentSpec]:
     sandbox the orchestrator must provision (docs/SANDBOXING §4/§7: "the harness declares its
     sandbox; the orchestrator provisions accordingly"). Tool calls run in the sandbox, model calls
     go worker→gateway (§2) — so the sandbox can be air-gapped. Locally that sandbox is Docker; in
-    production the provider is the K8s sandbox (per-sample ephemeral pod). The contract is identical;
-    only ``sandbox: docker|k8s`` changes — exactly like SQLite→Postgres elsewhere in this prototype."""
+    production it's a hardened, air-gapped per-sample K8s pod (docs/SANDBOXING.md), with a pooled
+    sandbox service as the trigger-gated scale-up (docs/FUTURE.md §4). The contract is identical;
+    only ``sandbox: docker|k8s`` changes — like SQLite→Postgres."""
     factories = {"bash": lambda: bash(timeout=cfg.tool_timeout),
                  "python": lambda: python(timeout=cfg.tool_timeout)}
     tools = [factories[t]() for t in cfg.tools]

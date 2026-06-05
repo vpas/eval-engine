@@ -1,13 +1,13 @@
-# Eval Engine — Data Model & Schemas (Draft v0.1)
+# Eval Engine — Data Model & Schemas (v1)
 
-> Companion to `DESIGN.md` v0.2. Resolves open item §14.2 (dataset versioning) and §14.3
-> (concrete schemas). Postgres = control/state + **ephemeral** ledger; ClickHouse = the
-> ~12B-row queryable projection; object store = immutable artifacts (`.eval` logs,
-> transcripts, dataset snapshots). DDL is illustrative, not final — review before we commit.
+> Companion to `DESIGN.md`. Postgres = control/state + **ephemeral** ledger; ClickHouse = the
+> ~12B-row queryable projection; object store = immutable artifacts (`.eval` logs, transcripts,
+> dataset snapshots). DDL is illustrative, not final — review before we commit. Deferred schema
+> (the `plugins` catalog) is in `docs/FUTURE.md`; reversed schema choices are in `docs/ALTERNATIVES.md`.
 
 ---
 
-## 0. Decision: dataset versioning (resolves §14.2)
+## 0. Dataset versioning
 
 **Recommendation: content-addressed immutable snapshots in object storage + a metadata
 row in Postgres.** A `dataset_version` is pinned by a `content_hash` (hash of the
@@ -24,12 +24,15 @@ hash, which pins exact bytes → full reproducibility.
   don't depend on HF as the system of record).
 - **Hook for later:** if branching becomes a need, LakeFS can sit under the same
   `dataset_version` pointer without changing the app contract.
+- **Uniqueness:** snapshotting **validates `sample_id` uniqueness** and rejects duplicates
+  with a clear error — a duplicate `sample_id` is ambiguous, and silently dropping it would wedge
+  expansion forever (ORCH §3). `sample_count` is the **deduped** count, which drives `total_samples`.
 
 ---
 
 ## 1. Postgres — control plane & ephemeral ledger
 
-Vanilla Postgres only (portability, D2). UUID PKs (`gen_random_uuid()`), `jsonb` for
+Vanilla Postgres only (portability). UUID PKs (`gen_random_uuid()`), `jsonb` for
 flexible config, `timestamptz` everywhere.
 
 ### 1.1 Identity, tenancy, audit
@@ -46,13 +49,13 @@ CREATE TABLE users (
   oidc_sub    text NOT NULL UNIQUE,            -- subject claim from the IdP
   email       text NOT NULL UNIQUE,
   name        text,
-  role        text NOT NULL DEFAULT 'member'   -- 'admin' | 'member'  (D6)
+  role        text NOT NULL DEFAULT 'member'   -- 'admin' | 'member'
               CHECK (role IN ('admin','member')),
   team_id     uuid REFERENCES teams(id),
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- Append-only audit trail (D6): who launched/cancelled/changed what.
+-- Append-only audit trail: who launched/cancelled/changed what.
 CREATE TABLE audit_log (
   id          bigserial PRIMARY KEY,
   user_id     uuid REFERENCES users(id),
@@ -114,7 +117,7 @@ CREATE TABLE eval_versions (
   default_harness     jsonb NOT NULL,          -- {type, config}
   default_scorers     jsonb NOT NULL,          -- [{type, config}, ...]  (may include {type:'human'})
   config_schema       jsonb NOT NULL,          -- JSON-Schema validating RunSpec overrides
-  retention_policy    text NOT NULL DEFAULT 'keep_all',   -- D8: per-eval, default keep_all
+  retention_policy    text NOT NULL DEFAULT 'sample',   -- per-eval; default sample-by-default, opt-in 'keep_all'
   created_by          uuid REFERENCES users(id),
   created_at          timestamptz NOT NULL DEFAULT now(),
   UNIQUE (eval_id, version)
@@ -186,7 +189,7 @@ CREATE INDEX ON runs (team_id, queued_at DESC);
 CREATE INDEX ON runs (run_spec_id);
 ```
 
-### 1.6 Ephemeral sample-task ledger (D4)
+### 1.6 Ephemeral sample-task ledger
 
 Holds **only in-flight runs**. Pruned when a run reaches `completed`/`failed`/`cancelled`
 (state then lives in ClickHouse + object store). This is what keeps Postgres small despite
@@ -234,6 +237,12 @@ RETURNING t.run_id, t.sample_id;
 `FOR UPDATE SKIP LOCKED` + lease expiry gives at-least-once execution with no double-claim;
 idempotent result writes (keyed by `(run_id,sample_id)`) make retries safe.
 
+> **Skinny by design:** the ledger carries coordination only; results live in ClickHouse, never in
+> widened ledger rows. The claim above is bounded by `headroom = max_inflight − running_count` from a
+> **fixed per-run cap** (a constant — no `run_slots` table, no per-tick allocation; `SCHEDULER.md`).
+> `not_before` handles poison-sample head-of-line. (Hash-sharding the claim is a deferred,
+> purely-additive option for a different workload shape — `docs/FUTURE.md` §8.)
+
 ---
 
 ## 2. ClickHouse — the ~12B-row analytics projection
@@ -258,8 +267,10 @@ CREATE TABLE sample_results
   team_id             UUID,
   created_by          UUID,
 
-  -- slicing dimension pulled from sample metadata (e.g. category/subject/difficulty)
-  group_key           LowCardinality(String) DEFAULT '',
+  -- slicing dimensions: a first-class `category` + an open Map for the heterogeneous rest
+  category            LowCardinality(String) DEFAULT '',
+  dimensions          Map(String, LowCardinality(String)),    -- subject/difficulty/language/...
+  input_hash          String DEFAULT '',                      -- group identical prompts; feature-slice via dimensions
 
   -- primary outcome (hoisted for fast filters/aggregations)
   passed              UInt8,                       -- 0/1 main pass/fail
@@ -279,17 +290,19 @@ CREATE TABLE sample_results
   transcript_uri      String,                      -- object-store path (zstd)
   review_status       LowCardinality(String) DEFAULT 'none',  -- D10: ready for human queue
 
-  finished_at         DateTime
+  finished_at         DateTime,
+  loaded_at           DateTime DEFAULT now()       -- RMT version — newest re-execution/re-load wins
 )
-ENGINE = ReplacingMergeTree(attempt)               -- dedup on re-load edge case (see ORCHESTRATION §11)
+ENGINE = ReplacingMergeTree(loaded_at)             -- dedup per (run_id,sample_id), newest load wins
 PARTITION BY toYYYYMM(finished_at)                 -- monthly: cheap 12-mo TTL drops
-ORDER BY (eval_id, target_id, run_id, sample_id)   -- dedup key + matches "metric by model for eval" queries
+ORDER BY (eval_id, target_id, run_id, sample_id)   -- access-pattern key; also the dedup key
 TTL finished_at + INTERVAL 12 MONTH                -- D1 retention, auto-drop old partitions
 SETTINGS index_granularity = 8192;
--- NOTE: ReplacingMergeTree collapses duplicate (eval_id,target_id,run_id,sample_id) keeping
--- highest `attempt`. Execution-level dedup is already handled by the Postgres PK upsert
--- (ORCHESTRATION §4); this engine only mops up the rare ResultLoader re-load (§11). Exact
--- queries use FINAL or aggregation; run-level rollups are fed once at finalize from deduped data.
+-- NOTE: collapses duplicate (eval_id,target_id,run_id,sample_id) keeping newest `loaded_at`.
+-- eval_id/target_id are functionally determined by run_id, so this dedups per (run_id,sample_id):
+-- a re-execution's newer result wins; a duplicate re-insert collapses. Workers async-insert
+-- DIRECTLY (workers async-insert; no separate loader). Exact queries use FINAL; headline run metrics are computed ONCE at
+-- finalize into run_summary (NOT an insert-time MV, which would double-count a re-load — see below).
 ```
 
 Notes / rationale:
@@ -299,31 +312,49 @@ Notes / rationale:
   partition drop, not a row-by-row delete.
 - **`Map` for scores** keeps the table flexible across arbitrary scorers without a schema
   change per eval; `passed`/`primary_score` give the common case a fast typed path.
-- **`LowCardinality`** on provider/model/harness/group_key shrinks 12B rows substantially.
-- **Run-level rollups** (for the runs list / dashboards) come from a **materialized view**
-  aggregating into a `run_metrics` AggregatingMergeTree, so the dashboard never scans raw
-  rows for headline numbers. (Sketch below.)
+- **`LowCardinality`** on provider/model/harness/`category` + the Map values shrinks 12B rows.
+- **Multi-dimensional slicing:** `dimensions Map(String, LowCardinality(String))` lets evals
+  carry heterogeneous dims (`subject`/`difficulty`/`language`) and slice them **independently**
+  (no concatenated-key trap); hot dims are promoted to materialized columns + skip indexes later
+  **without a sort-key rewrite** (the genuinely-irreversible part stays frozen on access patterns).
+- **Run-level rollups:** headline numbers come from a **`run_summary` table written ONCE at
+  finalize** over the deduped run partition — **not** an insert-time `AggregatingMergeTree` MV,
+  which fires per insert block and would **double-count a re-load** the base table later collapses.
+  **Live** numbers live on the Postgres **`runs` row** : the
+  Orchestrator writes progress (ledger counts) + cost (gateway) each tick, and the live score
+  (`avg(passed) FROM sample_results WHERE eval_id=E AND target_id=T AND run_id=X` — the **full
+  sort-key prefix**, see the finalize query's comment for why; **~once/minute, without `FINAL`**) —
+  the rare un-merged-duplicate skew is accepted for a live gauge (finalize keeps `FINAL`). Clients
+  read live *and* final from `runs`. The CH `run_summary` is finalize-only. (Sketch below.)
 
 ```sql
--- Incremental run-level aggregates (accuracy, mean cost, etc.) via MV.
-CREATE TABLE run_metrics
+-- headline per-run metrics written ONCE at finalize over the deduped partition.
+-- NOT an insert-time MV — an AggregatingMergeTree MV fires per insert block and never sees the
+-- later ReplacingMergeTree collapse, so a re-loaded batch double-counts pass_rate/total_cost.
+CREATE TABLE run_summary
 (
   run_id UUID, eval_id UUID, target_id UUID,
-  n UInt64,
-  pass_rate AggregateFunction(avg, UInt8),
-  mean_score AggregateFunction(avg, Float64),
-  total_cost AggregateFunction(sum, Float64)
+  n UInt64, passed UInt64, pass_rate Float64,
+  mean_score Float64,
+  total_cost_usd Float64,            -- sourced from the GATEWAY tally, not summed here
+  finalized_at DateTime
 )
-ENGINE = AggregatingMergeTree ORDER BY (eval_id, target_id, run_id);
+ENGINE = ReplacingMergeTree(finalized_at) ORDER BY (eval_id, target_id, run_id);
 
-CREATE MATERIALIZED VIEW run_metrics_mv TO run_metrics AS
-SELECT run_id, eval_id, target_id,
-       count() AS n,
-       avgState(passed)        AS pass_rate,
-       avgState(primary_score) AS mean_score,
-       sumState(cost_usd)      AS total_cost
-FROM sample_results
-GROUP BY run_id, eval_id, target_id;
+-- Orchestrator at finalize (idempotent recompute over the deduped run partition):
+INSERT INTO run_summary
+SELECT run_id, any(eval_id), any(target_id),
+       count() AS n, sum(passed) AS passed, avg(passed) AS pass_rate,
+       avg(primary_score) AS mean_score,
+       {gateway_run_cost:Float64} AS total_cost_usd,    -- canonical cost from the gateway
+       now() AS finalized_at
+FROM sample_results FINAL
+-- Sort-key prefix, NOT `WHERE run_id` alone: run_id is the 3rd ORDER BY column, so filtering on it
+-- alone can't use the primary index → full current-month partition scan (~1B rows). A run is one
+-- eval × one model, so the Orchestrator holds eval_id+target_id — pass the full prefix to hit a
+-- tight index range. (Same fix applies to the throttled live read.)
+WHERE eval_id = {eval_id:UUID} AND target_id = {target_id:UUID} AND run_id = {run_id:UUID}
+GROUP BY run_id;
 ```
 
 ---
@@ -334,18 +365,11 @@ GROUP BY run_id, eval_id, target_id;
 s3://eval-engine/
   datasets/<content_hash>.parquet                 # immutable dataset snapshots
   runs/<run_id>/eval.log                          # Inspect .eval (source of truth)
-  runs/<run_id>/transcripts/<sample_id>.json.zst  # zstd; keep-all 12mo (D8)
+  runs/<run_id>/transcripts/<sample_id>.json.zst  # zstd; sampled-by-default + storage tiering
 ```
 
 ---
 
-## 4. Open questions on the schema (for v0.3 review)
-1. **`group_key` cardinality** — single dimension now; do we need multiple slice dimensions
-   (subject × difficulty × language)? Could promote to a small `Map(String,String)` of dims.
-2. **Score identity** — is one `primary_score`/`passed` enough, or do some evals have no
-   single "primary" (multi-objective)? May need a per-eval declared primary metric.
-3. ~~**Ledger prune vs archive**~~ — **RESOLVED** (ORCHESTRATION §10): archive *failed* tasks
-   to `failed_task_archive`, hard-delete the rest on finalize.
-4. ~~**Idempotency token**~~ — **RESOLVED** (ORCHESTRATION §4, §11): Postgres PK upsert dedups
-   at execution; ClickHouse `ReplacingMergeTree(attempt)` mops up the loader re-load edge case.
-```
+## 4. Open questions
+- **Score identity** — is one `primary_score`/`passed` enough, or do some evals have no single
+  "primary" (multi-objective)? May need a per-eval declared primary metric. (See `docs/FUTURE.md` §10.)

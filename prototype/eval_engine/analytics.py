@@ -75,7 +75,7 @@ def by_category(run_id: str):
 
 
 def compare_models_by_category():
-    """Cross-run model comparison — what Superset would chart (DESIGN §6.6)."""
+    """Cross-run model comparison — a canned ClickHouse analytics view (DESIGN §6)."""
     con = _con()
     rows = con.execute(
         "SELECT model_id, group_key, count(*) n, round(avg(primary_score),3) acc "

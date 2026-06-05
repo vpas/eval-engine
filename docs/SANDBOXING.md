@@ -1,10 +1,11 @@
-# Eval Engine — Sandboxing for Agentic Evals (Draft v0.1)
+# Eval Engine — Sandboxing for Agentic Evals (v1)
 
-> Companion to `DESIGN.md` v0.2, `docs/ORCHESTRATION.md`, `docs/PLUGINS.md`. Agentic evals
-> execute **untrusted, model-generated code** (shell, code, file ops) — thousands of
-> instances concurrently. This is the highest-stakes security surface in the system. The
-> hand-wave "rely on Inspect's Docker sandbox" (earlier DESIGN risk note) is **not
-> sufficient on Kubernetes**; this doc replaces it with a tiered, K8s-native model.
+> Companion to `DESIGN.md`, `docs/ORCHESTRATION.md`, `docs/PLUGINS.md`. Agentic evals execute
+> **untrusted, model-generated code** (shell, code, file ops). This is the highest-stakes security
+> surface in the system, so "rely on Inspect's Docker sandbox" is **not sufficient on Kubernetes** —
+> this doc specifies a tiered, K8s-native model. **v1 runs hardened, air-gapped per-sample pods** (the
+> high-value, cheap part); the pooled microVM sandbox service that lifts the throughput ceiling is the
+> trigger-gated next step — `docs/FUTURE.md` §4.
 
 ---
 
@@ -95,7 +96,7 @@ isolation only when escape is the adversary's goal.
   budget or exfiltrate keys). Same egress *philosophy*, distinct trust zones — do not merge.
   - **Per-eval FQDN allowlist** (e.g. only `api.search-provider.com`).
   - **Full request logging** → an **audit trail of everything the agent accessed**
-    (feeds the transcript / Langfuse). The proxy is also an **instrument**: "did the agent
+    (feeds the transcript). The proxy is also an **instrument**: "did the agent
     *attempt* disallowed network access?" is itself evaluable safety signal.
   - TLS-terminating or CONNECT-proxy.
 - **CNI: Cilium** — enforces `NetworkPolicy`, supports **FQDN-based egress** policy and flow
@@ -119,16 +120,23 @@ When a worker claims an **agentic** sample-task (ORCHESTRATION §5):
 
 ## 8. Scale, latency & cost
 
-- **Pod churn is high** (thousands of create/destroy/cycle). Mitigate cold-start:
-  - **Pre-pulled images** on sandbox nodes (DaemonSet warmer / node image cache).
-  - **Warm pools** of pre-started sandbox pods per common tier/image, claimed on demand and
-    replaced asynchronously — amortizes gVisor/Kata startup. (Trade idle cost for latency.)
-    Depth ≈ arrival-rate × cold-start + burst headroom (Little's law).
-  - **`expanding`-triggered pre-warm:** when a run is admitted and its harness declares an
-    agentic tier, the scheduler fills the warm pool *during* dataset expansion — so by the
-    time workers claim, sandboxes are ready and cold-start hides behind work already underway.
-- **Startup overhead:** gVisor = modest; Kata/microVM = higher (real VM boot). Tier choice is
-  also a latency/cost choice.
+**v1 = per-sample pods.** Each agentic sample gets a fresh, hardened, ephemeral pod (§5) torn down on
+exit. This is correct and within budget while agentic is a minority of the aggregate throughput.
+Cold-start is mitigated:
+- **Pre-pulled images** on sandbox nodes (DaemonSet warmer / node image cache).
+- **`expanding`-triggered pre-warm:** when a run is admitted and its harness declares an agentic tier,
+  pods are warmed *during* dataset expansion — so by the time workers claim, sandboxes are ready and
+  cold-start hides behind work already underway.
+
+**The ceiling.** Pod create/destroy **throughput** (not boot *latency*) tops out at low-hundreds/s —
+K8s control-plane limits (scheduler/kubelet/IPAM/gVisor-boot). Warm pools of pre-*booted* single-use
+pods hide latency but don't move this throughput ceiling. When agentic volume approaches it, the
+mitigation is a **pooled sandbox service** (per-tier; T2 = microVM snapshot-restore) that keeps the
+kube-scheduler out of the per-sample path — a **trigger-gated future build**, `docs/FUTURE.md` §4. This
+is a **top-tier DESIGN §12 risk**; gate agentic-at-scale on a measured churn spike.
+
+- **Startup overhead:** gVisor = modest; Kata/microVM = higher (real VM boot). Tier choice is also a
+  latency/cost choice.
 - **Images:** versioned, **vulnerability-scanned**, registry-stored, pinned by `code_ref` for
   reproducibility; minimal base to shrink attack surface + pull time.
 - **Right-size** resource caps and **bin-pack** sandbox node pools; autoscale the pools with
@@ -136,10 +144,16 @@ When a worker claims an **agentic** sample-task (ORCHESTRATION §5):
 
 ---
 
-## 9. Portability (per D2)
+## 9. Portability
 
 - **gVisor / Kata** are `RuntimeClass`es on every major managed K8s (GKE Sandbox ships
   gVisor; EKS/AKS install via node bootstrap). **NetworkPolicy** is standard (Cilium CNI).
+- **T2 microVM snapshot-restore needs a KVM-capable node pool** (Firecracker/Kata are hardware-virt) —
+  *not* the default managed nodes. To keep "portable by interface" honest: express T2 as a
+  **`RuntimeClass`** (so the eval contract is runtime-agnostic), use **Kata as the portable fallback**
+  where raw Firecracker isn't available, and provision the KVM-capable pool (GKE Sandbox / bare-metal /
+  nested-virt) via the same Terraform node-pool module. The app/eval contract stays cloud-neutral; only
+  the node-pool setup is cloud-specific.
 - Cloud-specific bit = node-pool runtime setup, abstracted behind **Terraform** node-pool
   modules. The app/eval contract (tier + policy) is cloud-neutral.
 
@@ -159,17 +173,25 @@ Multi-tenant untrusted *plugins* would need their own isolation (deferred with t
 
 ## 11. Recommendation summary
 
-Adopt **Inspect's K8s sandbox provider**; **per-sample ephemeral pods**; the **three-tier**
-model with **T2/gVisor as default**; **air-gap by default** (leveraging §2); **deny-all
-egress** with a **logged allowlist proxy** for the rare network tool; **dedicated tainted
-node pools** (T3 on a separate account); full **baseline hardening** on every tier; and a
-**sweeper** guaranteeing teardown. Proportionate: cheap isolation for benign evals,
+v1 adopts **Inspect's K8s sandbox provider** with **hardened, air-gapped per-sample pods** and the
+**three-tier** model (T1 hardened container / **T2 gVisor, the default** / T3 Kata-microVM): **air-gap by
+default** (leveraging §2); **deny-all egress** with a **logged allowlist proxy** for the rare network
+tool; **dedicated tainted node pools** (T3 on a separate account); full **baseline hardening** on every
+tier; and a **sweeper** guaranteeing teardown. Proportionate: cheap isolation for benign evals,
 hardware-VM isolation only where the eval is genuinely dangerous.
+
+When agentic create/destroy throughput approaches the per-sample-pod ceiling (§8), the next step is a
+**pooled sandbox service** (per-tier; T2 = microVM snapshot-restore) — a trigger-gated future build,
+`docs/FUTURE.md` §4. The security tiering above is unchanged by that; only the *provisioning* mechanism
+moves from per-sample pods to a pool.
 
 ---
 
-## 12. Open questions for v0.3
-1. **Warm-pool sizing** — per-tier/image warm-pool depth vs cold-start tolerance; idle-cost budget.
+## 12. Open questions
+1. **Snapshot-restore pool sizing & golden-image management** — restore-pool depth
+   by concurrency; idle-cost budget; golden-snapshot build/versioning (pinned by `code_ref`). T2 uses
+   snapshot-restore (fresh per sample), so there is **no secure-reset guarantee to prove** — only T1
+   reuses. **Top-tier risk — needs a churn + restore spike before agentic-at-scale.**
 2. **T3 separation** — separate node pool within-cluster vs separate cluster vs separate cloud account? (Strength vs ops cost.)
 3. ~~**Egress proxy reuse**~~ — **RESOLVED: dedicated, credential-less proxy**, separate trust zone from the LiteLLM gateway (§6).
 4. **Per-eval network allowlists** — who authors/approves them; default-empty vs templated per tool.
@@ -180,4 +202,3 @@ hardware-VM isolation only where the eval is genuinely dangerous.
    (declared pods + allowed internal edges), atomic multi-pod provision/teardown, sweep-by-
    topology, and is **T3-only** (the outer boundary contains deliberately-successful exploits).
    Single-pod sandboxes are the only supported model in v1.
-```
