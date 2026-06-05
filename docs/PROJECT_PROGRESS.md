@@ -153,7 +153,13 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   (harnesses: `single_turn`, `multiple_choice`, `agentic`; scorers: `includes`, `match`, `choice`,
   `llm_judge`). Tested (`test_multiple_choice_plugins`).
 
-- [ ] **13. Audit log.** §8 (auth: audit), §13. None today.
+- [x] **13. Audit log.** §8 (auth: audit), §13. *Done (2026-06-05):* append-only `audit_log` table
+  (PG + SQLite); `control.audit(actor, action, target, detail)` records every mutating action and
+  `list_audit` reads it newest-first. Wired into `run.launch`, `run.rerun`, and
+  `{dataset,eval,model}.register` (actor = the OIDC `X-Auth-Request-Email`); exposed at `GET /audit`.
+  Tested (`test_audit`, both backends + TestClient).
+
+> **Tier 2 (platform surface) complete.** Remaining: Tier 3 production-shape (#14–#18).
 
 ### Tier 3 — production-shape (works, but not as designed)
 

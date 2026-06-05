@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS failed_task_archive(
 CREATE TABLE IF NOT EXISTS entities(
   kind TEXT, id TEXT, version INT, body TEXT, created_by TEXT, created_at TEXT,
   PRIMARY KEY(kind, id, version));
+
+CREATE TABLE IF NOT EXISTS audit_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, action TEXT, target TEXT, detail TEXT);
 """
 
 
@@ -420,6 +423,29 @@ def get_entity(kind: str, ent_id: str, version: int | None = None) -> dict | Non
         return None
     return {"id": row[0], "version": row[1], "body": json.loads(row[2]), "created_by": row[3],
             "created_at": row[4]}
+
+
+# --------------------------------------------------------------------------- audit log (§8/§13)
+
+def audit(actor: str | None, action: str, target: str, detail: dict | None = None) -> None:
+    """Append an audit entry for a mutating action (who did what to which target)."""
+    con = _con()
+    con.execute(
+        "INSERT INTO audit_log(ts, actor, action, target, detail) VALUES(?,?,?,?,?)",
+        (_now(), actor, action, target, json.dumps(detail) if detail is not None else None),
+    )
+    con.commit()
+    con.close()
+
+
+def list_audit(limit: int = 100) -> list[dict]:
+    con = _con()
+    rows = con.execute(
+        "SELECT ts, actor, action, target, detail FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    con.close()
+    return [{"ts": r[0], "actor": r[1], "action": r[2], "target": r[3],
+             "detail": json.loads(r[4]) if r[4] else None} for r in rows]
 
 
 def archive_and_prune(run_id: str) -> None:

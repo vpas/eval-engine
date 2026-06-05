@@ -66,6 +66,12 @@ def catalog():
     return plugins.catalog()
 
 
+@app.get("/audit")
+def audit_log(limit: int = 100):
+    """Append-only audit trail of mutating actions — who launched/re-ran/registered what (§8/§13)."""
+    return control.list_audit(limit)
+
+
 @app.post("/runs", status_code=202)
 def create_run(spec: RunSpec, bg: BackgroundTasks,
                x_auth_request_email: str | None = Header(default=None)):
@@ -82,6 +88,7 @@ def create_run(spec: RunSpec, bg: BackgroundTasks,
         raise HTTPException(status_code=422, detail=str(e)) from None
 
     run_id = runner.launch(spec, created_by=x_auth_request_email)
+    control.audit(x_auth_request_email, "run.launch", run_id, {"eval": spec.eval, "model": spec.model})
     if INLINE_EXEC:
         bg.add_task(runner.execute, run_id, spec)  # local dev only; cluster uses orchestrator+workers
     return {"run_id": run_id, "status": "queued"}
@@ -96,6 +103,7 @@ def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = H
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
     spec = RunSpec.model_validate_json(spec_json)
     new_id = runner.launch(spec, created_by=x_auth_request_email)
+    control.audit(x_auth_request_email, "run.rerun", new_id, {"rerun_of": run_id})
     if INLINE_EXEC:
         bg.add_task(runner.execute, new_id, spec)
     return {"run_id": new_id, "status": "queued", "rerun_of": run_id}
@@ -163,6 +171,7 @@ def get_results(run_id: str):
 
 def _register(kind: str, spec, email: str | None):
     control.register_entity(kind, spec.id, spec.version, spec.model_dump(), email)
+    control.audit(email, f"{kind}.register", spec.id, {"version": spec.version})
     return {"id": spec.id, "version": spec.version}
 
 

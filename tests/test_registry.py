@@ -69,8 +69,20 @@ def test_multiple_choice_plugins():
     print(f"multiple_choice ✓  choice scorer ✓  loader reads choices ✓ ({len(ds.samples)} MC samples)")
 
 
+def test_audit():
+    """Append-only audit trail: who did what to which target, most-recent-first (§8/§13)."""
+    c = db.control
+    c.audit("u@x", "run.launch", "run-abc", {"eval": "e"})
+    c.audit("u@x", "dataset.register", "ds-xyz", {"version": 1})
+    a = c.list_audit(10)
+    assert a[0]["action"] == "dataset.register" and a[0]["actor"] == "u@x" and a[0]["target"] == "ds-xyz", a[0]
+    assert a[0]["detail"] == {"version": 1} and any(e["action"] == "run.launch" for e in a)
+    print("audit ✓  append-only who/what/when, newest-first ✓")
+
+
 if __name__ == "__main__":
     test_registry()
     test_dataset_snapshot()
     test_multiple_choice_plugins()
+    test_audit()
     print("ALL PASS ✓")
