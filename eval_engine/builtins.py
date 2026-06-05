@@ -33,7 +33,7 @@ def single_turn(cfg: SingleTurnConfig) -> Solver:
 class AgenticConfig(BaseModel):
     tools: list[str] = ["bash"]                            # sandbox tools to expose: bash | python
     sandbox: str = "docker"                                # provider; production swaps to "k8s"
-    compose_file: str = "sandbox/airgap-compose.yaml"      # the hardened, AIR-GAPPED sandbox spec
+    compose_file: str = "deploy/sandbox/airgap-compose.yaml"  # the hardened, AIR-GAPPED sandbox spec
     message_limit: int = 12                                # cap the agent loop
     tool_timeout: int = 30
 

@@ -1,13 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
-prototype/.data/
 .data/
 logs/
 *.egg-info/
 build/
 dist/
-# local MCP server config: machine-specific venv path + dev-only RO creds (see prototype/README.md)
+# local MCP server config: machine-specific venv path + dev-only RO creds (see docs/DEVELOPMENT.md)
 .mcp.json
 .env
 get_helm.sh

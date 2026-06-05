@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "eval-engine-prototype"
+name = "eval-engine"
 version = "0.1.0"
-description = "Phase 0/1 prototype of the eval-engine: Inspect kernel + ledger + control plane + dashboard"
+description = "eval-engine: Inspect kernel + Postgres ledger + control plane + ClickHouse analytics + dashboard"
 requires-python = ">=3.10"
 dependencies = [
   "inspect-ai",
@@ -17,10 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# real backends (need the docker Postgres + ClickHouse, see infra/up.sh)
+# real backends (Postgres ledger + ClickHouse analytics; local: infra/up.sh)
 postgres = ["psycopg[binary]", "clickhouse-connect"]
-# distributed executor — Ray workers over the shared ledger (needs the postgres backend)
-ray = ["ray"]
 # real models via OpenRouter (Inspect's openrouter/ provider needs the openai client)
 openrouter = ["openai"]
 

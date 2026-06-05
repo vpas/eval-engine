@@ -10,4 +10,9 @@
 .env.*
 .mcp.json
 *.log
-deploy/terraform/.terraform/
+# the Dockerfile copies only eval_engine/ static/ examples/ pyproject.toml — keep the rest out of context
+deploy/
+docs/
+infra/
+tests/
+get_helm.sh

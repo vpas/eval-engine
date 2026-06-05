@@ -88,8 +88,8 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     sub = MemoryDataset([samples_by_id[i] for i in ids])
     built, _ = plugins.build("harness", spec.harness.model_dump())
     # An agentic harness returns (solver, sandbox); simple harnesses return just a solver. The
-    # sandbox flows into the Task → Inspect provisions one per sample (prototype/local Docker; prod =
-    # a pooled snapshot-restore sandbox service — docs/FUTURE.md §4).
+    # sandbox flows into the Task → Inspect provisions one per sample (local Docker; prod = hardened
+    # per-sample K8s pods, with a pooled snapshot-restore service later — docs/FUTURE.md §4).
     solver, sandbox = built if isinstance(built, tuple) else (built, None)
     scorers = [plugins.build("scorer", s.model_dump())[0] for s in spec.scorers]
     task = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)

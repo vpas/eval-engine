@@ -28,19 +28,20 @@ KEDA · FastAPI control plane · Postgres metadata + ephemeral ledger · S3/MinI
 ClickHouse analytics · Next.js dashboard + embedded Inspect viewer + canned CH views · Terraform/Helm
 on cloud Kubernetes, portable by interface.
 
-## Prototype
+## Code
 
-[`prototype/`](prototype/) is a working single-process miniature of the spine — proves the
-Inspect integration, plugin contract, ledger lifecycle, production-shaped analytics,
-exactly-once concurrency, the FastAPI control plane, and a dashboard. Local stand-ins
-(SQLite→Postgres, DuckDB→ClickHouse, `mockllm`→real model). See
-[prototype/README.md](prototype/README.md).
+The [`eval_engine/`](eval_engine/) package is the spine — Inspect integration, plugin contract,
+Postgres-shaped ledger lifecycle, production-shaped ClickHouse analytics, exactly-once concurrency,
+the FastAPI control plane, and a dashboard. It runs locally with stand-ins (SQLite→Postgres,
+DuckDB→ClickHouse, `mockllm`→real model) and the same code deploys to GKE. Dev setup, local backends,
+and MCP are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md); the GKE rollout is tracked in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ```bash
-python3 -m pip install --user virtualenv && python3 -m virtualenv .venv
-.venv/bin/pip install -e prototype
-cd prototype && PYTHONPATH=. ../.venv/bin/eval-engine run examples/capitals_qa.yaml
-# dashboard:  PYTHONPATH=. ../.venv/bin/uvicorn eval_engine.api:app --port 8077
+python3 -m virtualenv .venv && .venv/bin/pip install -e '.[postgres,openrouter]'
+.venv/bin/eval-engine run examples/capitals_qa.yaml
+# dashboard:  .venv/bin/uvicorn eval_engine.api:app --port 8077
 ```
 
-Status: design v1 (current; reviewed three rounds) · Phase 0/1 prototype working.
+Status: design v1 (current; reviewed three rounds) · spine working · GKE deployment in progress
+(see `docs/DEPLOYMENT.md`).
