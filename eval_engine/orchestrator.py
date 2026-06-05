@@ -100,7 +100,7 @@ def main() -> None:
             continue
         print("[orch] standby — another orchestrator holds leadership", flush=True)
         time.sleep(5)
-    print(f"[orch] up, leader (backend={db.BACKEND})", flush=True)
+    print("[orch] up, leader", flush=True)
     while True:
         if not db.control.leader_alive():
             print("[orch] lost leadership; exiting to re-contend", flush=True)

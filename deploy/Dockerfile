@@ -7,8 +7,7 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    EVAL_ENGINE_BACKEND=postgres
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # curl/ca-certs for wheels; helm for the agentic k8s sandbox (inspect-k8s-sandbox shells out to it).
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -22,7 +21,7 @@ WORKDIR /app
 #    drop the stub so only third-party deps remain. This is what makes code edits rebuild fast.
 COPY pyproject.toml ./
 RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
-    && pip install '.[postgres,openrouter,gcs,k8s]' \
+    && pip install '.[openrouter,gcs,k8s]' \
     && pip uninstall -y eval-engine
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
@@ -30,7 +29,7 @@ COPY eval_engine/ ./eval_engine/
 COPY static/ ./static/
 COPY examples/ ./examples/
 COPY deploy/sandbox/ ./deploy/sandbox/
-RUN pip install -e '.[postgres,openrouter,gcs,k8s]' --no-deps
+RUN pip install -e '.[openrouter,gcs,k8s]' --no-deps
 
 # Reproducibility pin (DESIGN §14): stamp the build's git SHA so every run records the exact worker
 # code that produced it. Placed late so changing it only rebuilds this tiny layer (deps/code cached).

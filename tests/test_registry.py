@@ -1,7 +1,7 @@
 """Entity registry — register + version + list + get for datasets / evals / models (FR1–3).
 
-Backend-agnostic (uses db.control): runs on SQLite by default, or Postgres via
-EVAL_ENGINE_BACKEND=postgres. Run: PYTHONPATH=. .venv/bin/python tests/test_registry.py
+Requires the docker Postgres + ClickHouse (`infra/up.sh`).
+Run: PYTHONPATH=. .venv/bin/python tests/test_registry.py
 """
 from eval_engine import db
 from eval_engine.models import DatasetSpec, EvalSpec, ModelSpec, PluginRef

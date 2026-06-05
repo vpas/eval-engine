@@ -32,13 +32,14 @@ on cloud Kubernetes, portable by interface.
 
 The [`eval_engine/`](eval_engine/) package is the spine — Inspect integration, plugin contract,
 Postgres-shaped ledger lifecycle, production-shaped ClickHouse analytics, exactly-once concurrency,
-the FastAPI control plane, and a dashboard. It runs locally with stand-ins (SQLite→Postgres,
-DuckDB→ClickHouse, `mockllm`→real model) and the same code deploys to GKE. Dev setup, local backends,
-and MCP are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md); the GKE rollout is tracked in
+the FastAPI control plane, and a dashboard. Locally it runs single-process against the same backends
+as production — **Postgres + ClickHouse in docker** (`infra/up.sh`) — with `mockllm`→real model the
+only swap, and the same code deploys to GKE. Dev setup, local backends, and MCP are in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md); the GKE rollout is tracked in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ```bash
-python3 -m virtualenv .venv && .venv/bin/pip install -e '.[postgres,openrouter]'
+python3 -m virtualenv .venv && .venv/bin/pip install -e '.[openrouter]'
 .venv/bin/eval-engine run examples/capitals_qa.yaml
 # dashboard:  .venv/bin/uvicorn eval_engine.api:app --port 8077
 ```

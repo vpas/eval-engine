@@ -34,8 +34,8 @@ session: open it, pick the top unchecked item in **Open v1 gaps**, build it, che
 - `runner.py` — execute path: build Inspect Task, run, price cost, write transcript + `.eval` log.
 - `worker.py` — distributed claim→execute→commit→load loop (KEDA-scaled).
 - `orchestrator.py` — leader-elected admit + finalize loop.
-- `control_pg.py` / `control.py` — Postgres / SQLite ledger (the coordinator). `db.py` selects backend.
-- `analytics_ch.py` / `analytics.py` — ClickHouse / DuckDB analytics projection.
+- `control.py` — Postgres: runs + ephemeral ledger + entity registry + audit (the coordinator).
+- `analytics.py` — ClickHouse: flattened per-sample projection. `db.py` exposes both + `init()`.
 - `builtins.py` — built-in harnesses (`single_turn`, `agentic`) + scorers (`includes`, `match`, `llm_judge`).
 - `plugins.py` — in-process plugin registry + JSON-Schema catalog. `models.py` — `RunSpec`. `datasets.py` — JSONL loader.
 - `view_main.py` — patched Inspect viewer entrypoint (serves `gs://` logs behind the OIDC ingress).
@@ -45,8 +45,9 @@ by command), `frontend/` (Next.js), `infra/` (up/down + cloud pause/resume scrip
 
 ## Working conventions
 
-- **Backends swap by env, code stays identical:** SQLite→Postgres, DuckDB→ClickHouse, Docker→k8s
-  sandbox. Local dev uses the stand-ins (`docs/DEVELOPMENT.md`); the cluster uses the real ones.
+- **Storage tier is Postgres + ClickHouse** (the only backends; no SQLite/DuckDB stand-in). Local dev
+  runs them in docker via `infra/up.sh` (`docs/DEVELOPMENT.md`); the cluster uses managed/operator ones.
+  The agentic sandbox still swaps by config (Docker local → k8s in-cluster).
 - The user works **directly on `main`**. **Commit/push only when asked.** Don't paste secrets/DSNs.
 - Cluster costs money: `infra/cloud-down.sh` pauses (system pool → 0), `infra/cloud-up.sh` resumes.
 - Agentic runs use **`batch_size: 1`** (one sample per Inspect eval → one sandbox; >1 deadlocks).

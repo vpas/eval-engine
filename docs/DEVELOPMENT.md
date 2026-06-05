@@ -1,21 +1,24 @@
 # Eval Engine — Development Guide
 
-How to run the engine **locally** and what the local stand-ins are. The `eval_engine/` package is
-the spine that deploys to GKE (see `docs/DEPLOYMENT.md`); locally it runs single-process with
-swap-in backends. It proves: Inspect AI integration (Pure A), the plugin contract, the result path
-(Inspect log → flatten → store → query), and — against the real Postgres backend — exactly-once
-claiming with lease-based crash recovery (`tests/test_concurrency_pg.py`).
+How to run the engine **locally**. The `eval_engine/` package is the spine that deploys to GKE (see
+`docs/DEPLOYMENT.md`); locally it runs single-process against the **same backends as production**
+(Postgres + ClickHouse in docker, `infra/up.sh`). It proves: Inspect AI integration (Pure A), the
+plugin contract, the result path (Inspect log → flatten → store → query), and exactly-once claiming
+with lease-based crash recovery (`tests/test_concurrency.py`).
 
 ## What's real vs stubbed
 
+The **storage tier is the real thing** — Postgres + ClickHouse, just running in local docker. What's
+stubbed locally is distribution, the model, and the sandbox runtime:
+
 | Production (DESIGN.md) | Local | Faithful because |
 |---|---|---|
+| Postgres (metadata + **ephemeral ledger**) | **same** — docker Postgres (`infra/up.sh`) | identical engine + the real `FOR UPDATE SKIP LOCKED` claim |
+| ClickHouse (analytics) | **same** — docker ClickHouse (`infra/up.sh`) | identical engine (`ReplacingMergeTree`, partitions, TTL) |
 | Inspect on K8s workers | Inspect in-process | same kernel, no distribution |
-| Postgres (metadata + **ephemeral ledger**) | SQLite `.data/control.db` (`runs`, `sample_tasks`, `failed_task_archive`) | same tables/lifecycle; only the claim primitive (FOR UPDATE SKIP LOCKED) changes |
-| ClickHouse | DuckDB `.data/analytics.duckdb` (`sample_results`, 20 cols) | *the design's named dev path*; production-shaped (scores map, group_key, tokens/cost) |
-| S3 + zstd transcripts | `.data/transcripts/<run>/<sample>.json` | object-store stand-in (no compression) |
-| LiteLLM + real model | Inspect `mockllm` **(default)** *or* real **OpenRouter** model (cost from catalog price) | same `Target` swap; LiteLLM gateway stands in as catalog-priced cost |
 | Worker/Orchestrator split (K8s) | single-process `runner.run()` loop | same claim→commit→load→prune lifecycle; the distributed split is `eval_engine.worker`/`orchestrator` (see `docs/DEPLOYMENT.md` M3) |
+| S3 + zstd transcripts | `.data/transcripts/<run>/<sample>.json` (when no GCS bucket set) | object-store stand-in (no compression) |
+| LiteLLM + real model | Inspect `mockllm` **(default)** *or* real **OpenRouter** model (cost from catalog price) | same `Target` swap; LiteLLM gateway stands in as catalog-priced cost |
 | K8s sandbox (agentic) | Inspect **Docker** sandbox, air-gapped + hardened (`deploy/sandbox/airgap-compose.yaml`) | identical Inspect `sandbox()` contract; only the provider changes (docker→k8s) — gVisor/Kata escape boundary is the one k8s-only piece |
 
 The runner exercises the real result path: **expand ledger → claim batch → execute (Inspect)
@@ -30,13 +33,18 @@ k8s-sandbox stand-in) — see "Agentic execution + sandboxing" below and `docs/S
 # from repo root — virtualenv (no sudo needed; python3.10-venv is unavailable here)
 python3 -m pip install --user virtualenv
 python3 -m virtualenv .venv
-.venv/bin/pip install inspect-ai duckdb pydantic pyyaml
+.venv/bin/pip install -e .          # base deps incl. psycopg + clickhouse-connect (the backends)
+bash infra/up.sh                    # docker Postgres :5433 + ClickHouse :8123 (required)
 ```
+
+There is no in-memory/SQLite stand-in — the engine talks to Postgres + ClickHouse directly, so
+`infra/up.sh` must be running. Connection defaults point at the local docker stack
+(`EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD` override them).
 
 ## Run
 
 ```bash
-.venv/bin/python -m eval_engine.cli catalog                  # list plugins
+.venv/bin/python -m eval_engine.cli catalog                  # list plugins (no DB needed)
 .venv/bin/python -m eval_engine.cli run examples/capitals_qa.yaml
 .venv/bin/python -m eval_engine.cli runs                     # list past runs
 .venv/bin/python -m eval_engine.cli report <run_id>
@@ -72,7 +80,7 @@ sandbox; the orchestrator provisions it" shape from `docs/SANDBOXING.md` §4/§7
 
 Locally the sandbox is **Inspect's Docker provider** standing in for the production **Kubernetes
 sandbox provider** — the Inspect `sandbox()` contract is identical, only `sandbox: docker|k8s`
-changes (same spirit as SQLite→Postgres). `deploy/sandbox/airgap-compose.yaml` maps the doc's baseline
+changes (a config choice). `deploy/sandbox/airgap-compose.yaml` maps the doc's baseline
 hardening + air-gap onto Docker: **`network_mode: none`** (zero egress — can't reach Postgres, the
 gateway, or IMDS), read-only rootfs, non-root, `cap_drop: ALL`, `no-new-privileges`, pid/mem caps.
 What Docker *can't* give you locally is the gVisor/Kata kernel-escape boundary — that stays a k8s
@@ -96,23 +104,23 @@ proof the tool ran *inside* the container. (Agentic needs a capable **native too
 ```
 eval_engine/
   plugins.py    registry + @harness/@scorer (implements docs/PLUGINS.md)
-  builtins.py   single_turn + agentic (tool-use, sandbox) harnesses; includes/match/llm_judge scorers
-  datasets.py   JSONL → Inspect dataset (+ content hash, à la SCHEMA §0)
-  models.py     RunSpec (SCHEMA §1.5)
-  control.py    SQLite: runs + ephemeral sample-task ledger + failure archive (SCHEMA §1);
-                atomic UPDATE..RETURNING claim w/ lease reclaim (SKIP-LOCKED analogue)
-  control_pg.py Postgres backend: same interface, REAL FOR UPDATE SKIP LOCKED claim
-  analytics.py  DuckDB: production-shaped sample_results + slice queries (SCHEMA §2)
-  analytics_ch.py  ClickHouse backend: ReplacingMergeTree(attempt), monthly partitions, TTL
-  db.py         backend selector (EVAL_ENGINE_BACKEND=sqlite|postgres)
+  builtins.py   harnesses (single_turn / multiple_choice / agentic) + scorers (includes/match/choice/llm_judge)
+  datasets.py   JSONL → Inspect dataset (+ content-addressed snapshot, SCHEMA §0/§13)
+  models.py     RunSpec + registered-entity specs (Dataset/Eval/Model) (SCHEMA §1.5, §7)
+  control.py    Postgres: runs + ephemeral sample-task ledger + failure archive + entity registry +
+                audit log (SCHEMA §1); REAL FOR UPDATE SKIP LOCKED claim w/ lease reclaim
+  analytics.py  ClickHouse: ReplacingMergeTree(attempt) sample_results + slice queries (SCHEMA §2)
+  db.py         storage-tier entrypoint — exposes control + analytics + init()
   runner.py     result-path lifecycle, split launch()/execute()/_finalize() (ORCHESTRATION §4–§10)
-  api.py        FastAPI control plane: POST /runs (bg execute), GET status/results/catalog
+  worker.py / orchestrator.py  the distributed split: claim loop / admit+finalize (leader-elected)
+  api.py        FastAPI control plane: POST /runs, entity CRUD, rerun, GET status/results/catalog/audit
   cli.py        run | report | runs | catalog | ledger
 tests/
-  test_concurrency.py      exactly-once + lease-reclaim (SQLite)
-  test_concurrency_pg.py   exactly-once + lease-reclaim (Postgres SKIP LOCKED)
+  test_concurrency.py      exactly-once + lease-reclaim + retry/budget/cap (Postgres SKIP LOCKED)
+  test_distributed.py      launch → orchestrator admit → worker drain → finalize (full spine)
+  test_registry.py         entity registry + content-addressed snapshot + audit + multiple_choice
   test_sandbox_agentic.py  agentic harness + tool exec inside an air-gapped Docker sandbox
-infra/              up.sh / down.sh — docker Postgres + ClickHouse (local backends)
+infra/              up.sh / down.sh — docker Postgres + ClickHouse (the backends)
 deploy/sandbox/     airgap-compose.yaml — hardened, air-gapped agentic sandbox (k8s-sandbox stand-in)
 examples/           qa.jsonl + capitals_qa.yaml + capitals_openrouter.yaml + sandbox_qa.jsonl + agentic_sandbox.yaml
 ```
@@ -138,36 +146,22 @@ results panel (accuracy/tokens/cost, accuracy-by-category, per-sample table) wit
 progress bar driven by the ledger. Vanilla HTML/JS, no build step.
 
 > Prototype stand-in: production uses **Next.js + embedded Inspect viewer + canned ClickHouse
-> views** (DESIGN §6). This single page proves the dashboard *function* (launch / list / drill-in)
-> with zero build infra, same as SQLite stands in for Postgres.
+> views** (DESIGN §6, and the `frontend/` app deployed on GKE). This single page proves the
+> dashboard *function* (launch / list / drill-in) with zero build infra.
 
-## Concurrency test (the claim/idempotency correctness)
-
-```bash
-.venv/bin/python tests/test_concurrency.py        # SQLite
-.venv/bin/python tests/test_concurrency_pg.py     # Postgres (real SKIP LOCKED)
-```
-
-Proves exactly-once claim (no double-claim, none dropped) and lease-based reclaim of tasks
-abandoned by a "crashed" worker. SQLite uses an atomic `UPDATE..RETURNING`; Postgres uses the
-real `FOR UPDATE SKIP LOCKED` — where all N workers claim *in parallel* (2000 samples / 12
-workers, exactly-once, ~3.8k samples/s).
-
-## Real backends (Postgres + ClickHouse)
-
-The SQLite/DuckDB stand-ins swap for the real backends via one env var — same interface
-(`db.py` selector), so nothing else changes. The only behavioural difference is the claim
-becomes a true `FOR UPDATE SKIP LOCKED`.
+## Tests
 
 ```bash
-.venv/bin/pip install -e '.[postgres]'   # psycopg + clickhouse-connect
-bash infra/up.sh                                    # docker Postgres :5433 + ClickHouse :8123
-EVAL_ENGINE_BACKEND=postgres .venv/bin/eval-engine run examples/capitals_qa.yaml
-bash infra/down.sh                                  # teardown
+bash infra/up.sh                                  # Postgres + ClickHouse (required for all but catalog)
+.venv/bin/python tests/test_concurrency.py        # ledger: exactly-once, lease-reclaim, retry, budget, cap
+.venv/bin/python tests/test_distributed.py        # full spine: launch → admit → drain → finalize
+.venv/bin/python tests/test_registry.py           # registry + snapshot + audit + multiple_choice
+docker pull python:3.11-slim && .venv/bin/python tests/test_sandbox_agentic.py   # agentic Docker sandbox
 ```
 
-Config: `EVAL_ENGINE_PG_DSN`, `EVAL_ENGINE_CH_HOST/PORT/USER/PASSWORD`. ClickHouse table uses
-the production engine (`ReplacingMergeTree(attempt)`, monthly partitions, 12-month TTL).
+`test_concurrency` proves exactly-once claim (no double-claim, none dropped) and lease-based reclaim
+of tasks abandoned by a "crashed" worker, via the real `FOR UPDATE SKIP LOCKED` where all N workers
+claim *in parallel* (2000 samples / 12 workers, exactly-once, ~3.8k samples/s).
 
 ## Distributed execution (K8s)
 
@@ -175,7 +169,7 @@ The single-process `runner.run()` loop fans out, in production, to **N worker po
 identical claim→execute→commit→load loop against the same Postgres ledger**, plus a single
 **orchestrator** that admits/expands/reconciles/finalizes. Workers never coordinate with each other —
 the ledger (`FOR UPDATE SKIP LOCKED`) is the sole coordinator, so distribution is just *"run N copies
-of a loop already proven exactly-once"* (`tests/test_concurrency_pg.py`: 2000 samples / 12 parallel
+of a loop already proven exactly-once"* (`tests/test_concurrency.py`: 2000 samples / 12 parallel
 workers, exactly-once, ~3.8k samples/s). The `eval_engine.worker` / `eval_engine.orchestrator`
 entrypoints and their KEDA-scaled GKE Deployments are tracked in **`docs/DEPLOYMENT.md`** (M3/M5).
 

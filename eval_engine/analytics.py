@@ -1,85 +1,104 @@
-"""DuckDB analytics store — ClickHouse stand-in (SCHEMA §2).
+"""Analytics store (ClickHouse): the flattened per-sample projection for querying (SCHEMA §2).
 
-Production-shaped ``sample_results``: typed dims for fast filtering, ``scores`` as a JSON map
-(ClickHouse ``Map`` analogue), per-sample ``group_key`` (category) for slice-and-compare,
-token/cost columns, and a ``transcript_uri`` pointer (the transcript itself lives in the
-object-store stand-in, not here — faithful to "analytics row is small").
+ReplacingMergeTree(attempt) keyed on (eval_id, model_id, run_id, sample_id) — a re-executed sample's
+higher attempt wins and duplicate re-inserts collapse; monthly partitions; 12-month TTL. Connection
+via ``EVAL_ENGINE_CH_*`` env (defaults to the local docker ClickHouse).
 """
 from __future__ import annotations
 
-from pathlib import Path
+import os
 
-import duckdb
-
-DATA = Path(".data")
-DATA.mkdir(exist_ok=True)
-DB = str(DATA / "analytics.duckdb")
+import clickhouse_connect
 
 DDL = """
 CREATE TABLE IF NOT EXISTS sample_results(
-  run_id VARCHAR, sample_id VARCHAR, eval_id VARCHAR, eval_version INT,
-  provider VARCHAR, model_id VARCHAR, harness_type VARCHAR, group_key VARCHAR,
-  passed TINYINT, primary_score DOUBLE, scores JSON,
-  tokens_in INT, tokens_out INT, cost_usd DOUBLE, latency_ms INT, attempt TINYINT,
-  error_type VARCHAR, transcript_uri VARCHAR, review_status VARCHAR, finished_at TIMESTAMP)
+  run_id String, sample_id String, eval_id String, eval_version UInt32,
+  provider LowCardinality(String), model_id LowCardinality(String),
+  harness_type LowCardinality(String), group_key LowCardinality(String),
+  passed UInt8, primary_score Float64, scores String,
+  tokens_in UInt32, tokens_out UInt32, cost_usd Float64, latency_ms UInt32, attempt UInt8,
+  error_type LowCardinality(String), transcript_uri String,
+  review_status LowCardinality(String), finished_at DateTime
+)
+ENGINE = ReplacingMergeTree(attempt)
+PARTITION BY toYYYYMM(finished_at)
+ORDER BY (eval_id, model_id, run_id, sample_id)
+TTL finished_at + INTERVAL 12 MONTH
 """
 
+_client = None
+_init_done = False
 
-def _con() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(DB)
-    con.execute(DDL)
-    return con
+
+def _c():
+    global _client
+    if _client is None:
+        _client = clickhouse_connect.get_client(
+            host=os.environ.get("EVAL_ENGINE_CH_HOST", "localhost"),
+            port=int(os.environ.get("EVAL_ENGINE_CH_PORT", "8123")),
+            username=os.environ.get("EVAL_ENGINE_CH_USER", "default"),
+            password=os.environ.get("EVAL_ENGINE_CH_PASSWORD", ""),
+        )
+    return _c_inited()
+
+
+def _c_inited():
+    global _init_done
+    if not _init_done:
+        _client.command(DDL)
+        _init_done = True
+    return _client
+
+
+def init() -> None:
+    _c()
+
+
+_COLUMNS = [
+    "run_id", "sample_id", "eval_id", "eval_version", "provider", "model_id", "harness_type",
+    "group_key", "passed", "primary_score", "scores", "tokens_in", "tokens_out", "cost_usd",
+    "latency_ms", "attempt", "error_type", "transcript_uri", "review_status", "finished_at",
+]
 
 
 def insert(rows: list[tuple]) -> None:
-    con = _con()
-    con.executemany(
-        "INSERT INTO sample_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
-    )
-    con.close()
+    if not rows:
+        return
+    _c().insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS)
+
+
+def _q(sql, params=None):
+    return _c().query(sql, parameters=params or {}).result_rows
 
 
 def run_summary(run_id: str):
-    con = _con()
-    r = con.execute(
-        "SELECT count(*), coalesce(sum(passed),0), coalesce(avg(primary_score),0), "
-        "coalesce(sum(tokens_in+tokens_out),0), coalesce(sum(cost_usd),0) "
-        "FROM sample_results WHERE run_id=?",
-        (run_id,),
-    ).fetchone()
-    con.close()
-    return r  # (n, passed, mean_score, tokens, cost)
+    # FINAL collapses ReplacingMergeTree dupes for an exact count (ORCHESTRATION §11).
+    r = _q(
+        "SELECT count(), sum(passed), avg(primary_score), sum(tokens_in+tokens_out), sum(cost_usd) "
+        "FROM sample_results FINAL WHERE run_id=%(r)s",
+        {"r": run_id},
+    )[0]
+    return (r[0], r[1] or 0, r[2] or 0, r[3] or 0, r[4] or 0)
 
 
 def samples(run_id: str):
-    con = _con()
-    rows = con.execute(
+    return _q(
         "SELECT sample_id, passed, group_key, primary_score, transcript_uri "
-        "FROM sample_results WHERE run_id=? ORDER BY sample_id",
-        (run_id,),
-    ).fetchall()
-    con.close()
-    return rows
+        "FROM sample_results FINAL WHERE run_id=%(r)s ORDER BY sample_id",
+        {"r": run_id},
+    )
 
 
 def by_category(run_id: str):
-    """The canonical slice query: accuracy by category (SCHEMA §2 group_key)."""
-    con = _con()
-    rows = con.execute(
-        "SELECT group_key, count(*) n, sum(passed) passed, round(avg(primary_score),3) acc "
-        "FROM sample_results WHERE run_id=? GROUP BY group_key ORDER BY group_key",
-        (run_id,),
-    ).fetchall()
-    con.close()
-    return rows
+    return _q(
+        "SELECT group_key, count() n, sum(passed) passed, round(avg(primary_score),3) acc "
+        "FROM sample_results FINAL WHERE run_id=%(r)s GROUP BY group_key ORDER BY group_key",
+        {"r": run_id},
+    )
 
 
 def compare_models_by_category():
-    """Cross-run model comparison — a canned ClickHouse analytics view (DESIGN §6)."""
-    con = _con()
-    rows = con.execute(
-        "SELECT model_id, group_key, count(*) n, round(avg(primary_score),3) acc "
-        "FROM sample_results GROUP BY model_id, group_key ORDER BY model_id, group_key"
-    ).fetchall()
-    con.close()
-    return rows
+    return _q(
+        "SELECT model_id, group_key, count() n, round(avg(primary_score),3) acc "
+        "FROM sample_results FINAL GROUP BY model_id, group_key ORDER BY model_id, group_key"
+    )

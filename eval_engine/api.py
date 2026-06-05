@@ -22,11 +22,10 @@ from .db import analytics, control
 from .models import DatasetSpec, EvalSpec, ModelSpec, RunSpec
 
 # In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
-# orchestrator/worker pods execute. Local single-process dev (sqlite) keeps the convenient inline
-# background execute so the dashboard works without standing up separate processes.
-INLINE_EXEC = os.environ.get(
-    "EVAL_ENGINE_API_INLINE_EXEC", "1" if db.BACKEND == "sqlite" else "0"
-) == "1"
+# orchestrator/worker pods execute. Set EVAL_ENGINE_API_INLINE_EXEC=1 for local single-process dev:
+# the API runs the whole pipeline inline so the dashboard works without standing up separate
+# orchestrator/worker processes. Off by default (the cluster shape).
+INLINE_EXEC = os.environ.get("EVAL_ENGINE_API_INLINE_EXEC", "0") == "1"
 
 
 @asynccontextmanager

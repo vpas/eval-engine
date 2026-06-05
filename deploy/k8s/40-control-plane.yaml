@@ -22,7 +22,6 @@ spec:
           ports:
             - { name: http, containerPort: 8077 }
           env:
-            - { name: EVAL_ENGINE_BACKEND, value: postgres }
             - name: EVAL_ENGINE_PG_DSN
               valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
             - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
@@ -66,7 +65,6 @@ spec:
           imagePullPolicy: Always
           command: ["python", "-m", "eval_engine.orchestrator"]
           env:
-            - { name: EVAL_ENGINE_BACKEND, value: postgres }
             - name: EVAL_ENGINE_PG_DSN
               valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
             - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }

@@ -12,7 +12,10 @@ dependencies = [
   # so gs:// log paths are stripped to clean basenames — no `//` for the oauth2-proxy path-cleaner to
   # collapse (the deep-link "Failed to fetch" bug). Older builds (0.3.69) sent full gs:// to /log-size.
   "inspect-ai>=0.3.235",
-  "duckdb",
+  # storage tier: Postgres control plane + ClickHouse analytics (local: infra/up.sh). Required —
+  # there is no in-memory/sqlite stand-in; the package talks to these two backends directly.
+  "psycopg[binary]",
+  "clickhouse-connect",
   "pydantic>=2",
   "pyyaml",
   "fastapi",
@@ -20,8 +23,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# real backends (Postgres ledger + ClickHouse analytics; local: infra/up.sh)
-postgres = ["psycopg[binary]", "clickhouse-connect"]
 # real models via OpenRouter (Inspect's openrouter/ provider needs the openai client)
 openrouter = ["openai"]
 # transcript object store on GCS (ADC = the GKE node service account); gcsfs so Inspect can read/write

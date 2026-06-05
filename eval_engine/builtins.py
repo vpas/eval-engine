@@ -63,7 +63,7 @@ def agentic(cfg: AgenticConfig) -> tuple[Solver, SandboxEnvironmentSpec]:
     go worker→gateway (§2) — so the sandbox can be air-gapped. Locally that sandbox is Docker; in
     production it's a hardened, air-gapped per-sample K8s pod (docs/SANDBOXING.md), with a pooled
     sandbox service as the trigger-gated scale-up (docs/FUTURE.md §4). The contract is identical;
-    only ``sandbox: docker|k8s`` changes — like SQLite→Postgres."""
+    only ``sandbox: docker|k8s`` changes — a config choice, not a code change."""
     factories = {"bash": lambda: bash(timeout=cfg.tool_timeout),
                  "python": lambda: python(timeout=cfg.tool_timeout)}
     tools = [factories[t]() for t in cfg.tools]

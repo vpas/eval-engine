@@ -4,7 +4,7 @@ Run N copies (a K8s Deployment, KEDA-scaled). The Postgres ledger (``FOR UPDATE 
 the sole coordinator, so a worker is just a copy of the loop — no inter-worker coordination. Crash
 safety is the lease: a dead worker's claimed tasks are reclaimed by survivors once it expires.
 
-    python -m eval_engine.worker          # EVAL_ENGINE_BACKEND=postgres in the cluster
+    python -m eval_engine.worker          # connects to Postgres via EVAL_ENGINE_PG_DSN
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _drain_run(run_id: str) -> int:
 
 def main() -> None:
     db.init()
-    print(f"[worker {WORKER_ID}] up (backend={db.BACKEND})", flush=True)
+    print(f"[worker {WORKER_ID}] up", flush=True)
     while True:
         did = 0
         for run_id in db.control.active_runs(("running",)):

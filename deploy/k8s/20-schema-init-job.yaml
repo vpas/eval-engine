@@ -22,7 +22,6 @@ spec:
           imagePullPolicy: Always
           command: ["python", "-c", "from eval_engine import db; db.init(); print('schema initialized (PG + ClickHouse)')"]
           env:
-            - { name: EVAL_ENGINE_BACKEND, value: postgres }
             - name: EVAL_ENGINE_PG_DSN
               valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
             - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }

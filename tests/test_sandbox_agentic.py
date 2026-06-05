@@ -2,8 +2,8 @@
 through the SAME spine (ledger → claim → Inspect → commit → analytics → finalize → prune).
 
 Local Docker stands in for the production Kubernetes sandbox provider (docs/SANDBOXING.md) — the
-Inspect `sandbox()` contract is identical; only the provider changes (like SQLite→Postgres
-elsewhere). The sandbox here is hardened + AIR-GAPPED (sandbox/airgap-compose.yaml): network_mode
+Inspect `sandbox()` contract is identical; only the provider changes (a config choice). The sandbox
+here is hardened + AIR-GAPPED (sandbox/airgap-compose.yaml): network_mode
 none, read-only rootfs, non-root, dropped caps, pid/mem caps (§5 baseline hardening, §2 air-gap).
 
 Determinism without a provider key: a scripted mock agent (RunSpec.mock_tool_calls) emits
@@ -68,7 +68,7 @@ def test_agentic_sandbox():
         "worker process must NOT have the secret (else the proof is meaningless)"
 
     spec = _spec()
-    run_id = runner.run(spec)  # full spine, single-process, sqlite backend
+    run_id = runner.run(spec)  # full spine, single-process (Postgres + ClickHouse)
 
     # 1) the spine ran the agentic harness to completion
     assert control.ledger_size(run_id) == 0, "ledger not pruned after finalize"
