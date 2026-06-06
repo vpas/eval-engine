@@ -280,6 +280,15 @@ function TranscriptDrawer({ sample, onClose }: { sample: Results["samples"][numb
     }).catch((e) => setRaw(String(e)));
   }, [sample.transcript_uri]);
 
+  // Deep-link into the embedded Inspect viewer for THIS sample's .eval log. The viewer is launched
+  // with `--log-dir gs://…/eval-logs`, and its client expects a RELATIVE basename (no scheme/`//`, so
+  // oauth2-proxy's path.Clean can't collapse it) + `inspect_server=true` to force the server API
+  // (see eval_engine/view_main.py). Without this the link fell back to the viewer root ("/inspect/").
+  const logFile = body?.eval_log_uri ? String(body.eval_log_uri).split("/").pop() : "";
+  const viewerHref = logFile
+    ? `/inspect/?log_file=${encodeURIComponent(logFile)}&inspect_server=true`
+    : "";
+
   return (
     <>
       <div className="scrim" onClick={onClose} />
@@ -288,7 +297,7 @@ function TranscriptDrawer({ sample, onClose }: { sample: Results["samples"][numb
           <Icon name="doc" className="ic" style={{ color: "var(--accent-fg)" }} />
           <strong style={{ fontSize: 13 }}>Transcript · <span className="mono">{sample.sample_id}</span></strong>
           <span className="grow" />
-          {body?.eval_log_uri && <a className="btn ghost sm" href="/inspect/" target="_blank" rel="noreferrer"><Icon name="external" size={12} />viewer</a>}
+          {viewerHref && <a className="btn ghost sm" href={viewerHref} target="_blank" rel="noreferrer"><Icon name="external" size={12} />viewer</a>}
           <button className="btn ghost sm" onClick={onClose}><Icon name="x" /></button>
         </div>
         <div style={{ padding: "14px 16px" }}>
