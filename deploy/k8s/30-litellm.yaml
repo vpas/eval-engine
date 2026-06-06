@@ -11,9 +11,16 @@ data:
       # Per-model rate limits (DESIGN §2/FR6). rpm/tpm are enforced by the Router; with redis in
       # router_settings the usage counters are shared across ALL gateway replicas, so the cap is
       # GLOBAL (cross-worker), not per-replica — the property DESIGN §12 says to load-test.
+      # NOTE (2026-06-06): we reach OpenRouter via litellm's GENERIC OpenAI-compatible handler
+      # (model: openai/<id> + api_base) rather than its native `openrouter/` handler. The native
+      # handler injects a `usage` request field that it then mis-passes as a kwarg to the OpenAI SDK
+      # (`AsyncCompletions.create() got an unexpected keyword argument 'usage'`) on Inspect's streamed
+      # requests → 500 on every call. OpenRouter's /api/v1 is OpenAI-compatible, so the generic handler
+      # works and avoids that bug. rpm/tpm are router-enforced regardless of handler (rate limiting kept).
       - model_name: "openai/gpt-4o-mini"        # the model our workers use (gateway sees it post-strip)
         litellm_params:
-          model: openrouter/openai/gpt-4o-mini
+          model: openai/openai/gpt-4o-mini      # generic OpenAI handler; sends model id "openai/gpt-4o-mini"
+          api_base: https://openrouter.ai/api/v1
           api_key: os.environ/OPENROUTER_API_KEY
           rpm: 60
           tpm: 200000
@@ -29,7 +36,8 @@ data:
       # An exact model_name above wins over this wildcard. Keeps the real model id for catalog pricing.
       - model_name: "*"
         litellm_params:
-          model: openrouter/*
+          model: openai/*                       # generic OpenAI handler against OpenRouter (see note above)
+          api_base: https://openrouter.ai/api/v1
           api_key: os.environ/OPENROUTER_API_KEY
     litellm_settings:
       drop_params: true
@@ -70,7 +78,12 @@ spec:
       nodeSelector: { eval-engine/role: system }
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm:main-stable
+          # PINNED off the moving `main-stable` tag (2026-06-06): an earlier main-stable build's
+          # OpenRouter handler passed an unsupported `usage` kwarg to the bundled openai SDK
+          # (`AsyncCompletions.create() got an unexpected keyword argument 'usage'`), 500-ing every
+          # request; with `allowed_fails: 0` that took the model deployment down (cascade → stuck runs).
+          # This digest is a known-good main-stable. Re-pin deliberately when upgrading.
+          image: ghcr.io/berriai/litellm@sha256:9de33287d844a164f873479a04eebe065610e131d7e3aaf010f520fb5b4cfd7b
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
           ports:
             - { name: http, containerPort: 4000 }
