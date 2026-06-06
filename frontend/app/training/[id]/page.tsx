@@ -100,6 +100,7 @@ export default function TrainingDetail() {
               </div>
             </div>
             <div className="vcenter gap8">
+              <button className="btn sm" disabled={!checkpoints.length} onClick={() => setDrill({ type: "checkpoint", idx: checkpoints.length - 1 })}><Icon name="slice" />Latest checkpoint</button>
               <button className="btn sm" onClick={scan} disabled={scanning}><Icon name="refresh" />{scanning ? "scanning…" : "Scan now"}</button>
             </div>
           </div>
