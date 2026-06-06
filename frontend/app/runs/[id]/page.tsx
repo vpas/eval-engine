@@ -216,7 +216,9 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
                 <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
                 <td className="cellmuted">{sm.category || "—"}</td>
                 <td className="right num">{sm.score?.toFixed(2)}</td>
-                <td className="right">{sm.transcript_uri ? <span className="linklike" style={{ fontSize: 11 }}>view ›</span> : <span className="subtle" style={{ fontSize: 11 }}>—</span>}</td>
+                <td className="right">{sm.transcript_uri
+                  ? <span className="linklike" style={{ fontSize: 11 }}>view ›</span>
+                  : <span className="subtle" style={{ fontSize: 11 }} title="Transcript not retained — sample-by-default retention keeps all failures + a fraction of passes (DESIGN §13).">not kept</span>}</td>
               </tr>
             ))}
           </tbody>
