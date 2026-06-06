@@ -11,21 +11,31 @@ import os
 
 import clickhouse_connect
 
-DDL = """
-CREATE TABLE IF NOT EXISTS sample_results(
+# HA (#16): when EVAL_ENGINE_CH_CLUSTER is set the table is created ON CLUSTER with the *Replicated*
+# engine, so every ClickHouse replica holds a copy (Keeper-coordinated) and a replica loss doesn't lose
+# results. Unset (dev/CI single node) ⇒ the plain ReplacingMergeTree — identical DDL to before, so
+# nothing changes locally. The `{shard}`/`{replica}` are ClickHouse macros (per-pod config), not Python.
+CH_CLUSTER = os.environ.get("EVAL_ENGINE_CH_CLUSTER")
+
+_SCHEMA_COLS = """
   run_id String, sample_id String, eval_id String, eval_version UInt32,
   provider LowCardinality(String), model_id LowCardinality(String),
   harness_type LowCardinality(String), group_key LowCardinality(String),
   passed UInt8, primary_score Float64, scores String,
   tokens_in UInt32, tokens_out UInt32, cost_usd Float64, latency_ms UInt32, attempt UInt8,
   error_type LowCardinality(String), transcript_uri String,
-  review_status LowCardinality(String), finished_at DateTime
-)
-ENGINE = ReplacingMergeTree(attempt)
-PARTITION BY toYYYYMM(finished_at)
-ORDER BY (eval_id, model_id, run_id, sample_id)
-TTL finished_at + INTERVAL 12 MONTH
-"""
+  review_status LowCardinality(String), finished_at DateTime"""
+
+
+def _ddl() -> str:
+    on_cluster = f" ON CLUSTER {CH_CLUSTER}" if CH_CLUSTER else ""
+    engine = ("ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/sample_results', '{replica}', attempt)"
+              if CH_CLUSTER else "ReplacingMergeTree(attempt)")
+    return (f"CREATE TABLE IF NOT EXISTS sample_results{on_cluster}({_SCHEMA_COLS}\n)\n"
+            f"ENGINE = {engine}\n"
+            "PARTITION BY toYYYYMM(finished_at)\n"
+            "ORDER BY (eval_id, model_id, run_id, sample_id)\n"
+            "TTL finished_at + INTERVAL 12 MONTH")
 
 _client = None
 _init_done = False
@@ -46,7 +56,7 @@ def _c():
 def _c_inited():
     global _init_done
     if not _init_done:
-        _client.command(DDL)
+        _client.command(_ddl())
         _init_done = True
     return _client
 

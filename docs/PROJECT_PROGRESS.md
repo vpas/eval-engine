@@ -205,9 +205,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   ack done (2026-06-05):* `analytics.insert` now uses `async_insert=1, wait_for_async_insert=1` — the
   server batches concurrent worker inserts as one part (no write-amplification under load) while the
   call still blocks until durable, preserving the ack-before-flip invariant (tested; verified
-  in-cluster). *Remaining (pod-replica HA):* replicated ClickHouse + Redis (Sentinel) need a
-  **multi-node** cluster (anti-affinity across nodes) — a deliberate departure from the cost-minimal
-  single-node design (Redis state is intentionally soft/rebuildable). Gated behind a cost decision.
+  in-cluster). *Multi-node + replicated ClickHouse done (2026-06-05, user-approved cost):* terraform
+  `ha_stateful=true` scales the system pool to **3 nodes**; `deploy/k8s/10-clickhouse-ha.yaml` runs a
+  **3-replica ClickHouse StatefulSet** with an **embedded ClickHouse Keeper** (3-node raft quorum) and
+  `podAntiAffinity` (one replica per node). `analytics._ddl()` switches to **`ReplicatedReplacingMergeTree`
+  `ON CLUSTER ee`** when `EVAL_ENGINE_CH_CLUSTER` is set (api/orch/worker manifests set `ee`; unset =
+  dev/CI single node, unchanged). Verified in-cluster: `total_replicas=3 active_replicas=3`, a run's rows
+  replicated to all 3, and **reads survived deleting a replica** (failover via the load-balanced Service).
+  *Remaining: Redis (Sentinel) HA.*
 
 - [⊘] **17. Canonical per-`run_id` cost tally from the gateway.** §8 / DEPLOYMENT "A5". Today cost is the
   worker-side catalog price (equal in dollars, but not the canonical gateway tally). *Decision
