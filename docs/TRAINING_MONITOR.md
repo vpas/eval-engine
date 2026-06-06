@@ -14,7 +14,13 @@
 >
 > Companion to `DESIGN.md` (domain model §7, reproducibility §14), `SCHEMA.md` (the projection),
 > `SCHEDULER.md` (lanes), and `FUTURE.md` (the defer-until-proven discipline this doc follows).
-> Status: **design draft** — converging. Not yet on the v1 backlog (`docs/PROJECT_PROGRESS.md`).
+>
+> **Status: built (P1–P3 backend + UI).** The monitor spine, mock trainer, anomaly/diagnosis layer,
+> and API (`eval_engine/training*.py`, `mock_trainer.py`, `POST/GET /training…`) are implemented and
+> tested (unit + an integration spine on real Postgres+ClickHouse). The **Training tab** is built in the
+> Next.js dashboard (`frontend/app/training`, `components/training-chart.tsx`) wired to those endpoints.
+> This remains a vNext track, not part of the v1 backlog (`docs/PROJECT_PROGRESS.md`). What's still
+> deferred is in §12 (push source, real per-checkpoint serving, heavy trajectory modelling, auto-actions).
 
 ---
 
