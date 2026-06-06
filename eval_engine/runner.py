@@ -14,7 +14,6 @@ import json
 import os
 import time
 import urllib.request
-from pathlib import Path
 
 from inspect_ai import Task
 from inspect_ai import eval as inspect_eval
@@ -22,7 +21,7 @@ from inspect_ai.dataset import MemoryDataset
 from inspect_ai.model import ModelOutput, get_model
 from inspect_ai.scorer import CORRECT
 
-from . import builtins, plugins  # noqa: F401  builtins import populates the registry
+from . import builtins, plugins, storage  # noqa: F401  builtins import populates the registry
 from .db import analytics, control
 from .datasets import load_jsonl
 from .models import RunSpec
@@ -31,7 +30,6 @@ TRANSCRIPTS = control.DATA / "transcripts"  # local object-store stand-in (dev)
 GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → transcripts go to GCS
 # Inspect's rich `.eval` logs go to GCS too (so the Inspect log viewer can read them); local in dev.
 EVAL_LOG_DIR = f"gs://{GCS_BUCKET}/eval-logs" if GCS_BUCKET else str(control.DATA / "logs")
-_gcs_client = None
 
 # Reproducibility pin (DESIGN §14): the worker image/code ref, baked at build time (Dockerfile ARG
 # GIT_SHA → this env) and recorded on every run so a run's inputs include the exact code that ran it.
@@ -82,14 +80,6 @@ def _settle_result(run_id: str, sid: str, result: dict | None) -> str:
         )
     control.commit_result(run_id, sid, result)
     return "done"
-
-
-def _gcs():
-    global _gcs_client
-    if _gcs_client is None:
-        from google.cloud import storage  # ADC = the GKE node SA (cloud-platform scope)
-        _gcs_client = storage.Client()
-    return _gcs_client
 
 
 def _split_model(model: str) -> tuple[str, str]:
@@ -194,27 +184,19 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
 def _put_transcript(run_id: str, sample_id: str, payload: dict) -> str:
     """Persist a transcript; return its URI. GCS (gs://…) in-cluster, local file in dev."""
     body = json.dumps(payload, ensure_ascii=False)
-    if GCS_BUCKET:
-        key = f"runs/{run_id}/transcripts/{sample_id}.json"
-        _gcs().bucket(GCS_BUCKET).blob(key).upload_from_string(body, content_type="application/json")
-        return f"gs://{GCS_BUCKET}/{key}"
-    d = TRANSCRIPTS / run_id
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{sample_id}.json"  # prod: .json.zst
-    path.write_text(body)
-    return str(path)
+    uri = (f"gs://{GCS_BUCKET}/runs/{run_id}/transcripts/{sample_id}.json" if GCS_BUCKET
+           else str(TRANSCRIPTS / run_id / f"{sample_id}.json"))  # prod: .json.zst
+    storage.write_text(uri, body)
+    return uri
 
 
 def get_transcript(uri: str) -> str | None:
     """Read back a transcript by URI (gs://<our-bucket>/… or a local path). For the dashboard drill-in."""
     if uri.startswith("gs://"):
-        bucket, _, key = uri[len("gs://"):].partition("/")
+        bucket = uri[len("gs://"):].partition("/")[0]
         if not GCS_BUCKET or bucket != GCS_BUCKET:  # only ever serve our own bucket
             return None
-        blob = _gcs().bucket(bucket).blob(key)
-        return blob.download_as_text() if blob.exists() else None
-    p = Path(uri)
-    return p.read_text() if p.exists() else None
+    return storage.read_text(uri) if storage.exists(uri) else None
 
 
 def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:

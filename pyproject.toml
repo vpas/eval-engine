@@ -20,14 +20,17 @@ dependencies = [
   "pyyaml",
   "fastapi",
   "uvicorn[standard]",
+  # object storage via a single fsspec interface (DESIGN §4): no native cloud SDK in app code, so the
+  # store is swappable by URI scheme. The gs:// driver (gcsfs) ships in the [gcs] extra (cluster only).
+  "fsspec",
 ]
 
 [project.optional-dependencies]
 # real models via OpenRouter (Inspect's openrouter/ provider needs the openai client)
 openrouter = ["openai"]
-# transcript object store on GCS (ADC = the GKE node service account); gcsfs so Inspect can read/write
-# its .eval logs to gs:// (for the Inspect log viewer)
-gcs = ["google-cloud-storage", "gcsfs"]
+# gs:// driver for fsspec (ADC = the GKE node service account) — also what Inspect uses to read/write
+# its .eval logs to gs:// (for the Inspect log viewer). No native google-cloud SDK: app code is S3-portable.
+gcs = ["gcsfs"]
 # agentic sandboxing on Kubernetes (helm-deployed per-sample pods); needs helm in the image + RBAC
 k8s = ["inspect-k8s-sandbox"]
 # test suite (pytest). Integration/e2e tests also need infra/up.sh (Postgres + ClickHouse).

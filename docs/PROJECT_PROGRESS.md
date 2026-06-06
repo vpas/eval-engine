@@ -171,9 +171,16 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 
 ### Tier 3 — production-shape (works, but not as designed)
 
-- [ ] **14. S3-API storage abstraction (portability).** §4 mandates an `fsspec`/S3 abstraction — "no
-  native GCS/Blob APIs in app code." Today `runner.py` uses `google.cloud.storage` directly and the
-  viewer reads `gs://`.
+- [x] **14. S3-API storage abstraction (portability).** §4 mandates an `fsspec`/S3 abstraction — "no
+  native GCS/Blob APIs in app code." *Done (2026-06-05):* new `eval_engine/storage.py` — a single
+  fsspec interface (`read_bytes`/`write_bytes`/`read_text`/`exists`) where the **URI scheme selects
+  the driver** (`gcsfs` for `gs://`, `s3fs` for `s3://`, local path for dev), so the object store is
+  swappable with no code change. `runner.py` (transcripts) and `datasets.py` (content-addressed
+  snapshots + load) now go through it; the native `google-cloud-storage` SDK is **dropped entirely**
+  (`pyproject` `[gcs]` = just `gcsfs`, the fsspec driver; `fsspec` is a base dep). The Inspect viewer
+  (`view_main.py`) already uses Inspect's own fsspec layer — no native SDK there. Tested
+  (`test_storage.py`, local fs) + in-cluster (a real gateway run writes/reads its transcript over
+  `gs://` and the dataset snapshot lands in `gs://…/datasets/`).
 
 - [ ] **15. Transcript retention: sample-by-default + zstd + tiering.** §8/§13. Today: plain-JSON,
   keep-all, no zstd, no stratified sampling, no storage-class tiering.
