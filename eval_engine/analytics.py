@@ -6,6 +6,7 @@ via ``EVAL_ENGINE_CH_*`` env (defaults to the local docker ClickHouse).
 """
 from __future__ import annotations
 
+import math
 import os
 
 import clickhouse_connect
@@ -71,6 +72,13 @@ def _q(sql, params=None):
     return _c().query(sql, parameters=params or {}).result_rows
 
 
+def _num(x) -> float | int:
+    """0 for NULL/NaN. ClickHouse ``avg()`` over an empty set returns NaN (not NULL), and ``NaN or 0``
+    stays NaN in Python — which then breaks JSON serialization. A run with no committed rows (e.g. all
+    samples failed) must summarize to zeros, not NaN."""
+    return 0 if x is None or (isinstance(x, float) and math.isnan(x)) else x
+
+
 def run_summary(run_id: str):
     # FINAL collapses ReplacingMergeTree dupes for an exact count (ORCHESTRATION §11).
     r = _q(
@@ -78,7 +86,7 @@ def run_summary(run_id: str):
         "FROM sample_results FINAL WHERE run_id=%(r)s",
         {"r": run_id},
     )[0]
-    return (r[0], r[1] or 0, r[2] or 0, r[3] or 0, r[4] or 0)
+    return (r[0], _num(r[1]), _num(r[2]), _num(r[3]), _num(r[4]))
 
 
 def samples(run_id: str):

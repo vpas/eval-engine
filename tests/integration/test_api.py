@@ -87,6 +87,16 @@ def test_results_and_transcript(client):
     assert client.get("/runs/nope/results").status_code == 404
 
 
+def test_results_zero_rows_run(client):
+    # A run with no analytics rows yet (queued, not executed) must return 200 zeros, not a 500 from a
+    # NaN mean_score (regression: ClickHouse avg() over an empty set is NaN).
+    run_id = client.post("/runs", json=SPEC).json()["run_id"]
+    res = client.get(f"/runs/{run_id}/results")
+    assert res.status_code == 200, res.text
+    s = res.json()["summary"]
+    assert s["samples"] == 0 and s["accuracy"] == 0 and s["mean_score"] == 0
+
+
 def test_entity_registry_crud_and_validation(client):
     # dataset: register → list → get → 404
     ds = {"id": "capitals", "uri": "examples/qa.jsonl"}

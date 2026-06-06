@@ -46,6 +46,13 @@ def test_empty_insert_is_noop():
     analytics.insert([])  # must not raise; nothing to assert beyond that
 
 
+def test_run_summary_zero_rows_is_not_nan():
+    # A run with no committed rows (all samples failed) must summarize to zeros — ClickHouse avg()
+    # over an empty set returns NaN, which would otherwise break JSON serialization at the API.
+    n, passed, mean, tokens, cost = analytics.run_summary(control.new_run_id())
+    assert (n, passed, mean, tokens, cost) == (0, 0, 0, 0, 0)
+
+
 def test_replacing_merge_tree_higher_attempt_wins():
     """A retried sample re-inserts with a higher ``attempt`` (the RMT version); ``FINAL`` collapses
     the duplicate to the latest attempt — so a successful retry overwrites the earlier failure."""
