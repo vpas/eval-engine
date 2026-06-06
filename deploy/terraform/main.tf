@@ -79,6 +79,29 @@ resource "google_storage_bucket" "artifacts" {
   location                    = var.region
   force_destroy               = true
   uniform_bucket_level_access = true
+
+  # Storage-class tiering (DESIGN §8/§13): transcripts (runs/) and Inspect .eval logs (eval-logs/) are
+  # write-once and rarely read once a run is analyzed, so cool them as they age to cut storage cost.
+  lifecycle_rule {
+    condition {
+      age            = 30
+      matches_prefix = ["runs/", "eval-logs/"]
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "NEARLINE"
+    }
+  }
+  lifecycle_rule {
+    condition {
+      age            = 90
+      matches_prefix = ["runs/", "eval-logs/"]
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "COLDLINE"
+    }
+  }
 }
 
 # Docker registry for the eval-engine image.

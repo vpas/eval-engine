@@ -10,10 +10,13 @@ instead of this single ``w0`` loop); the lifecycle shape is exactly this.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import time
 import urllib.request
+
+import zstandard
 
 from inspect_ai import Task
 from inspect_ai import eval as inspect_eval
@@ -184,22 +187,46 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     _enforce_budget(run_id, spec)
 
 
+# Transcript retention (DESIGN §8/§13). Default sampling rate when a RunSpec doesn't set one — unset
+# ⇒ keep all (dev/tests); the cluster sets e.g. 0.2 to sample-by-default. Failures are always kept.
+TRANSCRIPT_SAMPLE_RATE = (lambda v: float(v) if v else None)(os.environ.get("EVAL_ENGINE_TRANSCRIPT_SAMPLE_RATE"))
+
+
+def _hash01(s: str) -> float:
+    """Deterministic [0,1) hash of a sample id — stable sampling (the same sample is always in/out)."""
+    return int(hashlib.sha256(s.encode()).hexdigest()[:8], 16) / 0x100000000
+
+
+def _keep_transcript(spec: RunSpec, sample_id: str, passed: int) -> bool:
+    """Retention decision (DESIGN §13): always keep failures; keep a deterministic fraction of passes."""
+    rate = spec.transcript_sample_rate if spec.transcript_sample_rate is not None else TRANSCRIPT_SAMPLE_RATE
+    if rate is None or rate >= 1.0:
+        return True
+    return passed == 0 or _hash01(sample_id) < rate
+
+
 def _put_transcript(run_id: str, sample_id: str, payload: dict) -> str:
-    """Persist a transcript; return its URI. GCS (gs://…) in-cluster, local file in dev."""
-    body = json.dumps(payload, ensure_ascii=False)
-    uri = (f"gs://{GCS_BUCKET}/runs/{run_id}/transcripts/{sample_id}.json" if GCS_BUCKET
-           else str(TRANSCRIPTS / run_id / f"{sample_id}.json"))  # prod: .json.zst
-    storage.write_text(uri, body)
+    """Persist a zstd-compressed transcript; return its URI. GCS (gs://…) in-cluster, local in dev."""
+    body = zstandard.ZstdCompressor().compress(json.dumps(payload, ensure_ascii=False).encode())
+    uri = (f"gs://{GCS_BUCKET}/runs/{run_id}/transcripts/{sample_id}.json.zst" if GCS_BUCKET
+           else str(TRANSCRIPTS / run_id / f"{sample_id}.json.zst"))
+    storage.write_bytes(uri, body)
     return uri
 
 
 def get_transcript(uri: str) -> str | None:
-    """Read back a transcript by URI (gs://<our-bucket>/… or a local path). For the dashboard drill-in."""
+    """Read back a transcript by URI (gs://<our-bucket>/… or a local path). For the dashboard drill-in.
+    Transparently decompresses ``.zst`` (current format); plain ``.json`` (legacy) is returned as-is."""
     if uri.startswith("gs://"):
         bucket = uri[len("gs://"):].partition("/")[0]
         if not GCS_BUCKET or bucket != GCS_BUCKET:  # only ever serve our own bucket
             return None
-    return storage.read_text(uri) if storage.exists(uri) else None
+    if not storage.exists(uri):
+        return None
+    raw = storage.read_bytes(uri)
+    if uri.endswith(".zst"):
+        raw = zstandard.ZstdDecompressor().decompress(raw)
+    return raw.decode()
 
 
 def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:
@@ -245,14 +272,16 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         # — distinct from a low score. A non-empty error_type routes the sample to retry (`_settle_result`).
         err = getattr(s, "error", None)
         error_type = str(getattr(err, "message", err))[:200] if err else ""
-        # Don't waste a transcript write on a to-be-retried sample; the retry writes its own.
-        uri = "" if error_type else _put_transcript(
+        passed = 1 if primary >= 0.5 else 0
+        # No transcript for a to-be-retried sample (the retry writes its own); otherwise keep it per
+        # the retention policy (always failures, a sampled fraction of passes — DESIGN §13).
+        uri = _put_transcript(
             run_id, sid,
             {"input": str(s.input), "output": completion, "target": str(s.target),
              "scores": score_vals, "eval_log_uri": eval_log_uri},  # for the Inspect viewer deep-link
-        )
+        ) if (not error_type and _keep_transcript(spec, sid, passed)) else ""
         out[sid] = {
-            "passed": 1 if primary >= 0.5 else 0,
+            "passed": passed,
             "primary_score": primary,
             "scores": score_vals,
             "tokens_in": tokens_in,

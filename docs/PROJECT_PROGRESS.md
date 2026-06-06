@@ -185,8 +185,17 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   (`test_storage.py`, local fs) + in-cluster (a real gateway run writes/reads its transcript over
   `gs://` and the dataset snapshot lands in `gs://…/datasets/`).
 
-- [ ] **15. Transcript retention: sample-by-default + zstd + tiering.** §8/§13. Today: plain-JSON,
-  keep-all, no zstd, no stratified sampling, no storage-class tiering.
+- [x] **15. Transcript retention: sample-by-default + zstd + tiering.** §8/§13. *Done (2026-06-05):*
+  **(zstd)** transcripts are written zstd-compressed as `…/<sample>.json.zst`; `get_transcript`
+  transparently decompresses (legacy `.json` still served). **(stratified sampling)**
+  `runner._keep_transcript` keeps **all failing** samples (what you debug) plus a **deterministic
+  fraction of passes** (`_hash01(sample_id) < rate`, stable in/out); rate from
+  `RunSpec.transcript_sample_rate` → else `EVAL_ENGINE_TRANSCRIPT_SAMPLE_RATE` env (unset ⇒ keep all,
+  so dev/tests are unchanged; the worker Deployment sets **0.25** = sample-by-default). **(tiering)**
+  a GCS lifecycle on the bucket cools `runs/` + `eval-logs/` to **NEARLINE at 30d, COLDLINE at 90d**
+  (added to `deploy/terraform/main.tf`, applied + verified live). Tested (`test_transcripts.py`:
+  retention policy + zstd round-trip) + in-cluster (`.json.zst` written to `gs://` and read back;
+  `rate=0` keeps only failures).
 
 - [ ] **16. HA for stateful backends.** ClickHouse & Redis are single pods (acknowledged in
   `DEPLOYMENT.md`); CH insert is synchronous, not async-insert + durable ack.

@@ -23,6 +23,8 @@ dependencies = [
   # object storage via a single fsspec interface (DESIGN §4): no native cloud SDK in app code, so the
   # store is swappable by URI scheme. The gs:// driver (gcsfs) ships in the [gcs] extra (cluster only).
   "fsspec",
+  # zstd compression for stored transcripts (DESIGN §13 retention)
+  "zstandard",
 ]
 
 [project.optional-dependencies]

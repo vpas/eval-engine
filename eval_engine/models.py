@@ -69,6 +69,11 @@ class RunSpec(BaseModel):
     # retries nor inflates failed_samples; DESIGN §8). None = uncapped. The canonical form is the
     # gateway's own per-run_id reject (deferred "A5"); this enforces the same semantics control-side.
     budget_usd: float | None = None
+    # Transcript retention (DESIGN §8/§13). Fraction of *passing* samples whose transcript is kept;
+    # failing samples are always kept (stratified — failures are what you debug). None ⇒ fall back to
+    # the EVAL_ENGINE_TRANSCRIPT_SAMPLE_RATE env (unset ⇒ keep all). Lets large runs sample-by-default
+    # (cap storage) while small/interactive runs keep everything. Stored transcripts are zstd-compressed.
+    transcript_sample_rate: float | None = None
     # Prototype-only convenience: fixed output for the mock model so runs are deterministic
     # and need no API keys. Ignored for real models.
     mock_output: str | None = None
