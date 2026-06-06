@@ -111,7 +111,8 @@ def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = H
 
 @app.get("/runs")
 def list_runs():
-    cols = ["id", "eval", "model", "accuracy", "total", "created_at", "created_by", "status"]
+    cols = ["id", "eval", "eval_version", "model", "accuracy", "total", "cost", "created_at",
+            "created_by", "status", "sweep"]
     return [dict(zip(cols, r)) for r in control.list_runs()]
 
 
@@ -159,8 +160,9 @@ def get_results(run_id: str):
             for gk, c, p, acc in analytics.by_category(run_id)
         ],
         "samples": [
-            {"sample_id": sid, "passed": p, "category": gk, "score": sc, "transcript_uri": uri}
-            for sid, p, gk, sc, uri in analytics.samples(run_id)
+            {"sample_id": sid, "passed": p, "category": gk, "score": sc, "transcript_uri": uri,
+             "tokens": tok, "latency_ms": lat, "error_type": err or ""}
+            for sid, p, gk, sc, uri, tok, lat, err in analytics.samples(run_id)
         ],
     }
 
@@ -237,6 +239,8 @@ def launch_from_eval(eval_id: str, body: LaunchFromEval, bg: BackgroundTasks,
         scorers=[PluginRef(**s) for s in e["default_scorers"]],
         batch_size=body.batch_size, limit=body.limit, epochs=body.epochs,
         budget_usd=body.budget_usd, mock_output=body.mock_output,
+        temperature=body.temperature, seed=body.seed,
+        transcript_sample_rate=body.transcript_sample_rate,
     )
     run_id = runner.launch(spec, created_by=x_auth_request_email)
     control.audit(x_auth_request_email, "run.launch_from_eval", run_id,

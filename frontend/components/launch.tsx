@@ -20,7 +20,10 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
   const [slice, setSlice] = useState<"full" | "subset">("full");
   const [subsetN, setSubsetN] = useState(200);
   const [epochs, setEpochs] = useState(1);
+  const [temp, setTemp] = useState(0);
+  const [seed, setSeed] = useState<string>("");
   const [budget, setBudget] = useState(60);
+  const [keepAll, setKeepAll] = useState(false);
   const [mock, setMock] = useState("Paris");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -47,6 +50,8 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
       for (const m of chosen) {
         const r = await launchFromEval(evalId, {
           model: m, limit, epochs, budget_usd: budget || undefined,
+          temperature: temp || undefined, seed: seed === "" ? undefined : Number(seed),
+          transcript_sample_rate: keepAll ? 1.0 : undefined,
           mock_output: m.startsWith("mockllm") ? mock : undefined,
         });
         ids.push(r.run_id);
@@ -143,12 +148,23 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
 
               <Section n="4" title="Sampling & budget" hint="Epochs repeat each sample for CIs; the budget cap is a terminal BudgetExceeded signal.">
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 420 }}>
-                  <div className="field"><label>Epochs</label>
+                  <div className="field"><label>Epochs <span className="subtle">(repeat for CIs)</span></label>
                     <input className="input" type="number" min="1" value={epochs} onChange={(e) => setEpochs(Math.max(1, +e.target.value))} />
+                  </div>
+                  <div className="field"><label>Temperature</label>
+                    <input className="input" type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(+e.target.value)} />
+                  </div>
+                  <div className="field"><label>Seed <span className="subtle">(optional)</span></label>
+                    <input className="input" type="number" placeholder="—" value={seed} onChange={(e) => setSeed(e.target.value)} />
                   </div>
                   <div className="field"><label>Budget cap ($)</label>
                     <input className="input" type="number" value={budget} onChange={(e) => setBudget(+e.target.value)} />
                   </div>
+                </div>
+                <div className="vcenter gap8" style={{ marginTop: 12 }}>
+                  <span className={`switch ${keepAll ? "on" : ""}`} onClick={() => setKeepAll((k) => !k)} />
+                  <span style={{ fontSize: 12 }}>{keepAll ? "keep all transcripts" : "sample-by-default retention"}</span>
+                  <span className="subtle" style={{ fontSize: 11 }}>{keepAll ? "every transcript persisted" : "all failures + a fraction of passes"}</span>
                 </div>
               </Section>
             </div>

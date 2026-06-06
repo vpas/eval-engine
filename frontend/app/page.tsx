@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Provider, StatusPill } from "@/components/ui";
-import { getRuns, getMe, ago, fmtN, pct, type Run } from "@/lib/api";
+import { getRuns, getMe, ago, fmtCost, fmtN, pct, type Run } from "@/lib/api";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
 
@@ -100,7 +100,7 @@ export default function Dashboard() {
               <th style={{ width: 30 }}></th>
               <th>Run</th><th>Eval</th><th>Model</th><th>Status</th>
               <th style={{ width: 220 }}>Accuracy</th>
-              <th className="right">Samples</th><th>By</th><th className="right">Age</th>
+              <th className="right">Samples</th><th className="right">Cost</th><th>By</th><th className="right">Age</th>
             </tr>
           </thead>
           <tbody>
@@ -112,12 +112,13 @@ export default function Dashboard() {
                   <td onClick={(e) => { e.stopPropagation(); toggle(r.id); }}>
                     <span className={`chk ${isSel ? "on" : ""}`}>{isSel && <Icon name="check" size={12} />}</span>
                   </td>
-                  <td><span className="linklike mono">{r.id}</span></td>
-                  <td><span className="mono">{r.eval}</span></td>
+                  <td><span className="linklike mono">{r.id}</span>{r.sweep && <span className="badge" style={{ marginLeft: 6 }}>sweep</span>}</td>
+                  <td><span className="mono">{r.eval}</span>{r.eval_version != null && <span className="hash"> @{r.eval_version}</span>}</td>
                   <td><Provider id={r.model} /></td>
                   <td><StatusPill status={r.status || "queued"} /></td>
                   <td>{active ? <span className="mono subtle" style={{ fontSize: 11.5 }}><span className="spin" style={{ marginRight: 6 }} />in progress</span> : <AccBar value={r.accuracy} />}</td>
                   <td className="right num">{fmtN(r.total)}</td>
+                  <td className="right num cellmuted">{fmtCost(r.cost ?? 0)}</td>
                   <td className="cellmuted mono" style={{ fontSize: 11.5 }} title={r.created_by ?? ""}>{(r.created_by ?? "—").split("@")[0]}</td>
                   <td className="right cellmuted mono" style={{ fontSize: 11.5 }}>{ago(r.created_at)}</td>
                 </tr>

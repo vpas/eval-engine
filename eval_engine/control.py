@@ -264,9 +264,11 @@ def update_live(run_id: str, done: int, failed: int, accuracy: float, cost_usd: 
 
 
 def list_runs():
+    # Column order must match api.list_runs() cols. sweep/eval_version/cost_usd surface the
+    # checkpoint-sweep badge, eval@version, and cost on the dashboard runs table.
     return _conn().execute(
-        "SELECT id, eval_id, model, accuracy, total, created_at, created_by, status "
-        "FROM runs ORDER BY created_at DESC"
+        "SELECT id, eval_id, eval_version, model, accuracy, total, cost_usd, created_at, "
+        "created_by, status, sweep FROM runs ORDER BY created_at DESC"
     ).fetchall()
 
 

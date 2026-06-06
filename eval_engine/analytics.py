@@ -110,7 +110,8 @@ def run_summary(run_id: str):
 
 def samples(run_id: str):
     return _q(
-        "SELECT sample_id, passed, group_key, primary_score, transcript_uri "
+        "SELECT sample_id, passed, group_key, primary_score, transcript_uri, "
+        "(tokens_in + tokens_out) AS tokens, latency_ms, error_type "
         "FROM sample_results FINAL WHERE run_id=%(r)s ORDER BY sample_id",
         {"r": run_id},
     )

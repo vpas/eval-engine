@@ -46,6 +46,9 @@ class LaunchFromEval(BaseModel):
     epochs: int = 1
     budget_usd: float | None = None
     mock_output: str | None = None
+    temperature: float | None = None
+    seed: int | None = None
+    transcript_sample_rate: float | None = None   # None ⇒ env default; 1.0 ⇒ keep all transcripts
 
 
 class ModelSpec(BaseModel):

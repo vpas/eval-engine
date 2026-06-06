@@ -208,7 +208,7 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
           </div>
         </div>
         <table className="grid">
-          <thead><tr><th>Sample</th><th>Result</th><th>Category</th><th className="right">Score</th><th></th></tr></thead>
+          <thead><tr><th>Sample</th><th>Result</th><th>Category</th><th className="right">Score</th><th className="right">Tokens</th><th className="right">Latency</th><th>Error</th><th></th></tr></thead>
           <tbody>
             {rows.map((sm) => (
               <tr key={sm.sample_id} className={sm.transcript_uri ? "click" : ""} onClick={() => sm.transcript_uri && onOpen(sm)}>
@@ -216,6 +216,9 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
                 <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
                 <td className="cellmuted">{sm.category || "—"}</td>
                 <td className="right num">{sm.score?.toFixed(2)}</td>
+                <td className="right num cellmuted">{sm.tokens ? fmtN(sm.tokens) : "—"}</td>
+                <td className="right num cellmuted">{sm.latency_ms ? (sm.latency_ms / 1000).toFixed(1) + "s" : "—"}</td>
+                <td>{sm.error_type ? <span className="mono" style={{ color: "var(--attention-fg)", fontSize: 11 }}>{sm.error_type}</span> : <span className="subtle">—</span>}</td>
                 <td className="right">{sm.transcript_uri
                   ? <span className="linklike" style={{ fontSize: 11 }}>view ›</span>
                   : <span className="subtle" style={{ fontSize: 11 }} title="Transcript not retained — sample-by-default retention keeps all failures + a fraction of passes (DESIGN §13).">not kept</span>}</td>

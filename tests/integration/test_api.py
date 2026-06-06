@@ -46,6 +46,8 @@ def test_create_run_lists_and_404(client):
     listed = client.get("/runs").json()
     row = next(x for x in listed if x["id"] == run_id)
     assert row["eval"] == "capitals_qa" and row["created_by"] == "me@x.com"
+    # dashboard columns surfaced by list_runs
+    assert {"eval_version", "cost", "sweep"} <= row.keys()
 
     meta = client.get(f"/runs/{run_id}").json()
     assert meta["eval_id"] == "capitals_qa" and meta["total"] == 3 and "progress" in meta
@@ -80,6 +82,8 @@ def test_results_and_transcript(client):
     assert body["summary"]["samples"] == 3 and body["summary"]["passed"] == 1
     assert len(body["summary"]["accuracy_ci"]) == 2
     assert len(body["samples"]) == 3 and {s["passed"] for s in body["samples"]} == {0, 1}
+    # per-sample tokens/latency/error now surfaced for the run-page sample explorer
+    assert all({"tokens", "latency_ms", "error_type"} <= s.keys() for s in body["samples"])
 
     uri = next(s["transcript_uri"] for s in body["samples"] if s["transcript_uri"])
     t = client.get("/transcript", params={"uri": uri})
@@ -139,6 +143,21 @@ def test_launch_from_registered_eval(client):
     snap = client.get("/datasets/capitals").json()["body"]["snapshot_uri"]
     spec = json.loads(control.get_spec(body["run_id"]))
     assert spec["dataset"] == snap and spec["model"] == "mockllm/model"
+
+
+def test_launch_from_eval_threads_sampling_knobs(client):
+    # the new launch knobs (seed / temperature / transcript_sample_rate) reach the stored RunSpec
+    client.post("/datasets", json={"id": "capitals", "uri": "examples/qa.jsonl"})
+    client.post("/evals", json={"id": "capitals_qa", "dataset": "capitals",
+                                "default_harness": {"type": "single_turn"},
+                                "default_scorers": [{"type": "includes"}]})
+    r = client.post("/evals/capitals_qa/launch", json={
+        "model": "mockllm/model", "epochs": 2, "seed": 7, "temperature": 0.3,
+        "transcript_sample_rate": 1.0})
+    assert r.status_code == 202, r.text
+    spec = json.loads(control.get_spec(r.json()["run_id"]))
+    assert spec["seed"] == 7 and spec["temperature"] == 0.3
+    assert spec["epochs"] == 2 and spec["transcript_sample_rate"] == 1.0
 
 
 def test_launch_from_eval_errors(client):

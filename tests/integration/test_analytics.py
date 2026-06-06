@@ -62,9 +62,10 @@ def test_replacing_merge_tree_higher_attempt_wins():
     n, passed, *_ = analytics.run_summary(run_id)
     assert n == 1, f"duplicate not collapsed by FINAL: n={n}"
     assert passed == 1, "higher attempt (the retry) did not win"
-    # the per-sample slice reflects the winning attempt too
-    sid, p, _gk, score, _uri = analytics.samples(run_id)[0]
+    # the per-sample slice reflects the winning attempt too (now also carries tokens/latency/error)
+    sid, p, _gk, score, _uri, tokens, _lat, _err = analytics.samples(run_id)[0]
     assert (sid, p, score) == ("s0", 1, 1.0), (sid, p, score)
+    assert tokens == 30, tokens  # tokens_in(10) + tokens_out(20) from the _row factory
 
 
 def test_by_category_groups_and_orders():

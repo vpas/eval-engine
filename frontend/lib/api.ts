@@ -3,12 +3,15 @@
 export type Run = {
   id: string;
   eval: string;
+  eval_version?: number;
   model: string;
   accuracy: number | null;
   total: number;
+  cost?: number | null;
   created_at: string;
   created_by: string | null;
   status?: string;
+  sweep?: string | null;
 };
 
 export type RunDetail = {
@@ -40,7 +43,7 @@ export type RunDetail = {
 export type Results = {
   summary: { samples: number; passed: number; accuracy: number; accuracy_ci?: [number, number]; mean_score: number; tokens: number; cost_usd: number };
   by_category: { category: string; n: number; passed: number; accuracy: number }[];
-  samples: { sample_id: string; passed: number; category: string | null; score: number; transcript_uri: string }[];
+  samples: { sample_id: string; passed: number; category: string | null; score: number; transcript_uri: string; tokens?: number; latency_ms?: number; error_type?: string }[];
 };
 
 export type Plugin = { kind: string; name: string; version: string; description: string; primary_metric?: string | null };
@@ -86,7 +89,7 @@ export const launchRun = (spec: LaunchSpec): Promise<{ run_id: string; status: s
 export const rerunRun = (id: string): Promise<{ run_id: string; status: string; rerun_of: string }> => post(`/be/runs/${id}/rerun`);
 export const launchFromEval = (
   evalId: string,
-  body: { model: string; batch_size?: number; limit?: number; epochs?: number; budget_usd?: number; mock_output?: string },
+  body: { model: string; batch_size?: number; limit?: number; epochs?: number; budget_usd?: number; mock_output?: string; temperature?: number; seed?: number; transcript_sample_rate?: number },
 ): Promise<{ run_id: string; status: string; from_eval: string; eval_version: number }> => post(`/be/evals/${evalId}/launch`, body);
 
 // --- training monitor (docs/TRAINING_MONITOR.md) -----------------------------------------------
