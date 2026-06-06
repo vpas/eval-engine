@@ -1,7 +1,7 @@
 # Multi-stage Next.js (standalone output) → tiny Node runtime image.
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* .npmrc* ./
 RUN npm ci 2>/dev/null || npm install
 
 FROM node:22-alpine AS build
