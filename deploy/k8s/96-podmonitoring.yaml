@@ -1,0 +1,16 @@
+# Tell Google Managed Prometheus to scrape LiteLLM's /metrics. The PodMonitoring CRD ships with
+# GKE managed collection (already enabled — terraform managed_prometheus). Once applied, the gateway
+# series (litellm_*) are queryable through the GMP frontend → the "Model Gateway" dashboard.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: litellm
+  namespace: eval-engine
+  labels: { app: litellm }
+spec:
+  selector:
+    matchLabels: { app: litellm }
+  endpoints:
+    - port: http        # container port 4000
+      path: /metrics
+      interval: 30s

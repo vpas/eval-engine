@@ -35,6 +35,7 @@ data:
       drop_params: true
       num_retries: 0          # fail fast: over-limit → 429 immediately, don't retry/cooldown-wait (would hang)
       request_timeout: 20
+      callbacks: ["prometheus"]   # expose /metrics on :4000 (QPS/latency/tokens/spend) → scraped by GMP (96-podmonitoring.yaml)
     router_settings:
       # usage-based-routing-v2 + redis = distributed (cross-replica) usage tracking; pre-call checks
       # filter a deployment that is over its rpm/tpm BEFORE routing → over-limit returns HTTP 429.

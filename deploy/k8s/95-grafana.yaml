@@ -1,0 +1,200 @@
+# Grafana — the time-series / historical observability layer (complement to the in-app Ops tab's
+# live snapshot, docs/OPS_DASHBOARD.md). Everything is provisioned as code: three datasources
+# (ClickHouse, Neon Postgres, GMP Prometheus) and a file-provider that loads the rendered dashboard
+# JSON (ConfigMap `grafana-dashboards`, produced by `deploy/grafana` → `make render`).
+#
+# Auth: no login. It sits behind oauth2-proxy at /grafana (see 61-oauth2-proxy.yaml) and trusts the
+# forwarded X-Auth-Request-Email via Grafana's auth-proxy, so the existing Google OIDC gate covers it.
+---
+# Dashboard provider: load every JSON under /var/lib/grafana/dashboards into an "Eval Engine" folder.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: eval-engine
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: eval-engine
+        orgId: 1
+        folder: Eval Engine
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+# Init script: parse the Neon DSN (single string in the eval-pg secret) into a Grafana datasource
+# provisioning file. ClickHouse + GMP Prometheus have no secrets, so all three are emitted here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-ds-render
+  namespace: eval-engine
+data:
+  render.py: |
+    import os, urllib.parse as up
+    u = up.urlparse(os.environ["EVAL_ENGINE_PG_DSN"])
+    ch_host = os.environ.get("EVAL_ENGINE_CH_HOST", "clickhouse")
+    ch_port = os.environ.get("EVAL_ENGINE_CH_PORT", "8123")
+    prom = os.environ.get("EVAL_ENGINE_PROM_URL", "http://gmp-frontend:9090")
+    pg_url = f"{u.hostname}:{u.port or 5432}"
+    out = f"""apiVersion: 1
+    datasources:
+      - name: ClickHouse
+        uid: ee-clickhouse
+        type: grafana-clickhouse-datasource
+        access: proxy
+        isDefault: true
+        jsonData:
+          protocol: http
+          host: {ch_host}
+          port: {ch_port}
+          username: default
+          defaultDatabase: default
+      - name: Postgres
+        uid: ee-postgres
+        type: grafana-postgresql-datasource
+        access: proxy
+        url: {pg_url}
+        user: {up.unquote(u.username or '')}
+        jsonData:
+          database: {(u.path or '/').lstrip('/')}
+          sslmode: require
+          postgresVersion: 1500
+        secureJsonData:
+          password: {up.unquote(u.password or '')}
+      - name: Prometheus (GMP)
+        uid: ee-prometheus
+        type: prometheus
+        access: proxy
+        url: {prom}
+        jsonData:
+          httpMethod: POST
+    """
+    open("/etc/grafana/provisioning/datasources/datasources.yaml", "w").write(out)
+    print("wrote datasources.yaml ->", pg_url, ch_host, prom)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: eval-engine
+  labels: { app: grafana }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: grafana } }
+  template:
+    metadata:
+      labels: { app: grafana }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      securityContext: { fsGroup: 472, runAsUser: 472 }
+      initContainers:
+        - name: render-datasources
+          image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
+          command: ["python", "/render/render.py"]
+          env:
+            - name: EVAL_ENGINE_PG_DSN
+              valueFrom: { secretKeyRef: { name: eval-pg, key: dsn } }
+            - { name: EVAL_ENGINE_CH_HOST, value: clickhouse }
+            - { name: EVAL_ENGINE_CH_PORT, value: "8123" }
+            - { name: EVAL_ENGINE_PROM_URL, value: "http://gmp-frontend:9090" }
+          volumeMounts:
+            - { name: render, mountPath: /render }
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources }
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - { name: GF_SERVER_ROOT_URL, value: "https://35-202-212-111.nip.io/grafana" }
+            - { name: GF_SERVER_SERVE_FROM_SUB_PATH, value: "true" }
+            - { name: GF_INSTALL_PLUGINS, value: "grafana-clickhouse-datasource" }
+            # Auth: trust oauth2-proxy's forwarded identity; no Grafana login screen.
+            - { name: GF_AUTH_PROXY_ENABLED, value: "true" }
+            - { name: GF_AUTH_PROXY_HEADER_NAME, value: "X-Auth-Request-Email" }
+            - { name: GF_AUTH_PROXY_HEADER_PROPERTY, value: "email" }
+            - { name: GF_AUTH_PROXY_AUTO_SIGN_UP, value: "true" }
+            - { name: GF_AUTH_PROXY_HEADERS, value: "Email:X-Auth-Request-Email" }
+            - { name: GF_USERS_ALLOW_SIGN_UP, value: "false" }
+            - { name: GF_USERS_AUTO_ASSIGN_ORG_ROLE, value: "Editor" }
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false" }
+            # admin (break-glass; auth-proxy is the normal path)
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: grafana, key: admin-password, optional: true } }
+          volumeMounts:
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources }
+            - { name: provider, mountPath: /etc/grafana/provisioning/dashboards }
+            - { name: dashboards, mountPath: /var/lib/grafana/dashboards }
+            - { name: storage, mountPath: /var/lib/grafana }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /robots.txt, port: 3000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - { name: render, configMap: { name: grafana-ds-render } }
+        - { name: provider, configMap: { name: grafana-dashboard-provider } }
+        - { name: dashboards, configMap: { name: grafana-dashboards, optional: true } }
+        - { name: datasources, emptyDir: {} }
+        - { name: storage, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: eval-engine
+spec:
+  selector: { app: grafana }
+  ports:
+    - { name: http, port: 3000, targetPort: 3000 }
+---
+# GMP query frontend: a PromQL endpoint over Google Managed Prometheus. Grafana's Prometheus
+# datasource points here. Auth uses the node SA's ADC, which needs roles/monitoring.viewer
+# (see docs/OBSERVABILITY.md §GMP). project-id is this GCP project.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gmp-frontend
+  namespace: eval-engine
+  labels: { app: gmp-frontend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gmp-frontend } }
+  template:
+    metadata:
+      labels: { app: gmp-frontend }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      containers:
+        - name: frontend
+          image: gke.gcr.io/prometheus-engine/frontend:v0.8.2-gke.0
+          args:
+            - "--web.listen-address=:9090"
+            - "--query.project-id=eval-engine"
+          ports:
+            - { name: web, containerPort: 9090 }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9090 }
+            initialDelaySeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gmp-frontend
+  namespace: eval-engine
+spec:
+  selector: { app: gmp-frontend }
+  ports:
+    - { name: web, port: 9090, targetPort: 9090 }

@@ -28,6 +28,7 @@ session: open it, pick the top unchecked item in **Open v1 gaps**, build it, che
 | `docs/ALTERNATIVES.md` | Approaches evaluated and rejected (and reversed decisions). |
 | `docs/DEVELOPMENT.md` | Local dev setup (Postgres + ClickHouse stand-ins, test suite). |
 | `docs/OPS_DASHBOARD.md` | Operational dashboard: system-health probes, PG heartbeats, GCP Log Explorer links. |
+| `docs/OBSERVABILITY.md` | Grafana dashboards-as-code (grafonnet): the time-series layer over ClickHouse + Postgres + GMP. |
 
 ## Code map (`eval_engine/`)
 
