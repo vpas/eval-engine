@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
@@ -118,69 +118,146 @@ export default function RunPage() {
 function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: (s: Results["samples"][number]) => void }) {
   const s = res.summary;
   const ci = s.accuracy_ci;
-  const maxCat = Math.max(0.0001, ...res.by_category.map((c) => c.accuracy));
+  const [filter, setFilter] = useState<"all" | "fail" | "pass">("all");
+  const [cat, setCat] = useState("all");
+  const [q, setQ] = useState("");
+  const [minScore, setMinScore] = useState(0);
+
+  const cats = ["all", ...Array.from(new Set(res.by_category.map((c) => c.category || "—")))];
+  const failCount = res.samples.filter((r) => !r.passed).length;
+  const rows = res.samples.filter((r) => {
+    if (filter === "fail" && r.passed) return false;
+    if (filter === "pass" && !r.passed) return false;
+    if (cat !== "all" && (r.category || "—") !== cat) return false;
+    if ((r.score ?? 0) < minScore) return false;
+    if (q && !`${r.sample_id}${r.category ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false;
+    return true;
+  });
+  // score histogram over the retained sample rows (20 bins)
+  const hist = useMemo(() => {
+    const bins = new Array(20).fill(0);
+    for (const r of res.samples) bins[Math.min(19, Math.max(0, Math.floor((r.score ?? 0) * 20)))]++;
+    return bins;
+  }, [res.samples]);
+
   return (
     <>
       <div className="stat-row" style={{ marginBottom: 16 }}>
         <div className="stat">
           <div className="k"><Icon name="target" className="ic" />accuracy</div>
           <div className="v" style={{ color: "var(--success)" }}>{pct(s.accuracy)}%</div>
-          <div className="d"><span className="subtle mono">{ci ? `95% CI ${(ci[0] * 100).toFixed(1)}–${(ci[1] * 100).toFixed(1)}%` : `${s.passed}/${s.samples} passed`}</span></div>
+          <div className="d"><span className="subtle mono">{fmtN(s.passed)}/{fmtN(s.samples)} passed</span></div>
+          {ci && (
+            <div style={{ marginTop: 10 }}>
+              <CIBar lo={ci[0]} hi={ci[1]} acc={s.accuracy} />
+              <div className="subtle mono" style={{ fontSize: 10.5, marginTop: 2 }}>95% CI [{(ci[0] * 100).toFixed(1)}%, {(ci[1] * 100).toFixed(1)}%]</div>
+            </div>
+          )}
         </div>
-        <div className="stat">
-          <div className="k"><Icon name="check" className="ic" />passed</div>
-          <div className="v">{fmtN(s.passed)}<span className="subtle" style={{ fontSize: 13 }}> / {fmtN(s.samples)}</span></div>
-          <div className="d"><span className="subtle mono">mean score {s.mean_score?.toFixed(3)}</span></div>
-        </div>
-        <div className="stat">
-          <div className="k"><Icon name="layers" className="ic" />tokens</div>
-          <div className="v">{fmtN(s.tokens)}</div>
-          <div className="d"><span className="subtle">in + out</span></div>
-        </div>
-        <div className="stat">
-          <div className="k"><Icon name="dollar" className="ic" />cost</div>
-          <div className="v">{fmtCost(s.cost_usd ?? run.cost_usd ?? 0)}</div>
-          <div className="d"><span className="subtle">catalog price</span></div>
-        </div>
+        <MetricTile k="mean score" icon="slice" v={s.mean_score?.toFixed(3) ?? "—"} sub={`${res.by_category.length} categories`} />
+        <MetricTile k="tokens" icon="layers" v={fmtN(s.tokens)} sub="in + out" />
+        <MetricTile k="cost" icon="dollar" v={fmtCost(s.cost_usd ?? run.cost_usd ?? 0)} sub={`${run.harness ?? ""} · catalog price`} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16 }}>
-        <div className="panel flush">
-          <div className="panel-h"><Icon name="chart" className="ic" /><h2>Accuracy by category</h2></div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div className="panel">
+          <div className="panel-h"><Icon name="chart" className="ic" /><h2>Accuracy by category</h2><span className="grow" /><span className="sub mono">{res.by_category.length} slices</span></div>
           <div className="panel-b">
-            {res.by_category.length === 0 && <Empty icon="chart">No category breakdown.</Empty>}
-            <div className="bars">
-              {res.by_category.map((c) => (
-                <div key={c.category} className="bar-row">
-                  <span className="lbl">{c.category || "—"}</span>
-                  <div className="bar-track"><div className="bar-fill success" style={{ width: (c.accuracy / maxCat) * 100 + "%" }} /></div>
-                  <span className="pct">{pct(c.accuracy)}% <span className="subtle">· {c.n}</span></span>
-                </div>
-              ))}
+            {res.by_category.length === 0 ? <Empty icon="chart">No category breakdown.</Empty> : (
+              <div className="bars">
+                {res.by_category.slice().sort((a, b) => b.accuracy - a.accuracy).map((c) => (
+                  <div className="bar-row" key={c.category} style={{ cursor: "pointer" }} onClick={() => { setCat(c.category || "—"); setFilter("all"); }}>
+                    <span className="lbl">{c.category || "—"}</span>
+                    <div className="bar-track"><div className={"bar-fill" + (c.accuracy >= 0.8 ? " success" : "")} style={{ width: pct(c.accuracy) + "%" }} /></div>
+                    <span className="pct">{pct(c.accuracy)}% <span className="subtle">· {c.n}</span></span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel-h"><Icon name="gauge" className="ic" /><h2>Score distribution</h2></div>
+          <div className="panel-b">
+            <Histogram bins={hist} />
+            <div className="between" style={{ marginTop: 8, fontSize: 11 }}>
+              <span className="subtle mono">0.0</span><span className="subtle">score</span><span className="subtle mono">1.0</span>
             </div>
           </div>
         </div>
+      </div>
 
-        <div className="panel flush">
-          <div className="panel-h"><Icon name="list" className="ic" /><h2>Samples</h2><span className="grow" /><span className="sub mono">{res.samples.length}</span></div>
-          <table className="grid">
-            <thead><tr><th>Sample</th><th>Result</th><th>Category</th><th className="right">Score</th><th></th></tr></thead>
-            <tbody>
-              {res.samples.map((sm) => (
-                <tr key={sm.sample_id} className={sm.transcript_uri ? "click" : ""} onClick={() => sm.transcript_uri && onOpen(sm)}>
-                  <td className="mono">{sm.sample_id}</td>
-                  <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
-                  <td className="cellmuted">{sm.category || "—"}</td>
-                  <td className="right num">{sm.score?.toFixed(2)}</td>
-                  <td className="right">{sm.transcript_uri ? <span className="linklike" style={{ fontSize: 11 }}>view →</span> : <span className="subtle" style={{ fontSize: 11 }}>—</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {res.samples.length === 0 && <Empty icon="list">No sampled transcripts retained.</Empty>}
+      {/* full-width sample explorer */}
+      <div className="panel flush">
+        <div className="panel-h"><Icon name="list" className="ic" /><h2>Sample explorer</h2><span className="grow" /><span className="sub mono">{rows.length} shown</span></div>
+        <div className="panel-b" style={{ borderBottom: "1px solid var(--border)" }}>
+          <div className="filterbar">
+            <div className="fsearch" style={{ maxWidth: 240 }}><Icon name="search" className="ic" /><input placeholder="sample id / category…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+            <div className="seg">
+              <button className={filter === "all" ? "on" : ""} onClick={() => setFilter("all")}>all <span className="subtle">{res.samples.length}</span></button>
+              <button className={filter === "fail" ? "on" : ""} onClick={() => setFilter("fail")} style={filter === "fail" ? { color: "var(--danger)" } : undefined}>failures <span className="subtle">{failCount}</span></button>
+              <button className={filter === "pass" ? "on" : ""} onClick={() => setFilter("pass")}>passes</button>
+            </div>
+            <select className="input" style={{ width: "auto", fontFamily: "var(--mono)" }} value={cat} onChange={(e) => setCat(e.target.value)}>
+              {cats.map((c) => <option key={c} value={c}>{c === "all" ? "all categories" : c}</option>)}
+            </select>
+            <div className="vcenter gap8" style={{ marginLeft: "auto" }}>
+              <span className="subtle" style={{ fontSize: 11.5 }}>min score {minScore.toFixed(1)}</span>
+              <input type="range" min="0" max="1" step="0.1" value={minScore} onChange={(e) => setMinScore(+e.target.value)} style={{ width: 110, accentColor: "var(--accent)" }} />
+            </div>
+          </div>
         </div>
+        <table className="grid">
+          <thead><tr><th>Sample</th><th>Result</th><th>Category</th><th className="right">Score</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((sm) => (
+              <tr key={sm.sample_id} className={sm.transcript_uri ? "click" : ""} onClick={() => sm.transcript_uri && onOpen(sm)}>
+                <td className="mono">{sm.sample_id}</td>
+                <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
+                <td className="cellmuted">{sm.category || "—"}</td>
+                <td className="right num">{sm.score?.toFixed(2)}</td>
+                <td className="right">{sm.transcript_uri ? <span className="linklike" style={{ fontSize: 11 }}>view ›</span> : <span className="subtle" style={{ fontSize: 11 }}>—</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && <Empty icon="filter">No samples match these filters.</Empty>}
       </div>
     </>
+  );
+}
+
+function MetricTile({ k, v, sub, icon }: { k: string; v: string; sub: string; icon: string }) {
+  return (
+    <div className="stat">
+      <div className="k"><Icon name={icon} className="ic" />{k}</div>
+      <div className="v">{v}</div>
+      <div className="d"><span className="subtle">{sub}</span></div>
+    </div>
+  );
+}
+
+function CIBar({ lo, hi, acc }: { lo: number; hi: number; acc: number }) {
+  return (
+    <div className="cibar">
+      <div className="axis" />
+      {[0, 0.25, 0.5, 0.75, 1].map((t) => <div key={t} className="tick" style={{ left: t * 100 + "%" }} />)}
+      <div className="range" style={{ left: lo * 100 + "%", width: (hi - lo) * 100 + "%" }} />
+      <div className="point" style={{ left: acc * 100 + "%" }} />
+    </div>
+  );
+}
+
+function Histogram({ bins }: { bins: number[] }) {
+  const max = Math.max(...bins) || 1;
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 110 }}>
+      {bins.map((b, i) => {
+        const t = i / bins.length;
+        const color = t < 0.4 ? "var(--danger)" : t < 0.7 ? "var(--attention)" : "var(--success)";
+        return <div key={i} title={`${t.toFixed(2)}–${(t + 0.05).toFixed(2)}: ${b}`} style={{ flex: 1, height: Math.max(2, (b / max) * 100) + "%", background: color, opacity: 0.55, borderRadius: "2px 2px 0 0" }} />;
+      })}
+    </div>
   );
 }
 
