@@ -1,187 +1,245 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { getRun, getResults, getTranscript, rerunRun, type RunDetail, type Results } from "@/lib/api";
-import { StatusPill, fmtCost } from "@/components/ui";
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { Icon } from "@/components/icons";
+import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
+import {
+  getRun, getResults, getTranscript, rerunRun, ago, fmtCost, fmtN, pct,
+  type RunDetail, type Results,
+} from "@/lib/api";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
 
-export default function RunDetailPage({ params }: { params: { id: string } }) {
-  const id = params.id;
+export default function RunPage() {
+  const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [run, setRun] = useState<RunDetail | null>(null);
   const [res, setRes] = useState<Results | null>(null);
-  const [open, setOpen] = useState<{ sid: string; uri: string } | null>(null);
-  const [rerunning, setRerunning] = useState(false);
-
-  const doRerun = useCallback(() => {
-    setRerunning(true);
-    rerunRun(id)
-      .then((r) => router.push(`/runs/${r.run_id}`))
-      .catch(() => setRerunning(false));
-  }, [id, router]);
-
-  const refresh = useCallback(() => {
-    getRun(id).then(setRun).catch(() => {});
-    getResults(id).then(setRes).catch(() => {});
-  }, [id]);
+  const [openSample, setOpenSample] = useState<Results["samples"][number] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    refresh();
-    const t = setInterval(() => {
-      getRun(id).then((r) => {
+    let stop = false;
+    const load = async () => {
+      try {
+        const r = await getRun(id);
+        if (stop) return;
         setRun(r);
-        if (ACTIVE.has(r.status)) getResults(id).then(setRes).catch(() => {});
-        else { getResults(id).then(setRes).catch(() => {}); clearInterval(t); }
-      }).catch(() => {});
-    }, 3000);
-    return () => clearInterval(t);
-  }, [id, refresh]);
+        if (!ACTIVE.has(r.status)) {
+          getResults(id).then((x) => !stop && setRes(x)).catch(() => {});
+        }
+      } catch (e: any) {
+        setErr(String(e?.message || e));
+      }
+    };
+    load();
+    const t = setInterval(load, 2500);
+    return () => { stop = true; clearInterval(t); };
+  }, [id]);
 
-  const su = res?.summary;
-  const active = run ? ACTIVE.has(run.status) : false;
-  const p = run?.progress ?? {};
-  const total = run?.total ?? 0;
-  const seg = (n: number) => (total ? `${(n / total) * 100}%` : "0%");
+  if (err) return <div className="page"><Empty icon="warn">{err}</Empty></div>;
+  if (!run) return <div className="page"><Empty icon="pulse"><span className="spin" /> loading run…</Empty></div>;
+
+  const isActive = ACTIVE.has(run.status);
+  const p = run.progress || {};
+
+  const rerun = async () => {
+    const r = await rerunRun(id);
+    router.push(`/runs/${r.run_id}`);
+  };
 
   return (
-    <main>
-      <Link href="/" className="back">‹ all runs</Link>
+    <div className="page wide">
+      <button className="btn ghost sm" onClick={() => router.push("/")} style={{ marginBottom: 14 }}><Icon name="arrowleft" />all runs</button>
 
-      <div className="panel" style={{ padding: 18 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-          <span className="mono" style={{ fontSize: 18, color: "var(--signal)", fontWeight: 600 }}>{id}</span>
-          {run && <StatusPill status={run.status} />}
-          <span style={{ flex: 1 }} />
-          {run && (
-            <button className="btn" onClick={doRerun} disabled={rerunning}
-                    title="Clone this run's spec → a new run with identical pinned inputs">
-              {rerunning ? "re-running…" : "↻ re-run"}
-            </button>
-          )}
-          {run && <span className="tag">{run.eval_id}</span>}
-          {run && <span className="mono muted" style={{ fontSize: 13 }}>{run.model}</span>}
-        </div>
-        {active && run && (
-          <div style={{ marginTop: 16 }}>
-            <div className="progress" style={{ height: 10 }}>
-              <span className="done" style={{ width: seg(p.done || 0) }} />
-              <span className="fail" style={{ width: seg(p.failed || 0) }} />
-              <span className="run" style={{ width: seg(p.running || 0) }} />
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <div className="panel-b">
+          <div className="between wrap" style={{ gap: 12 }}>
+            <div className="vcenter gap12 wrap">
+              <span className="mono linklike" style={{ fontSize: 18, fontWeight: 600 }}>{run.id}</span>
+              <StatusPill status={run.status} />
+              <span className="tag b"><Icon name="flask" size={12} />{run.eval_id} <span className="hash">@{run.eval_version}</span></span>
+              <Provider id={run.model} />
             </div>
-            <div className="mono dim" style={{ fontSize: 11, marginTop: 6 }}>
-              {p.done || 0} done · {p.running || 0} running · {p.queued || 0} queued · {p.failed || 0} failed / {total}
+            <div className="vcenter gap8">
+              {!isActive && (
+                <>
+                  <button className="btn sm" onClick={() => router.push(`/compare?ids=${run.id}`)}><Icon name="compare" />Compare</button>
+                  <button className="btn sm" onClick={rerun}><Icon name="refresh" />Re-run</button>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="vcenter gap16 wrap" style={{ marginTop: 12, fontSize: 11.5 }}>
+            <span className="subtle vcenter gap6"><Icon name="user" size={12} />{run.created_by || "—"}</span>
+            <span className="subtle vcenter gap6"><Icon name="clock" size={12} />started {ago(run.created_at)}</span>
+            <span className="subtle vcenter gap6"><Icon name="box" size={12} />{run.lane || "—"} lane</span>
+            <span className="subtle vcenter gap6"><Icon name="layers" size={12} />{fmtN(run.total)} samples</span>
+            {run.image_digest && <span className="subtle vcenter gap6"><Icon name="shield" size={12} />{run.image_digest}</span>}
+            {run.provider_fingerprint && <span className="subtle vcenter gap6 mono"><Icon name="copy" size={12} />{run.provider_fingerprint}</span>}
+          </div>
+        </div>
+
+        {isActive && (
+          <div className="panel-b" style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+            <div className="between" style={{ marginBottom: 8 }}>
+              <span className="eyebrow">live progress</span>
+              <span className="mono subtle" style={{ fontSize: 11 }}><span className="spin" style={{ marginRight: 6 }} />streaming · ledger FOR UPDATE SKIP LOCKED</span>
+            </div>
+            <Progress p={p} total={run.total} />
+            <div className="between" style={{ marginTop: 10 }}>
+              <div className="leg">
+                <span><i style={{ background: "var(--success)" }} />done <b className="num" style={{ color: "var(--fg)" }}>{fmtN(p.done || 0)}</b></span>
+                <span><i style={{ background: "var(--attention)" }} />running <b className="num" style={{ color: "var(--fg)" }}>{p.running || 0}</b></span>
+                <span><i style={{ background: "var(--panel-3)", border: "1px solid var(--border)" }} />queued <b className="num" style={{ color: "var(--fg)" }}>{fmtN(p.queued || 0)}</b></span>
+                <span><i style={{ background: "var(--danger)" }} />failed <b className="num" style={{ color: "var(--fg)" }}>{p.failed || run.failed || 0}</b></span>
+              </div>
+              <span className="num" style={{ fontSize: 13 }}>{pct((p.done || 0) / (run.total || 1))}%</span>
             </div>
           </div>
         )}
       </div>
 
-      <div className="metrics">
-        <Metric k="accuracy" v={su ? `${Math.round(su.accuracy * 100)}%` : "—"} sub={su ? `${su.passed}/${su.samples} passed${su.accuracy_ci ? ` · 95% CI ${Math.round(su.accuracy_ci[0] * 100)}–${Math.round(su.accuracy_ci[1] * 100)}%` : ""}` : ""} big />
-        <Metric k="mean score" v={su ? su.mean_score.toFixed(3) : "—"} />
-        <Metric k="tokens" v={su ? su.tokens.toLocaleString() : "—"} />
-        <Metric k="cost" v={su ? fmtCost(su.cost_usd) : "—"} sub="via gateway" />
-      </div>
-
-      {res && res.by_category.length > 0 && (
-        <div className="panel" style={{ marginBottom: 18 }}>
-          <div className="panel-h"><h2>accuracy by category</h2></div>
-          <div className="bars">
-            {res.by_category.map((c) => (
-              <div className="bar-row" key={c.category || "—"}>
-                <span className="lbl">{c.category || "—"}</span>
-                <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.round(c.accuracy * 100)}%` }} /></div>
-                <span className="pct">{Math.round(c.accuracy * 100)}% <span className="dim">·{c.n}</span></span>
-              </div>
-            ))}
+      {run.status === "failed" && (
+        <div className="panel" style={{ marginBottom: 16, borderColor: "var(--danger-emph)" }}>
+          <div className="panel-b vcenter gap10" style={{ color: "var(--danger)" }}>
+            <Icon name="warn" /><b>Run failed.</b><span className="subtle">{run.failed} samples errored after retries.</span>
           </div>
         </div>
       )}
 
-      <div className="panel">
-        <div className="panel-h"><h2>samples</h2><span style={{ flex: 1 }} /><span className="dim mono" style={{ fontSize: 11 }}>{res ? `${res.samples.length}` : ""}</span></div>
-        {!res && <div className="empty"><span className="spin" /> loading…</div>}
-        {res && res.samples.length === 0 && <div className="empty">no samples yet</div>}
-        {res && res.samples.length > 0 && (
-          <table className="grid">
-            <thead><tr><th>sample</th><th>result</th><th>category</th><th className="right">score</th><th></th></tr></thead>
-            <tbody>
-              {res.samples.map((s) => (
-                <tr key={s.sample_id} onClick={() => s.transcript_uri && setOpen({ sid: s.sample_id, uri: s.transcript_uri })}>
-                  <td className="mono">{s.sample_id}</td>
-                  <td style={{ color: s.passed ? "var(--pass)" : "var(--fail)", fontFamily: "var(--mono)", fontSize: 12 }}>{s.passed ? "● pass" : "○ fail"}</td>
-                  <td className="muted">{s.category || "—"}</td>
-                  <td className="right num">{s.score.toFixed(2)}</td>
-                  <td className="right dim mono" style={{ fontSize: 11 }}>{s.transcript_uri ? "view ›" : ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {!isActive && res && <Analysis run={run} res={res} onOpen={setOpenSample} />}
 
-      {open && <TranscriptDrawer sid={open.sid} uri={open.uri} onClose={() => setOpen(null)} />}
-    </main>
-  );
-}
-
-function Metric({ k, v, sub, big }: { k: string; v: string; sub?: string; big?: boolean }) {
-  return (
-    <div className="metric">
-      <div className="k">{k}</div>
-      <div className="v" style={big ? { color: "var(--signal)", fontSize: 34 } : undefined}>{v}</div>
-      {sub && <div className="sub">{sub}</div>}
+      {openSample && <TranscriptDrawer sample={openSample} onClose={() => setOpenSample(null)} />}
     </div>
   );
 }
 
-function TranscriptDrawer({ sid, uri, onClose }: { sid: string; uri: string; onClose: () => void }) {
-  const [data, setData] = useState<any | null>(null);
+function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: (s: Results["samples"][number]) => void }) {
+  const s = res.summary;
+  const ci = s.accuracy_ci;
+  const maxCat = Math.max(0.0001, ...res.by_category.map((c) => c.accuracy));
+  return (
+    <>
+      <div className="stat-row" style={{ marginBottom: 16 }}>
+        <div className="stat">
+          <div className="k"><Icon name="target" className="ic" />accuracy</div>
+          <div className="v" style={{ color: "var(--success)" }}>{pct(s.accuracy)}%</div>
+          <div className="d"><span className="subtle mono">{ci ? `95% CI ${(ci[0] * 100).toFixed(1)}–${(ci[1] * 100).toFixed(1)}%` : `${s.passed}/${s.samples} passed`}</span></div>
+        </div>
+        <div className="stat">
+          <div className="k"><Icon name="check" className="ic" />passed</div>
+          <div className="v">{fmtN(s.passed)}<span className="subtle" style={{ fontSize: 13 }}> / {fmtN(s.samples)}</span></div>
+          <div className="d"><span className="subtle mono">mean score {s.mean_score?.toFixed(3)}</span></div>
+        </div>
+        <div className="stat">
+          <div className="k"><Icon name="layers" className="ic" />tokens</div>
+          <div className="v">{fmtN(s.tokens)}</div>
+          <div className="d"><span className="subtle">in + out</span></div>
+        </div>
+        <div className="stat">
+          <div className="k"><Icon name="dollar" className="ic" />cost</div>
+          <div className="v">{fmtCost(s.cost_usd ?? run.cost_usd ?? 0)}</div>
+          <div className="d"><span className="subtle">catalog price</span></div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16 }}>
+        <div className="panel flush">
+          <div className="panel-h"><Icon name="chart" className="ic" /><h2>Accuracy by category</h2></div>
+          <div className="panel-b">
+            {res.by_category.length === 0 && <Empty icon="chart">No category breakdown.</Empty>}
+            <div className="bars">
+              {res.by_category.map((c) => (
+                <div key={c.category} className="bar-row">
+                  <span className="lbl">{c.category || "—"}</span>
+                  <div className="bar-track"><div className="bar-fill success" style={{ width: (c.accuracy / maxCat) * 100 + "%" }} /></div>
+                  <span className="pct">{pct(c.accuracy)}% <span className="subtle">· {c.n}</span></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="panel flush">
+          <div className="panel-h"><Icon name="list" className="ic" /><h2>Samples</h2><span className="grow" /><span className="sub mono">{res.samples.length}</span></div>
+          <table className="grid">
+            <thead><tr><th>Sample</th><th>Result</th><th>Category</th><th className="right">Score</th><th></th></tr></thead>
+            <tbody>
+              {res.samples.map((sm) => (
+                <tr key={sm.sample_id} className={sm.transcript_uri ? "click" : ""} onClick={() => sm.transcript_uri && onOpen(sm)}>
+                  <td className="mono">{sm.sample_id}</td>
+                  <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
+                  <td className="cellmuted">{sm.category || "—"}</td>
+                  <td className="right num">{sm.score?.toFixed(2)}</td>
+                  <td className="right">{sm.transcript_uri ? <span className="linklike" style={{ fontSize: 11 }}>view →</span> : <span className="subtle" style={{ fontSize: 11 }}>—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {res.samples.length === 0 && <Empty icon="list">No sampled transcripts retained.</Empty>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function TranscriptDrawer({ sample, onClose }: { sample: Results["samples"][number]; onClose: () => void }) {
+  const [body, setBody] = useState<any>(null);
   const [raw, setRaw] = useState<string>("");
-  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    getTranscript(uri).then((t) => { setRaw(t); try { setData(JSON.parse(t)); } catch { setData(null); } }).catch((e) => setErr(String(e)));
-  }, [uri]);
+    getTranscript(sample.transcript_uri).then((t) => {
+      setRaw(t);
+      try { setBody(JSON.parse(t)); } catch { setBody(null); }
+    }).catch((e) => setRaw(String(e)));
+  }, [sample.transcript_uri]);
 
   return (
     <>
       <div className="scrim" onClick={onClose} />
       <aside className="drawer">
         <div className="drawer-h">
-          <strong style={{ fontFamily: "var(--mono)", fontSize: 13 }}>{sid}</strong>
-          <span style={{ flex: 1 }} />
-          {data?.eval_log_uri && (
-            // The viewer reads gs:// logs server-side; pass the *relative* log name (basename) so the
-            // proxied API URLs carry no `//` (oauth2-proxy would collapse it), and force the server API
-            // (`inspect_server=true`) instead of the browser's direct-fetch path. See view_main.py.
-            <a className="btn" target="_blank"
-               href={`/inspect/?log_file=${encodeURIComponent(String(data.eval_log_uri).split("/").pop() || "")}&inspect_server=true`}>
-              full trace ↗
-            </a>
-          )}
-          <button className="btn ghost" onClick={onClose}>close</button>
+          <Icon name="doc" className="ic" style={{ color: "var(--accent-fg)" }} />
+          <strong style={{ fontSize: 13 }}>Transcript · <span className="mono">{sample.sample_id}</span></strong>
+          <span className="grow" />
+          {body?.eval_log_uri && <a className="btn ghost sm" href="/inspect/" target="_blank" rel="noreferrer"><Icon name="external" size={12} />viewer</a>}
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" /></button>
         </div>
-        {err && <div className="empty" style={{ color: "var(--fail)" }}>{err}</div>}
-        {!err && !raw && <div className="empty"><span className="spin" /> loading transcript…</div>}
-        {data ? (
-          <>
-            <Section title="input" body={String(data.input ?? "")} />
-            <Section title="output" body={String(data.output ?? "")} accent />
-            {data.target != null && <Section title="target" body={String(data.target)} />}
-            {data.scores && <div className="kv"><span className="k">scores</span><span className="v">{JSON.stringify(data.scores)}</span></div>}
-          </>
-        ) : raw && <pre className="code">{raw}</pre>}
+        <div style={{ padding: "14px 16px" }}>
+          {!raw && <Empty icon="doc"><span className="spin" /> loading…</Empty>}
+          {body ? (
+            <>
+              <Msg role="input" body={String(body.input ?? "")} />
+              <Msg role="output" body={String(body.output ?? "")} />
+              <Msg role="target" body={String(body.target ?? "")} />
+              {body.scores && (
+                <div className="panel" style={{ marginTop: 10 }}>
+                  <div className="panel-b">
+                    <div className="eyebrow" style={{ marginBottom: 6 }}>scores</div>
+                    <div className="kv">
+                      {Object.entries(body.scores).map(([k, v]) => (
+                        <span key={k} style={{ display: "contents" }}><span className="k">{k}</span><span className="v">{String(v)}</span></span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            raw && <pre className="code">{raw}</pre>
+          )}
+        </div>
       </aside>
     </>
   );
 }
 
-function Section({ title, body, accent }: { title: string; body: string; accent?: boolean }) {
+function Msg({ role, body }: { role: string; body: string }) {
+  const cls = role === "output" ? "assistant" : role === "input" ? "user" : "system";
   return (
-    <div>
-      <div className="kv" style={{ paddingBottom: 4 }}><span className="k">{title}</span><span /></div>
-      <pre className="code" style={accent ? { borderColor: "var(--signal-dim)" } : undefined}>{body}</pre>
+    <div className={`msg ${cls}`} style={{ marginBottom: 8 }}>
+      <div className="role"><Icon name={role === "output" ? "cpu" : role === "target" ? "target" : "user"} className="ic" />{role}</div>
+      <div className="body">{body || "—"}</div>
     </div>
   );
 }

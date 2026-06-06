@@ -1,194 +1,155 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getRuns, getCatalog, launchRun, getEvals, launchFromEval, type Run, type Plugin, type Entity } from "@/lib/api";
-import { StatusPill, AccuracyBar, ago } from "@/components/ui";
+import { Icon } from "@/components/icons";
+import { AccBar, Empty, Provider, StatusPill } from "@/components/ui";
+import { getRuns, getMe, ago, fmtN, pct, type Run } from "@/lib/api";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
 
-export default function Home() {
+export default function Dashboard() {
   const router = useRouter();
-  const [runs, setRuns] = useState<Run[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [launch, setLaunch] = useState(false);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [me, setMe] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState("all");
+  const [mine, setMine] = useState(false);
+  const [evalF, setEvalF] = useState("all");
+  const [sel, setSel] = useState<string[]>([]);
 
   useEffect(() => {
-    let alive = true;
-    const tick = () => getRuns().then((r) => alive && (setRuns(r), setErr(null))).catch((e) => alive && setErr(String(e)));
-    tick();
-    const t = setInterval(tick, 4000);
-    return () => { alive = false; clearInterval(t); };
+    getMe().then((m) => setMe(m.email)).catch(() => {});
+    const load = () => getRuns().then((r) => { setRuns(r); setLoaded(true); }).catch(() => setLoaded(true));
+    load();
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
   }, []);
 
+  const evalOpts = useMemo(() => ["all", ...Array.from(new Set(runs.map((r) => r.eval)))], [runs]);
+
+  const filtered = runs.filter((r) => {
+    const st = r.status || "";
+    if (status === "active" && !ACTIVE.has(st)) return false;
+    if (status === "completed" && st !== "completed") return false;
+    if (status === "failed" && st !== "failed") return false;
+    if (mine && r.created_by !== me) return false;
+    if (evalF !== "all" && r.eval !== evalF) return false;
+    if (q && !`${r.id}${r.eval}${r.model}${r.created_by ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false;
+    return true;
+  });
+
   const stats = useMemo(() => {
-    if (!runs) return null;
-    const done = runs.filter((r) => r.accuracy != null);
-    const avg = done.length ? done.reduce((a, r) => a + (r.accuracy || 0), 0) / done.length : null;
-    const active = runs.filter((r) => ACTIVE.has(r.status ?? "")).length;
-    const models = new Set(runs.map((r) => r.model)).size;
-    return { total: runs.length, avg, active, models };
+    const active = runs.filter((r) => ACTIVE.has(r.status || "")).length;
+    const done = runs.filter((r) => r.status === "completed" && r.accuracy != null);
+    const avg = done.reduce((a, r) => a + (r.accuracy || 0), 0) / (done.length || 1);
+    const samples = runs.reduce((a, r) => a + (r.total || 0), 0);
+    return { active, avg, samples, count: runs.length };
   }, [runs]);
 
+  const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+
   return (
-    <main>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 16, marginBottom: 22 }}>
+    <div className="page wide">
+      <div className="between" style={{ marginBottom: 18 }}>
         <div>
-          <div className="eyebrow">control plane</div>
-          <h1 style={{ margin: "4px 0 0", fontSize: 26, fontWeight: 600, letterSpacing: "-0.4px" }}>Evaluation Runs</h1>
+          <div className="eyebrow">shared workspace · research</div>
+          <h1 className="title" style={{ marginTop: 4 }}>Dashboard</h1>
         </div>
-        <span style={{ flex: 1 }} />
-        <button className="btn primary" onClick={() => setLaunch(true)}>+ NEW RUN</button>
+        <div className="vcenter gap8">
+          <Link className="btn" href="/compare"><Icon name="compare" />Compare</Link>
+        </div>
       </div>
 
-      <div className="stats">
-        <Stat k="total runs" v={stats ? String(stats.total) : "—"} />
-        <Stat k="avg accuracy" v={stats?.avg != null ? `${Math.round(stats.avg * 100)}%` : "—"} signal />
-        <Stat k="active now" v={stats ? String(stats.active) : "—"} />
-        <Stat k="models" v={stats ? String(stats.models) : "—"} />
+      <div className="stat-row" style={{ marginBottom: 18 }}>
+        <StatTile k="Active runs" icon="pulse" v={String(stats.active)} d={<span className="subtle">{runs.filter((r) => r.status === "running").length} running · {runs.filter((r) => r.status === "queued").length} queued</span>} />
+        <StatTile k="Avg accuracy · completed" icon="target" v={pct(stats.avg) + "%"} signal d={<span className="subtle">{runs.filter((r) => r.status === "completed").length} completed runs</span>} />
+        <StatTile k="Samples · total" icon="layers" v={fmtN(stats.samples)} d={<span className="subtle">across {stats.count} runs</span>} />
+        <StatTile k="Runs" icon="list" v={String(stats.count)} d={<span className="subtle">{runs.filter((r) => r.status === "failed").length} failed</span>} />
       </div>
 
-      <div className="panel">
+      <div className="panel flush">
         <div className="panel-h">
-          <h2>runs</h2>
-          <span style={{ flex: 1 }} />
-          <span className="dim mono" style={{ fontSize: 11 }}>{runs ? `${runs.length} total · auto-refresh 4s` : "loading…"}</span>
+          <Icon name="list" className="ic" />
+          <h2>Runs</h2>
+          <span className="grow" />
+          <span className="sub mono">{filtered.length} of {runs.length}</span>
         </div>
-        {err && <div className="empty" style={{ color: "var(--fail)" }}>error: {err}</div>}
-        {!err && runs && runs.length === 0 && <div className="empty">no runs yet — launch one with “+ NEW RUN”.</div>}
-        {!err && !runs && <div className="empty"><span className="spin" /> loading runs…</div>}
-        {runs && runs.length > 0 && (
-          <table className="grid">
-            <thead>
-              <tr>
-                <th>run</th><th>eval</th><th>model</th><th>status</th><th>accuracy</th>
-                <th className="right">n</th><th>by</th><th className="right">age</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((r) => (
-                <tr key={r.id} onClick={() => router.push(`/runs/${r.id}`)}>
-                  <td className="mono" style={{ color: "var(--signal)" }}>{r.id}</td>
-                  <td>{r.eval}</td>
-                  <td className="mono muted" style={{ fontSize: 12 }}>{r.model}</td>
-                  <td>{r.status ? <StatusPill status={r.status} /> : <span className="dim">—</span>}</td>
-                  <td><AccuracyBar value={r.accuracy} /></td>
-                  <td className="right num">{r.total}</td>
-                  <td className="mono muted" style={{ fontSize: 12 }} title={r.created_by || ""}>{r.created_by ? r.created_by.split("@")[0] : "—"}</td>
-                  <td className="right mono dim" style={{ fontSize: 12 }}>{ago(r.created_at)}</td>
-                </tr>
+        <div className="panel-b" style={{ paddingTop: 11, paddingBottom: 11, borderBottom: "1px solid var(--border)" }}>
+          <div className="filterbar">
+            <div className="fsearch" style={{ maxWidth: 280 }}>
+              <Icon name="search" className="ic" />
+              <input placeholder="filter by id, model, eval, owner…" value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+            <div className="seg">
+              {["all", "active", "completed", "failed"].map((s) => (
+                <button key={s} className={status === s ? "on" : ""} onClick={() => setStatus(s)}>{s}</button>
               ))}
-            </tbody>
-          </table>
-        )}
+            </div>
+            <select className="input" style={{ width: "auto", fontFamily: "var(--mono)" }} value={evalF} onChange={(e) => setEvalF(e.target.value)}>
+              {evalOpts.map((e) => <option key={e} value={e}>{e === "all" ? "all evals" : e}</option>)}
+            </select>
+            <div className={`chip ${mine ? "on" : ""}`} onClick={() => setMine((m) => !m)}><Icon name="user" size={12} />mine</div>
+          </div>
+        </div>
+
+        <table className="grid">
+          <thead>
+            <tr>
+              <th style={{ width: 30 }}></th>
+              <th>Run</th><th>Eval</th><th>Model</th><th>Status</th>
+              <th style={{ width: 220 }}>Accuracy</th>
+              <th className="right">Samples</th><th>By</th><th className="right">Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => {
+              const isSel = sel.includes(r.id);
+              const active = ACTIVE.has(r.status || "");
+              return (
+                <tr key={r.id} className={"click" + (isSel ? " sel" : "")} onClick={() => router.push(`/runs/${r.id}`)}>
+                  <td onClick={(e) => { e.stopPropagation(); toggle(r.id); }}>
+                    <span className={`chk ${isSel ? "on" : ""}`}>{isSel && <Icon name="check" size={12} />}</span>
+                  </td>
+                  <td><span className="linklike mono">{r.id}</span></td>
+                  <td><span className="mono">{r.eval}</span></td>
+                  <td><Provider id={r.model} /></td>
+                  <td><StatusPill status={r.status || "queued"} /></td>
+                  <td>{active ? <span className="mono subtle" style={{ fontSize: 11.5 }}><span className="spin" style={{ marginRight: 6 }} />in progress</span> : <AccBar value={r.accuracy} />}</td>
+                  <td className="right num">{fmtN(r.total)}</td>
+                  <td className="cellmuted mono" style={{ fontSize: 11.5 }} title={r.created_by ?? ""}>{(r.created_by ?? "—").split("@")[0]}</td>
+                  <td className="right cellmuted mono" style={{ fontSize: 11.5 }}>{ago(r.created_at)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {loaded && filtered.length === 0 && <Empty icon="search">No runs match these filters.</Empty>}
+        {!loaded && <Empty icon="list"><span className="spin" /> loading runs…</Empty>}
       </div>
 
-      {launch && <LaunchDrawer onClose={() => setLaunch(false)} onLaunched={(id) => { setLaunch(false); router.push(`/runs/${id}`); }} />}
-    </main>
+      {sel.length > 0 && (
+        <div className="toast" style={{ bottom: 22 }}>
+          <span className="mono"><b>{sel.length}</b> selected</span>
+          <button className="btn sm ghost" onClick={() => setSel([])}>clear</button>
+          <button className="btn sm accent" disabled={sel.length < 2} onClick={() => router.push(`/compare?ids=${sel.join(",")}`)}>
+            <Icon name="compare" size={13} />Compare {sel.length}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
-function Stat({ k, v, signal }: { k: string; v: string; signal?: boolean }) {
-  return <div className="stat"><div className="k">{k}</div><div className={`v${signal ? " signal" : ""}`}>{v}</div></div>;
-}
-
-function LaunchDrawer({ onClose, onLaunched }: { onClose: () => void; onLaunched: (id: string) => void }) {
-  const [cat, setCat] = useState<Plugin[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [mode, setMode] = useState<"adhoc" | "eval">("adhoc");
-  const [evals, setEvals] = useState<Entity[]>([]);
-  const [f, setF] = useState({ eval: "capitals_qa", dataset: "examples/qa.jsonl", model: "openai/meta-llama/llama-3.1-8b-instruct", harness: "single_turn", scorer: "includes", batch_size: 20 });
-  const [ef, setEf] = useState({ evalId: "", model: "mockllm/model", batch_size: 20 });
-
-  useEffect(() => { getCatalog().then(setCat).catch(() => setCat([])); }, []);
-  useEffect(() => { getEvals().then((es) => { setEvals(es); if (es[0]) setEf((s) => ({ ...s, evalId: es[0].id })); }).catch(() => setEvals([])); }, []);
-  const harnesses = cat?.filter((p) => p.kind === "harness") ?? [];
-  const scorers = cat?.filter((p) => p.kind === "scorer") ?? [];
-  const pickedEval = evals.find((e) => e.id === ef.evalId);
-
-  const submit = async () => {
-    setBusy(true); setErr(null);
-    try {
-      let run_id: string;
-      if (mode === "eval") {
-        const body: any = { model: ef.model, batch_size: Number(ef.batch_size) || 20 };
-        if (ef.model.startsWith("mockllm")) body.mock_output = "Paris";
-        ({ run_id } = await launchFromEval(ef.evalId, body));
-      } else {
-        const spec: any = {
-          eval: f.eval, dataset: f.dataset, model: f.model,
-          harness: { type: f.harness },
-          scorers: [{ type: f.scorer, config: { ignore_case: true } }],
-          batch_size: Number(f.batch_size) || 20,
-        };
-        if (f.model.startsWith("mockllm")) spec.mock_output = "Paris";
-        ({ run_id } = await launchRun(spec));
-      }
-      onLaunched(run_id);
-    } catch (e) { setErr(String(e)); setBusy(false); }
-  };
-
+function StatTile({ k, v, d, icon, signal }: { k: string; v: string; d: React.ReactNode; icon: string; signal?: boolean }) {
   return (
-    <>
-      <div className="scrim" onClick={onClose} />
-      <aside className="drawer">
-        <div className="drawer-h">
-          <strong style={{ fontFamily: "var(--mono)", fontSize: 13, letterSpacing: 1, textTransform: "uppercase", color: "var(--muted)" }}>Launch run</strong>
-          <span style={{ flex: 1 }} />
-          <button className="btn ghost" onClick={onClose}>esc</button>
-        </div>
-        <div style={{ padding: 20 }}>
-          <div className="seg" style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-            <button className={`btn ${mode === "adhoc" ? "primary" : "ghost"}`} style={{ flex: 1 }} onClick={() => setMode("adhoc")}>ad-hoc</button>
-            <button className={`btn ${mode === "eval" ? "primary" : "ghost"}`} style={{ flex: 1 }} onClick={() => setMode("eval")}>from registered eval</button>
-          </div>
-          {mode === "eval" ? (
-            <>
-              <div className="field"><label>registered eval</label>
-                {evals.length ? (
-                  <select value={ef.evalId} onChange={(e) => setEf({ ...ef, evalId: e.target.value })}>
-                    {evals.map((e) => <option key={e.id} value={e.id}>{e.id} · v{e.version}</option>)}
-                  </select>
-                ) : <div className="hint">no evals registered yet — register one via POST /evals.</div>}
-                {pickedEval && <span className="hint">dataset <b>{pickedEval.body.dataset}</b> · harness <b>{pickedEval.body.default_harness?.type}</b> · scorers <b>{(pickedEval.body.default_scorers ?? []).map((s: any) => s.type).join(", ")}</b></span>}
-              </div>
-              <div className="row">
-                <div className="field"><label>model</label><input value={ef.model} onChange={(e) => setEf({ ...ef, model: e.target.value })} /><span className="hint">openai/&lt;id&gt; via the gateway · mockllm/model for a dry run</span></div>
-                <div className="field"><label>batch size</label><input type="number" value={ef.batch_size} onChange={(e) => setEf({ ...ef, batch_size: Number(e.target.value) })} /></div>
-              </div>
-              {err && <div style={{ color: "var(--fail)", fontFamily: "var(--mono)", fontSize: 12, marginBottom: 12 }}>{err}</div>}
-              <button className="btn primary" style={{ width: "100%", padding: 12 }} disabled={busy || !ef.evalId} onClick={submit}>
-                {busy ? <><span className="spin" /> launching…</> : "▸ LAUNCH FROM EVAL"}
-              </button>
-            </>
-          ) : (
-          <>
-          <div className="row">
-            <div className="field"><label>eval</label><input value={f.eval} onChange={(e) => setF({ ...f, eval: e.target.value })} /></div>
-            <div className="field"><label>batch size</label><input type="number" value={f.batch_size} onChange={(e) => setF({ ...f, batch_size: Number(e.target.value) })} /></div>
-          </div>
-          <div className="field"><label>dataset</label><input value={f.dataset} onChange={(e) => setF({ ...f, dataset: e.target.value })} /><span className="hint">path bundled in the worker image (e.g. examples/qa.jsonl)</span></div>
-          <div className="field"><label>model</label><input value={f.model} onChange={(e) => setF({ ...f, model: e.target.value })} /><span className="hint">openai/&lt;id&gt; routes via the gateway · mockllm/model for a dry run</span></div>
-          <div className="row">
-            <div className="field"><label>harness</label>
-              <select value={f.harness} onChange={(e) => setF({ ...f, harness: e.target.value })}>
-                {harnesses.map((h) => <option key={h.name} value={h.name}>{h.name}</option>)}
-              </select>
-            </div>
-            <div className="field"><label>scorer</label>
-              <select value={f.scorer} onChange={(e) => setF({ ...f, scorer: e.target.value })}>
-                {scorers.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-              </select>
-            </div>
-          </div>
-          {err && <div style={{ color: "var(--fail)", fontFamily: "var(--mono)", fontSize: 12, marginBottom: 12 }}>{err}</div>}
-          <button className="btn primary" style={{ width: "100%", padding: 12 }} disabled={busy} onClick={submit}>
-            {busy ? <><span className="spin" /> launching…</> : "▸ LAUNCH"}
-          </button>
-          </>
-          )}
-        </div>
-      </aside>
-    </>
+    <div className="stat">
+      <div className="between">
+        <div className="k"><Icon name={icon} className="ic" />{k}</div>
+      </div>
+      <div className="v" style={signal ? { color: "var(--success)" } : undefined}>{v}</div>
+      <div className="d">{d}</div>
+    </div>
   );
 }
