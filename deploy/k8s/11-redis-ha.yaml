@@ -1,0 +1,113 @@
+# HA Redis (#16): a 3-pod StatefulSet, each pod running redis-server + a redis-sentinel sidecar.
+# pod-0 bootstraps as master; pods 1-2 replicate; the 3 Sentinels monitor master "mymaster" and do
+# automatic failover (quorum 2). LiteLLM connects via Sentinel (30-litellm.yaml), so it follows the
+# elected master across a pod/node loss. Configs live on the data PVC so Sentinel's failover rewrites
+# survive restarts. Replaces the single-pod 11-redis.yaml. (Redis state — rate-limit counters + run
+# stop-flags — is soft/rebuildable, so this is availability HA, not durability.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-ha-config
+  namespace: eval-engine
+data:
+  bootstrap.sh: |
+    #!/bin/sh
+    set -e
+    ORD="${HOSTNAME##*-}"
+    # Seed configs onto the writable data dir once; Sentinel rewrites them on failover thereafter.
+    if [ ! -f /data/redis.conf ]; then
+      printf 'port 6379\ndir /data\nappendonly yes\nreplica-announce-ip %s.redis-headless\n' "$HOSTNAME" > /data/redis.conf
+      [ "$ORD" != "0" ] && echo 'replicaof redis-0.redis-headless 6379' >> /data/redis.conf
+    fi
+    if [ ! -f /data/sentinel.conf ]; then
+      printf 'port 26379\ndir /data\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor mymaster redis-0.redis-headless 6379 2\nsentinel down-after-milliseconds mymaster 5000\nsentinel failover-timeout mymaster 10000\nsentinel announce-ip %s.redis-headless\n' "$HOSTNAME" > /data/sentinel.conf
+    fi
+    exit 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: eval-engine
+spec:
+  clusterIP: None
+  selector: { app: redis }
+  publishNotReadyAddresses: true
+  ports:
+    - { name: redis,    port: 6379 }
+    - { name: sentinel, port: 26379 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: eval-engine
+  labels: { app: redis }
+spec:
+  serviceName: redis-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      nodeSelector: { eval-engine/role: system }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: redis } }
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: bootstrap
+          image: redis:7-alpine
+          command: ["sh", "/cfg/bootstrap.sh"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: cfg,  mountPath: /cfg }
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["/data/redis.conf"]
+          command: ["redis-server"]
+          ports: [{ name: redis, containerPort: 6379 }]
+          resources:
+            requests: { cpu: "30m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+        - name: sentinel
+          image: redis:7-alpine
+          args: ["/data/sentinel.conf", "--sentinel"]
+          command: ["redis-sentinel"]
+          ports: [{ name: sentinel, containerPort: 26379 }]
+          resources:
+            requests: { cpu: "20m", memory: "32Mi" }
+            limits:   { memory: "128Mi" }
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: cfg
+          configMap: { name: redis-ha-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 1Gi } }
+---
+# Plain master service for any client that doesn't speak Sentinel (kept for compatibility); points at
+# whichever pod is currently master via the role label Sentinel-aware clients should prefer the
+# Sentinels. Selector matches all redis pods; reads tolerate any, writes need the master (LiteLLM uses
+# Sentinel so it always finds the master).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eval-engine
+spec:
+  selector: { app: redis }
+  ports:
+    - { name: redis,    port: 6379,  targetPort: 6379 }
+    - { name: sentinel, port: 26379, targetPort: 26379 }

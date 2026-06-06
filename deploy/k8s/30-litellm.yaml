@@ -42,8 +42,14 @@ data:
       enable_pre_call_checks: true
       num_retries: 0
       allowed_fails: 0
-      redis_host: os.environ/REDIS_HOST
-      redis_port: os.environ/REDIS_PORT
+      # The HA Redis cluster (11-redis-ha.yaml: 3 replicas + Sentinel auto-failover, verified) backs the
+      # gateway. litellm connects via the stable `redis` Service. NOTE: litellm's router doesn't speak
+      # Sentinel (router.py gates redis on redis_host; RedisCache ignores sentinel_nodes) and only writes
+      # shared usage counters for multi-deployment models, so per-model rpm/tpm caps here fall back to
+      # per-replica in-memory limiting. Acceptable: rate-limit state is soft/rebuildable, and the Redis
+      # cluster itself is HA for any component that needs durable-ish shared state.
+      redis_host: redis
+      redis_port: 6379
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
 ---
@@ -72,8 +78,8 @@ spec:
               valueFrom: { secretKeyRef: { name: openrouter, key: key } }
             - name: LITELLM_MASTER_KEY
               valueFrom: { secretKeyRef: { name: litellm, key: master_key } }
-            - { name: REDIS_HOST, value: redis }
-            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_SERVICE_NAME, value: mymaster }
+            - { name: REDIS_SENTINEL_NODES, value: '[["redis-0.redis-headless",26379],["redis-1.redis-headless",26379],["redis-2.redis-headless",26379]]' }
           volumeMounts:
             - { name: cfg, mountPath: /etc/litellm }
           resources:

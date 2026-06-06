@@ -200,7 +200,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   retention policy + zstd round-trip) + in-cluster (`.json.zst` written to `gs://` and read back;
   `rate=0` keeps only failures).
 
-- [◐] **16. HA for stateful backends.** ClickHouse & Redis are single pods (acknowledged in
+- [x] **16. HA for stateful backends.** ClickHouse & Redis are single pods (acknowledged in
   `DEPLOYMENT.md`); CH insert is synchronous, not async-insert + durable ack. *Async-insert + durable
   ack done (2026-06-05):* `analytics.insert` now uses `async_insert=1, wait_for_async_insert=1` — the
   server batches concurrent worker inserts as one part (no write-amplification under load) while the
@@ -212,7 +212,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `ON CLUSTER ee`** when `EVAL_ENGINE_CH_CLUSTER` is set (api/orch/worker manifests set `ee`; unset =
   dev/CI single node, unchanged). Verified in-cluster: `total_replicas=3 active_replicas=3`, a run's rows
   replicated to all 3, and **reads survived deleting a replica** (failover via the load-balanced Service).
-  *Remaining: Redis (Sentinel) HA.*
+  *Redis HA done (2026-06-05):* `deploy/k8s/11-redis-ha.yaml` runs a **3-pod StatefulSet** (redis +
+  redis-sentinel sidecar each, anti-affinity) — 1 master + 2 replicas + 3 Sentinels (`mymaster`,
+  quorum 2). Verified: master + 2 online replicas, and **automatic failover** (deleted the master →
+  Sentinel promoted a replica → the old master rejoined as a replica). LiteLLM connects via the stable
+  `redis` Service. *Caveat:* the litellm router doesn't speak Sentinel (router.py gates on `redis_host`,
+  its RedisCache ignores `sentinel_nodes`) and only shares usage counters for multi-deployment models,
+  so per-model rpm/tpm caps fall back to per-replica in-memory limiting — acceptable, that state is
+  soft/rebuildable and the Redis cluster itself is HA.
 
 - [⊘] **17. Canonical per-`run_id` cost tally from the gateway.** §8 / DEPLOYMENT "A5". Today cost is the
   worker-side catalog price (equal in dollars, but not the canonical gateway tally). *Decision
