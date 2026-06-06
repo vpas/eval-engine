@@ -59,10 +59,15 @@ def _admit() -> None:
             print(f"[orch] admitted {run_id} (lane={lane})", flush=True)
 
 
+POD = os.environ.get("HOSTNAME", f"orch-{os.getpid()}")  # pod name in K8s → unique instance id
+
+
 def tick() -> None:
+    t0 = time.time()
     _admit()
 
-    for run_id in db.control.active_runs(("running",)):
+    running_runs = db.control.active_runs(("running",))
+    for run_id in running_runs:
         spec = RunSpec.model_validate_json(db.control.get_spec(run_id))
         # Live rollup (DESIGN §8 "Live metrics"): publish progress + live score + cost onto the runs
         # row each tick, so clients read live state from one authoritative place (no client-side agg).
@@ -82,6 +87,12 @@ def tick() -> None:
             runner._batch_load(run_id, spec)  # safety sweep: ensure all done rows are in analytics
             done, failed, acc = runner._finalize(run_id, spec)
             print(f"[orch] finalized {run_id}: done={done} failed={failed} acc={acc:.3f}", flush=True)
+
+    # Liveness for the ops dashboard: make the leader-elected singleton observable without the k8s
+    # API (the standby reports leader=false from its loop below). detail carries this tick's signals.
+    db.control.heartbeat("orchestrator", POD,
+                         {"leader": True, "running_runs": len(running_runs),
+                          "tick_ms": round((time.time() - t0) * 1000)})
 
 
 def _graceful_shutdown(*_) -> None:
@@ -104,6 +115,7 @@ def main() -> None:
             print("[orch] reaped a stale leader (lingering lock) — retrying for leadership", flush=True)
             continue
         print("[orch] standby — another orchestrator holds leadership", flush=True)
+        db.control.heartbeat("orchestrator", POD, {"leader": False})  # visible as a standby
         time.sleep(5)
     print("[orch] up, leader", flush=True)
     while True:

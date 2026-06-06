@@ -52,6 +52,8 @@ export const ICONS: Record<string, string> = {
   settings: '<circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4"/>',
   download: '<path d="M8 2v8M4.5 6.5L8 10l3.5-3.5M3 13h10"/>',
   bell: '<path d="M8 2a4 4 0 014 4c0 4 1.5 5 1.5 5h-11S4 10 4 6a4 4 0 014-4z"/><path d="M6.5 13a1.6 1.6 0 003 0"/>',
+  activity: '<path d="M1.5 8H4l1.5-4.5L8.5 13l2-7 1.3 2H14.5"/>',
+  server: '<rect x="2.5" y="2.5" width="11" height="4.5" rx="1"/><rect x="2.5" y="9" width="11" height="4.5" rx="1"/><circle cx="5" cy="4.75" r="0.6" fill="currentColor"/><circle cx="5" cy="11.25" r="0.6" fill="currentColor"/>',
 };
 
 export function Icon({ name, className = "ic", size, style }:

@@ -125,6 +125,24 @@ def by_category(run_id: str):
     )
 
 
+def health() -> dict:
+    """Liveness + key signals for the ops dashboard: an approximate row count (no FINAL — this is a
+    gauge, not a metric) and, when running replicated (HA #16), the replica quorum + replication lag
+    from ``system.replicas`` so a lost/lagging ClickHouse replica surfaces as degraded."""
+    info: dict = {"rows": 0, "replicas": None}
+    r = _q("SELECT count() FROM sample_results")
+    info["rows"] = int(r[0][0]) if r and r[0][0] is not None else 0
+    if CH_CLUSTER:
+        rr = _q(
+            "SELECT min(total_replicas), min(active_replicas), max(queue_size), max(absolute_delay) "
+            "FROM system.replicas WHERE table='sample_results'"
+        )
+        if rr and rr[0][0] is not None:
+            info["replicas"] = {"total": int(rr[0][0]), "active": int(rr[0][1]),
+                                "queue": int(rr[0][2] or 0), "delay_s": int(rr[0][3] or 0)}
+    return info
+
+
 def compare_models_by_category():
     return _q(
         "SELECT model_id, group_key, count() n, round(avg(primary_score),3) acc "

@@ -35,6 +35,9 @@ openrouter = ["openai"]
 gcs = ["gcsfs"]
 # agentic sandboxing on Kubernetes (helm-deployed per-sample pods); needs helm in the image + RBAC
 k8s = ["inspect-k8s-sandbox"]
+# ops dashboard probes: a Redis client (master/replica health) + the Kubernetes client (pod phase /
+# restarts / KEDA, the Tier-2 infra truth). Both degrade gracefully when absent (local dev).
+ops = ["redis", "kubernetes"]
 # test suite (pytest). Integration/e2e tests also need infra/up.sh (Postgres + ClickHouse).
 test = ["pytest>=8"]
 

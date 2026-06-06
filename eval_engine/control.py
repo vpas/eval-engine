@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS audit_log(
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(),
   actor TEXT, action TEXT, target TEXT, detail JSONB);
 
+-- Liveness heartbeats (ops dashboard): the orchestrator + each worker upsert their row every
+-- loop, so the otherwise-invisible singleton orchestrator + KEDA-scaled workers become observable
+-- WITHOUT coupling to the Kubernetes API (portable by interface — works on EKS/AKS/local too). The
+-- ops snapshot derives liveness from the row's age; `detail` carries per-tick metrics (leader id,
+-- claims/loop, admit/finalize counts). One row per (component, instance).
+CREATE TABLE IF NOT EXISTS heartbeats(
+  component TEXT, instance TEXT, ts TIMESTAMPTZ DEFAULT now(), detail JSONB,
+  PRIMARY KEY(component, instance));
+
 -- ===== Training monitor (docs/TRAINING_MONITOR.md) ========================================
 -- A monitored (mocked) training run; MUTABLE (status/current_step advance), so a dedicated table
 -- rather than the immutable entity registry. `body` holds the full TrainingRunSpec (suite/config/…).
@@ -506,6 +515,90 @@ def list_audit(limit: int = 100) -> list[dict]:
     ).fetchall()
     return [{"ts": r[0].isoformat() if r[0] else None, "actor": r[1], "action": r[2],
              "target": r[3], "detail": r[4]} for r in rows]
+
+
+# --------------------------------------------------------------------------- ops / heartbeats
+
+def heartbeat(component: str, instance: str, detail: dict | None = None) -> None:
+    """Upsert this process's liveness row (ts=now()). Called every loop by the orchestrator + each
+    worker so the ops dashboard can see them without the Kubernetes API (portable liveness)."""
+    _conn().execute(
+        "INSERT INTO heartbeats(component, instance, ts, detail) VALUES(%s,%s,now(),%s) "
+        "ON CONFLICT(component, instance) DO UPDATE SET ts=now(), detail=EXCLUDED.detail",
+        (component, instance, json.dumps(detail or {})),
+    )
+
+
+def list_heartbeats() -> list[dict]:
+    """Every heartbeat with its age in seconds (the ops snapshot decides live/stale from the age)."""
+    rows = _conn().execute(
+        "SELECT component, instance, EXTRACT(EPOCH FROM now()-ts), detail FROM heartbeats "
+        "ORDER BY component, instance"
+    ).fetchall()
+    return [{"component": r[0], "instance": r[1], "age_s": float(r[2] or 0.0), "detail": r[3] or {}}
+            for r in rows]
+
+
+def prune_heartbeats(max_age_seconds: float = 3600.0) -> int:
+    """Drop heartbeats older than the cutoff (a long-gone worker pod). Returns # removed."""
+    rows = _conn().execute(
+        "DELETE FROM heartbeats WHERE ts < now() - make_interval(secs => %s) RETURNING instance",
+        (max_age_seconds,),
+    ).fetchall()
+    return len(rows)
+
+
+def global_ledger_counts() -> dict:
+    """Live ledger status counts across ALL runs (queued/running/done/failed/budget_skipped) — the
+    cluster-wide queue-depth picture for the ops dashboard."""
+    return dict(
+        _conn().execute("SELECT status, count(*) FROM sample_tasks GROUP BY status").fetchall()
+    )
+
+
+def run_status_counts() -> dict:
+    """Counts of runs by status — the at-a-glance run mix (running/queued/completed/failed/…)."""
+    return dict(_conn().execute("SELECT status, count(*) FROM runs GROUP BY status").fetchall())
+
+
+def pg_connections() -> int:
+    """Open backends on this database — a cheap saturation signal for the control plane."""
+    row = _conn().execute(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def active_runs_detail() -> list[dict]:
+    """Running/queued runs with their live in-flight + queued ledger counts (one join) — the ops
+    'active runs' table, each row drillable to its worker logs by run_id."""
+    rows = _conn().execute(
+        "SELECT r.id, coalesce(r.lane,'batch'), r.status, coalesce(r.total,0), coalesce(r.done,0), "
+        "coalesce(r.failed,0), coalesce(r.cost_usd,0), r.created_at, r.model, "
+        "coalesce(t.queued,0), coalesce(t.running,0) "
+        "FROM runs r LEFT JOIN ("
+        "  SELECT run_id, count(*) FILTER (WHERE status='queued') queued, "
+        "         count(*) FILTER (WHERE status='running') running "
+        "  FROM sample_tasks GROUP BY run_id) t ON t.run_id = r.id "
+        "WHERE r.status IN ('queued','running') ORDER BY r.created_at"
+    ).fetchall()
+    return [{"id": r[0], "lane": r[1], "status": r[2], "total": r[3], "done": r[4], "failed": r[5],
+             "cost_usd": float(r[6] or 0.0), "created_at": r[7].isoformat() if r[7] else None,
+             "model": r[8], "queued": r[9], "running": r[10]} for r in rows]
+
+
+def recent_failures(limit: int = 20) -> list[dict]:
+    """Most recent terminal failures (archived once a run finalizes) with the run's model/eval for
+    context + drill-in. Newest runs first (the archive has no per-row ts)."""
+    rows = _conn().execute(
+        "SELECT a.run_id, a.sample_id, a.error_type, a.attempts, r.eval_id, r.model, r.finished_at "
+        "FROM failed_task_archive a LEFT JOIN runs r ON r.id = a.run_id "
+        "ORDER BY r.finished_at DESC NULLS LAST LIMIT %s",
+        (limit,),
+    ).fetchall()
+    return [{"run_id": r[0], "sample_id": r[1], "error_type": r[2], "attempts": r[3],
+             "eval_id": r[4], "model": r[5], "finished_at": r[6].isoformat() if r[6] else None}
+            for r in rows]
 
 
 def archive_and_prune(run_id: str) -> None:

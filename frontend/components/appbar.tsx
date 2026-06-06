@@ -40,6 +40,7 @@ export function AppBar() {
           <Link className={on("/") && !runId ? "on" : ""} href="/"><Icon name="grid" className="ic" />Dashboard</Link>
           <Link className={on("/training") && !trainId ? "on" : ""} href="/training"><Icon name="spark" className="ic" />Training</Link>
           <Link className={on("/compare") ? "on" : ""} href="/compare"><Icon name="compare" className="ic" />Compare</Link>
+          <Link className={on("/ops") ? "on" : ""} href="/ops"><Icon name="activity" className="ic" />Operations</Link>
           {runId && (
             <span className="crumb">
               <Icon name="chevright" className="ic" />

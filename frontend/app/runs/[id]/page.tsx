@@ -4,7 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
 import {
-  getRun, getResults, getTranscript, rerunRun, ago, fmtCost, fmtN, pct,
+  getRun, getResults, getTranscript, rerunRun, getRunLogsUrl, ago, fmtCost, fmtN, pct,
   type RunDetail, type Results,
 } from "@/lib/api";
 
@@ -16,7 +16,10 @@ export default function RunPage() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [res, setRes] = useState<Results | null>(null);
   const [openSample, setOpenSample] = useState<Results["samples"][number] | null>(null);
+  const [logsUrl, setLogsUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => { getRunLogsUrl(id).then((r) => setLogsUrl(r.url)).catch(() => {}); }, [id]);
 
   useEffect(() => {
     let stop = false;
@@ -62,6 +65,7 @@ export default function RunPage() {
               <Provider id={run.model} />
             </div>
             <div className="vcenter gap8">
+              {logsUrl && <a className="btn ghost sm" href={logsUrl} target="_blank" rel="noreferrer"><Icon name="external" size={12} />Worker logs</a>}
               {!isActive && (
                 <>
                   <button className="btn sm" onClick={() => router.push(`/compare?ids=${run.id}`)}><Icon name="compare" />Compare</button>

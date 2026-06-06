@@ -92,6 +92,44 @@ export const launchFromEval = (
   body: { model: string; batch_size?: number; limit?: number; epochs?: number; budget_usd?: number; mock_output?: string; temperature?: number; seed?: number; transcript_sample_rate?: number },
 ): Promise<{ run_id: string; status: string; from_eval: string; eval_version: number }> => post(`/be/evals/${evalId}/launch`, body);
 
+// --- ops dashboard (eval_engine/ops.py) --------------------------------------------------------
+export type OpsComponent = {
+  name: string;
+  status: "ok" | "degraded" | "down" | "idle" | "unknown";
+  detail: string;
+  metrics: Record<string, string | number | null>;
+  logs_url: string | null;
+  last_seen: string | null;
+};
+export type OpsPod = { name: string; phase: string; ready: boolean; restarts: number; node: string | null; logs_url: string | null };
+export type OpsWorkload = { app: string; namespace: string; ready: number; desired: number; pods: OpsPod[] };
+export type OpsStatus = {
+  cluster: { project: string | null; cluster: string; zone: string; namespace: string };
+  generated_at: string;
+  overall: "ok" | "degraded" | "down";
+  components: OpsComponent[];
+  workloads: OpsWorkload[];
+  keda: { name: string; target: string | null; min: number | null; max: number | null; current: number | null }[];
+  queues: {
+    ledger: Record<string, number>;
+    lanes: Record<string, number>;
+    runs: Record<string, number>;
+    samples_per_s: number | null;
+    admission: { global_max: number; interactive_reserve: number; running: number };
+  };
+  active_runs: {
+    id: string; lane: string; status: string; total: number; done: number; failed: number;
+    cost_usd: number; created_at: string | null; model: string; queued: number; running: number;
+    logs_url: string | null;
+  }[];
+  failures: { run_id: string; sample_id: string; error_type: string; attempts: number; eval_id: string | null; model: string | null; finished_at: string | null; logs_url: string | null }[];
+  audit: { ts: string | null; actor: string | null; action: string; target: string; detail: any }[];
+};
+
+export const getOps = (): Promise<OpsStatus> => fetch("/be/ops/status", opts).then(j);
+export const getRunLogsUrl = (runId: string): Promise<{ url: string | null }> =>
+  fetch(`/be/ops/logs?run_id=${encodeURIComponent(runId)}`, opts).then(j);
+
 // --- training monitor (docs/TRAINING_MONITOR.md) -----------------------------------------------
 export type SuiteEntry = { eval: string; version?: number; role?: string; color?: string };
 export type TrainingRun = {

@@ -32,6 +32,8 @@ def _drain_run(run_id: str) -> int:
         ids = db.control.claim_batch(run_id, WORKER_ID, spec.batch_size)
         if not ids:
             return processed
+        # run_id in the log line so the ops dashboard's per-run "worker logs" deep link matches.
+        print(f"[worker {WORKER_ID}] run_id={run_id} claimed {len(ids)}", flush=True)
         results = runner._execute_batch(spec, run_id, samples_by_id, ids)
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
         runner._commit_batch(spec, run_id, samples_by_id, ids, results)
@@ -45,6 +47,9 @@ def main() -> None:
         did = 0
         for run_id in db.control.active_runs(("running",)):
             did += _drain_run(run_id)
+        # Liveness for the ops dashboard (portable, no k8s API): claims-this-loop lets it show the
+        # live worker count + in-flight pressure; a stale row = a scaled-down/crashed worker.
+        db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": did})
         if did == 0:
             time.sleep(POLL_SECONDS)  # nothing claimable; let KEDA scale us down when idle
 

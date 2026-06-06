@@ -27,6 +27,7 @@ session: open it, pick the top unchecked item in **Open v1 gaps**, build it, che
 | `docs/FUTURE.md` | **Deferred** subsystems (out of scope) + their re-introduction triggers. |
 | `docs/ALTERNATIVES.md` | Approaches evaluated and rejected (and reversed decisions). |
 | `docs/DEVELOPMENT.md` | Local dev setup (Postgres + ClickHouse stand-ins, test suite). |
+| `docs/OPS_DASHBOARD.md` | Operational dashboard: system-health probes, PG heartbeats, GCP Log Explorer links. |
 
 ## Code map (`eval_engine/`)
 

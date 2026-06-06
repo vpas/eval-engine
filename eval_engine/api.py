@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
-from . import builtins, db, plugins, runner, training  # noqa: F401  populate registry
+from . import builtins, db, ops, plugins, runner, training  # noqa: F401  populate registry
 from .db import analytics, control
 from .models import (DatasetSpec, EvalSpec, LaunchFromEval, ModelSpec, PluginRef, RunSpec,
                      TrainingRunSpec)
@@ -70,6 +70,25 @@ def catalog():
 def audit_log(limit: int = 100):
     """Append-only audit trail of mutating actions — who launched/re-ran/registered what (§8/§13)."""
     return control.list_audit(limit)
+
+
+@app.get("/ops/status")
+def ops_status():
+    """Operational snapshot for the ops dashboard: per-component health (PG/CH/Redis/LiteLLM/GCS/
+    viewer + heartbeat-derived orchestrator/workers), Kubernetes workload truth, live queue rollup,
+    active runs, and recent failures — each with a GCP Log Explorer deep link. One poll = one call."""
+    return ops.snapshot()
+
+
+@app.get("/ops/logs")
+def ops_logs(component: str | None = None, pod: str | None = None, run_id: str | None = None,
+             severity: str | None = None, minutes: int = 60):
+    """A GCP Log Explorer deep link pre-filtered to a component / pod / run (run-scoped links power the
+    'worker logs ↗' button on the run page). ``url`` is null when no GCP project is configured (dev)."""
+    container = "worker" if run_id else None
+    app_label = ops.COMPONENT_APP.get(component) if component else None
+    return {"url": ops.log_url(container=container, app=app_label, pod=pod, run_id=run_id,
+                               severity=severity, minutes=minutes)}
 
 
 @app.post("/runs", status_code=202)
