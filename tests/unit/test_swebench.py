@@ -70,6 +70,37 @@ def test_grade_requires_nonempty_fail_to_pass():
     assert not swebench.grade(log, "pallets/flask", [], ["t.py::b"])["resolved"]
 
 
+def test_grade_on_setx_interleaved_log_resolves():
+    # The real eval script runs under `set -x`, so the >>>>> markers are echoed (with a `+ : ` prefix)
+    # INTERLEAVED with pytest's PASSED/FAILED output. The scorer must capture stdout+stderr merged in
+    # execution order (exec 2>&1) so the slice between the markers contains the results.
+    merged = (
+        "+ pip install -e .\n"
+        "+ git apply -v -\n"
+        "+ : '>>>>> Start Test Output'\n"
+        "+ pytest -rA testing/test_x.py\n"
+        "===== test session starts =====\n"
+        "PASSED testing/test_x.py::test_target\n"
+        "PASSED testing/test_x.py::test_keep\n"
+        "+ : '>>>>> End Test Output'\n"
+        "+ git checkout abc testing/test_x.py\n"
+    )
+    r = swebench.grade(merged, "pytest-dev/pytest",
+                       ["testing/test_x.py::test_target"], ["testing/test_x.py::test_keep"])
+    assert r["resolved"] and r["n_parsed"] == 2
+
+
+def test_grade_on_separated_streams_misses_results():
+    # Regression guard: if stdout (results) and stderr (the set -x markers) are concatenated SEPARATELY
+    # — the old bug — the markers land AFTER all results, so the slice between them holds no outcomes
+    # and NOTHING resolves regardless of correctness. This is exactly what the exec 2>&1 fix prevents.
+    stdout = "PASSED testing/test_x.py::test_target\nPASSED testing/test_x.py::test_keep\n"
+    stderr = "+ : '>>>>> Start Test Output'\n+ pytest -rA testing/test_x.py\n+ : '>>>>> End Test Output'\n"
+    r = swebench.grade(stdout + "\n" + stderr, "pytest-dev/pytest",
+                       ["testing/test_x.py::test_target"], [])
+    assert not r["resolved"] and r["n_parsed"] == 0
+
+
 def test_grade_pytest_options_parser_handles_parametrized_ids():
     # requests/pylint use the options parser (parametrized ids like test[opt]).
     log = _log("PASSED tests/test_x.py::test_q[case-1]")

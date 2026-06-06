@@ -440,8 +440,14 @@ def swe_bench_scorer(cfg: SWEBenchScorerConfig) -> Scorer:
                 return Score(value=INCORRECT, explanation="no eval_script in sample metadata")
             try:
                 # The agent has edited /testbed; the eval script applies the test patch + runs tests.
-                result = await sandbox().exec(["bash", "-c", eval_script], timeout=cfg.timeout)
-                log = (result.stdout or "") + "\n" + (result.stderr or "")
+                # `exec 2>&1` merges stderr into stdout IN EXECUTION ORDER. The eval script prints its
+                # `>>>>> Start/End Test Output` markers via `set -x` (→ stderr) while pytest's
+                # PASSED/FAILED lines go to stdout; capturing the streams separately and concatenating
+                # them would place the markers AFTER all results, so the slice between them would hold
+                # no test outcomes (n_parsed=0 → every instance unresolved). Merging keeps them
+                # interleaved, matching how the official SWE-bench harness captures combined output.
+                result = await sandbox().exec(["bash", "-c", "exec 2>&1\n" + eval_script], timeout=cfg.timeout)
+                log = result.stdout or result.stderr or ""
             except Exception as e:  # sandbox/timeout → unresolved (surfaced for debugging)
                 return Score(value=INCORRECT, explanation=f"eval-script error: {e}"[:500])
             report = _swebench.grade(log, md.get("repo", ""),
