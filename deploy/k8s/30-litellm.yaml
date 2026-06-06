@@ -78,8 +78,12 @@ spec:
               valueFrom: { secretKeyRef: { name: openrouter, key: key } }
             - name: LITELLM_MASTER_KEY
               valueFrom: { secretKeyRef: { name: litellm, key: master_key } }
-            - { name: REDIS_SERVICE_NAME, value: mymaster }
-            - { name: REDIS_SENTINEL_NODES, value: '[["redis-0.redis-headless",26379],["redis-1.redis-headless",26379],["redis-2.redis-headless",26379]]' }
+            # NOTE: do NOT set REDIS_SENTINEL_NODES / REDIS_SERVICE_NAME — litellm's Sentinel init
+            # (_init_redis_sentinel) crashes on startup with "Redis.__init__() got multiple values for
+            # argument 'port'", which crash-looped the gateway. litellm's router doesn't reliably speak
+            # Sentinel anyway (see the config.yaml note), so we connect via the stable `redis` Service
+            # (redis_host/redis_port in config.yaml). Per-model rpm/tpm then falls back to per-replica
+            # in-memory limiting — acceptable soft state (DESIGN: the Redis cluster itself is HA).
           volumeMounts:
             - { name: cfg, mountPath: /etc/litellm }
           resources:
