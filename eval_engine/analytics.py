@@ -62,10 +62,19 @@ _COLUMNS = [
 ]
 
 
+# Async insert with a DURABLE ack (DESIGN §8, HA #16): the server buffers concurrent small inserts and
+# flushes them as one batch (far better under many workers than a write part per insert), while
+# wait_for_async_insert=1 blocks until that batch is committed to the table — so the call still returns
+# only once the data is durable. This preserves the ack-before-flip invariant (the ledger flips to
+# 'done' only after a durable analytics write); it just changes how the server lands the bytes.
+_INSERT_SETTINGS = {"async_insert": 1, "wait_for_async_insert": 1}
+
+
 def insert(rows: list[tuple]) -> None:
     if not rows:
         return
-    _c().insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS)
+    _c().insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS,
+                settings=_INSERT_SETTINGS)
 
 
 def _q(sql, params=None):

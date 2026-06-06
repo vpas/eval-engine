@@ -200,8 +200,14 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   retention policy + zstd round-trip) + in-cluster (`.json.zst` written to `gs://` and read back;
   `rate=0` keeps only failures).
 
-- [ ] **16. HA for stateful backends.** ClickHouse & Redis are single pods (acknowledged in
-  `DEPLOYMENT.md`); CH insert is synchronous, not async-insert + durable ack.
+- [◐] **16. HA for stateful backends.** ClickHouse & Redis are single pods (acknowledged in
+  `DEPLOYMENT.md`); CH insert is synchronous, not async-insert + durable ack. *Async-insert + durable
+  ack done (2026-06-05):* `analytics.insert` now uses `async_insert=1, wait_for_async_insert=1` — the
+  server batches concurrent worker inserts as one part (no write-amplification under load) while the
+  call still blocks until durable, preserving the ack-before-flip invariant (tested; verified
+  in-cluster). *Remaining (pod-replica HA):* replicated ClickHouse + Redis (Sentinel) need a
+  **multi-node** cluster (anti-affinity across nodes) — a deliberate departure from the cost-minimal
+  single-node design (Redis state is intentionally soft/rebuildable). Gated behind a cost decision.
 
 - [ ] **17. Canonical per-`run_id` cost tally from the gateway.** §8 / DEPLOYMENT "A5". Today cost is the
   worker-side catalog price (equal in dollars, but not the canonical gateway tally).
