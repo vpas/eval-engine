@@ -14,8 +14,8 @@ from inspect_ai.scorer import (CORRECT, INCORRECT, Score, Scorer, Target, accura
                                includes, match, model_graded_qa, stderr)
 from inspect_ai.scorer import math as inspect_math
 from inspect_ai.scorer import scorer as inspect_scorer
-from inspect_ai.solver import (Solver, TaskState, basic_agent, chain, generate, multiple_choice,
-                               prompt_template, system_message)
+from inspect_ai.solver import (Generate, Solver, TaskState, basic_agent, chain, generate,
+                               multiple_choice, prompt_template, solver, system_message)
 from inspect_ai.tool import bash, python
 from inspect_ai.util import SandboxEnvironmentSpec, sandbox
 
@@ -119,11 +119,48 @@ class MultipleChoiceConfig(BaseModel):
     cot: bool = False  # let the model reason (chain-of-thought) before selecting
 
 
+def _extract_mc_letter(text: str, n: int) -> str | None:
+    """Best-effort extraction of the selected option letter when the model didn't emit a clean
+    'ANSWER: X' line. Handles 'thinking' models that conclude with \\boxed{D}, 'the answer is D',
+    '**D**', or a trailing bare letter. Returns an uppercase letter within A..A+n-1, or None."""
+    valid = {chr(ord("A") + i) for i in range(n)}
+    patterns = [
+        r"\\boxed\{\s*\\?(?:text|mathrm)?\{?\s*([A-Za-z])\b",  # \boxed{D}, \boxed{\text{D}}
+        r"(?i)\banswer\s*(?:is|:)\s*\(?\*{0,2}([A-Za-z])\b",   # "answer is D", "answer: D", "answer is **D**"
+        r"\*\*\s*([A-Za-z])\s*\*\*",                            # **D**
+        r"(?im)^\s*\(?([A-Za-z])\)?\s*[.:)]?\s*$",              # a line that is just the letter
+    ]
+    for pat in patterns:
+        matches = re.findall(pat, text)
+        for cand in reversed(matches):                          # last occurrence wins (final answer)
+            if cand.upper() in valid:
+                return cand.upper()
+    return None
+
+
+@solver
+def _mc_answer_fallback() -> Solver:
+    """Runs AFTER Inspect's multiple_choice solver. If its strict 'ANSWER:' parse marked no selection
+    (common for reasoning models that answer with \\boxed{}), re-extract the letter from the completion
+    and mark that choice — so a correctly-reasoned answer in a non-standard format still scores."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        if any(c.correct is True for c in state.choices):
+            return state  # the solver already captured a selection — leave it
+        letter = _extract_mc_letter(state.output.completion if state.output else "", len(state.choices))
+        if letter:
+            idx = ord(letter) - ord("A")
+            for i in range(len(state.choices)):
+                state.choices.mark_choice(i, i == idx)
+        return state
+    return solve
+
+
 @harness("multiple_choice", "1.0.0", MultipleChoiceConfig,
          description="Multiple-choice: present lettered choices, model selects one (pair with the "
-                     "'choice' scorer; dataset samples need a `choices` list + letter `target`).")
+                     "'choice' scorer; dataset samples need a `choices` list + letter `target`). "
+                     "Falls back to \\boxed{}/free-form answer extraction for reasoning models.")
 def multiple_choice_harness(cfg: MultipleChoiceConfig) -> Solver:
-    return multiple_choice(cot=cfg.cot)
+    return chain([multiple_choice(cot=cfg.cot), _mc_answer_fallback()])
 
 
 class AgenticConfig(BaseModel):

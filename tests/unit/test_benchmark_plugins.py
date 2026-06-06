@@ -6,7 +6,8 @@ sandbox-executing `code_exec` path is exercised e2e elsewhere (needs Docker); he
 import pytest
 
 from eval_engine import builtins, ifeval, plugins  # noqa: F401  importing builtins populates registry
-from eval_engine.builtins import _assemble_program, _extract_code, _extract_number
+from eval_engine.builtins import (_assemble_program, _extract_code, _extract_mc_letter,
+                                  _extract_number)
 
 
 def test_catalog_spans_the_new_eval_shapes():
@@ -103,6 +104,28 @@ def test_ifeval_strict_requires_all():
     resp = '"quoted, with comma"'  # quoted ✓ but has a comma ✗
     satisfied, total = ifeval.evaluate(resp, ["startend:quotation", "punctuation:no_comma"], [{}, {}])
     assert satisfied == 1 and total == 2  # strict prompt-level => not a pass
+
+
+@pytest.mark.parametrize("text,n,expected", [
+    ("The final answer is $\\boxed{D}$.", 4, "D"),    # reasoning model's boxed answer
+    ("\\boxed{\\text{C}}", 4, "C"),                    # boxed \text{}
+    ("After all, the answer is C.", 4, "C"),
+    ("So it must be **B**.", 4, "B"),
+    ("blah\nANSWER: A", 4, "A"),                       # ANSWER: still works as fallback
+    ("Final:\nB", 4, "B"),                             # trailing bare letter
+    ("I considered D but \\boxed{A}", 4, "A"),         # last/boxed wins
+    ("\\boxed{E}", 4, None),                           # out of A..D range
+    ("no decision", 4, None),
+])
+def test_extract_mc_letter_handles_freeform(text, n, expected):
+    assert _extract_mc_letter(text, n) == expected
+
+
+def test_multiple_choice_harness_is_a_chain_with_fallback():
+    # The harness chains Inspect's solver + our \boxed/free-form fallback (so reasoning-model answers
+    # in non-ANSWER: formats still get scored).
+    built, _ = plugins.build("harness", {"type": "multiple_choice", "config": {"cot": True}})
+    assert built is not None
 
 
 def test_ifeval_converter_target_ids_are_all_supported():
