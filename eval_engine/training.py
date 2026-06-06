@@ -329,8 +329,12 @@ def _drill(tr_id: str, ev: str, step: int, from_step: int) -> tuple[list[dict], 
         base_cat = {gk: acc for gk, _n, _p, acc in analytics.by_category(base_run)}
         for gk in sorted(set(cur_cat) | set(base_cat)):
             categories.append({"cat": gk or "", "acc": cur_cat.get(gk, 0.0), "prev": base_cat.get(gk, 0.0)})
-        cur_pass = {sid: p for sid, p, _gk, _sc, _u in analytics.samples(cur_run)}
-        for sid, p, _gk, _sc, _u in analytics.samples(base_run):
+        # analytics.samples() yields (sample_id, passed, group_key, score, transcript_uri,
+        # tokens, latency_ms, error_type); we only need id + pass/fail, so index rather than
+        # unpack (robust to the projection's column set growing).
+        cur_pass = {row[0]: row[1] for row in analytics.samples(cur_run)}
+        for row in analytics.samples(base_run):
+            sid, p = row[0], row[1]
             if p and not cur_pass.get(sid, 0):          # was pass → now fail
                 samples.append(sid)
     return categories, samples[:25]
