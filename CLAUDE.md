@@ -42,8 +42,9 @@ session: open it, pick the top unchecked item in **Open v1 gaps**, build it, che
 - `plugins.py` — in-process plugin registry + JSON-Schema catalog. `models.py` — `RunSpec`. `datasets.py` — JSONL loader.
 - `view_main.py` — patched Inspect viewer entrypoint (serves `gs://` logs behind the OIDC ingress).
 
-Deploy: `deploy/k8s/` (manifests), `deploy/terraform/` (cluster), `deploy/Dockerfile` (one image, role
-by command), `frontend/` (Next.js), `infra/` (up/down + cloud pause/resume scripts).
+Deploy: `deploy/k8s/` (manifests), `deploy/terraform/` (cluster + IP/IAM/Helm add-ons),
+`deploy/{secrets,install}.sh` + `deploy/manifests.txt` (3-step fresh-cluster bring-up, DEPLOYMENT.md §7),
+`deploy/Dockerfile` (one image, role by command), `frontend/` (Next.js), `infra/` (pause/resume scripts).
 
 ## Working conventions
 

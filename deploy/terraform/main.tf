@@ -24,6 +24,14 @@ resource "google_container_cluster" "primary" {
   # Default logging/monitoring left on — a tiny cluster sits inside Cloud Logging's free 50 GiB/mo.
   release_channel { channel = "REGULAR" }
 
+  # Google Managed Prometheus on, explicitly: installs the PodMonitoring CRD (deploy/k8s/96 scrapes
+  # LiteLLM) and ingests system metrics the GMP frontend serves to Grafana. Enabled by default on
+  # recent GKE, but declared so a fresh cluster is guaranteed to have it.
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+    managed_prometheus { enabled = true }
+  }
+
   # default VPC, PUBLIC nodes → no Cloud NAT needed (nodes reach OpenRouter/Artifact Registry directly)
   depends_on = [google_project_service.apis]
 }

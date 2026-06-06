@@ -47,3 +47,19 @@ variable "ha_stateful" {
   default     = false
   description = "When true, scale the system pool to 3 nodes so the replicated ClickHouse/Redis pods can spread across nodes (anti-affinity) for HA (#16). Off = cost-minimal single node."
 }
+
+# Add-on chart versions (helm.tf). Pinned for reproducible cluster bring-up; bump deliberately.
+variable "keda_chart_version" {
+  type    = string
+  default = "2.15.1"
+}
+
+variable "ingress_nginx_chart_version" {
+  type    = string
+  default = "4.11.3"
+}
+
+variable "cert_manager_chart_version" {
+  type    = string
+  default = "v1.15.3"
+}

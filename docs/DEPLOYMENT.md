@@ -317,3 +317,44 @@ kubectl get nodes
 
 # (further commands added as each milestone lands)
 ```
+
+---
+
+## 7. Fresh-cluster bring-up / migration (declarative)
+
+A new cluster is now **three steps**, with cluster-specific values resolved from Terraform — not
+hand-edited into manifests.
+
+```bash
+# 1. Infra + add-ons + reserved IP/IAM (Managed Prometheus, KEDA, ingress-nginx pinned to the IP,
+#    cert-manager). The nip.io host is derived from the reserved IP and is STABLE across rebuilds.
+cd deploy/terraform && terraform apply
+terraform output -raw host          # e.g. 35-202-212-111.nip.io — register ONCE as the OAuth redirect host
+
+# 2. Secrets (from env; never committed). See deploy/secrets.sh header for the required vars.
+EVAL_ENGINE_PG_DSN=… OPENROUTER_API_KEY=… OAUTH2_CLIENT_ID=… OAUTH2_CLIENT_SECRET=… ../secrets.sh
+
+# 3. Render + apply manifests (envsubst ${EE_HOST}/${EE_PROJECT}/…) + dashboards + restarts.
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin   # for the grafonnet render
+../install.sh
+```
+
+**What Terraform owns now:** cluster + node pools + GCS + Artifact Registry (as before) **plus** the
+reserved external IP (`google_compute_address`), IAM bindings (node SA → `monitoring.viewer` +
+bucket `objectAdmin`), Managed Prometheus, and the KEDA / ingress-nginx / cert-manager Helm releases
+(`network.tf` / `iam.tf` / `helm.tf`). Outputs `host`, `lb_ip`, `project_id` feed `install.sh`.
+
+**What stays scripted:** the app manifests (applied in `deploy/manifests.txt` order; the 4 host/project
+ones rendered via `envsubst`) and secret creation — both in `deploy/install.sh` + `deploy/secrets.sh`.
+
+**Why migration is cheap:** the LB IP is reserved, so the host (and the Google OAuth redirect URI) is
+stable — you register it once and never touch OAuth on a rebuild.
+
+**Remaining manual / same-project assumptions:**
+- The **OAuth client** (consent screen, test users, the web client id/secret) is created once in the
+  GCP console — not Terraform-able. With a reserved IP it's a one-time setup, not per-migration.
+- The image registry path + GCS bucket name still embed the project literally in the manifests
+  (`…/eval-engine/…`, `eval-engine-eval-engine`). Cluster rebuilds within the same project are
+  unaffected; a cross-**project** move would also need those templated (deferred — not the common case).
+- Adopting the Helm releases on the **existing** cluster (already `helm install`ed manually) needs
+  `terraform import` (or accept Helm reconciling them); fresh clusters install clean.

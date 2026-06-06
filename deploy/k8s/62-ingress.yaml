@@ -1,3 +1,4 @@
+# Apply via deploy/install.sh (envsubst ${EE_HOST} from `terraform output -raw host`), not bare kubectl.
 # Public entrypoint: nginx Ingress on the nip.io host, TLS via cert-manager (Let's Encrypt). All
 # traffic goes to oauth2-proxy, which authenticates (Google OIDC) then proxies to the API — so both
 # the dashboard and /runs are gated. cert-manager auto-issues the cert named in tls.secretName.
@@ -12,10 +13,10 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-    - hosts: ["35-202-212-111.nip.io"]
+    - hosts: ["${EE_HOST}"]
       secretName: eval-engine-tls
   rules:
-    - host: "35-202-212-111.nip.io"
+    - host: "${EE_HOST}"
       http:
         paths:
           - path: /

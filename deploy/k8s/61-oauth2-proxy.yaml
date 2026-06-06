@@ -1,3 +1,5 @@
+# Apply via deploy/install.sh (envsubst ${EE_HOST}), not bare kubectl. The redirect-url host must
+# match the Google OAuth client's registered redirect URI — stable because the LB IP is reserved (TF).
 # oauth2-proxy — Google OIDC gate in front of the API. Unauthenticated requests get redirected to
 # Google; on success it proxies to eval-engine-api and passes X-Auth-Request-Email upstream.
 # Access is restricted two ways: the Google consent screen's Test Users AND the emails file below.
@@ -37,7 +39,7 @@ spec:
             - --upstream=http://grafana:3000/grafana/
             - --upstream=http://eval-engine-frontend:3000
             - --http-address=0.0.0.0:4180
-            - --redirect-url=https://35-202-212-111.nip.io/oauth2/callback
+            - --redirect-url=https://${EE_HOST}/oauth2/callback
             - --cookie-secure=true
             - --reverse-proxy=true
             - --set-xauthrequest=true

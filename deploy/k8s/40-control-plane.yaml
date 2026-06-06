@@ -1,5 +1,7 @@
 # Control plane: FastAPI (launch + status/results) and the single Orchestrator (admit/finalize).
 # Both on the always-on system node. Postgres = Neon (secret), ClickHouse = in-cluster Service.
+# NOTE: contains ${EE_PROJECT}/${EE_CLUSTER}/${EE_ZONE} placeholders — apply via deploy/install.sh
+# (envsubst from `terraform output`), not a bare `kubectl apply -f`.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,9 +32,9 @@ spec:
             - { name: EVAL_ENGINE_CH_CLUSTER, value: ee }   # HA: replicated table ON CLUSTER (#16)
             - { name: EVAL_ENGINE_GCS_BUCKET, value: eval-engine-eval-engine }   # serve transcripts from GCS
             # ops dashboard: GCP Log Explorer deep links + Kubernetes/Redis probes (Tier-2 infra truth)
-            - { name: EVAL_ENGINE_GCP_PROJECT, value: eval-engine }
-            - { name: EVAL_ENGINE_GKE_CLUSTER, value: eval-engine }
-            - { name: EVAL_ENGINE_GKE_ZONE, value: us-central1-a }
+            - { name: EVAL_ENGINE_GCP_PROJECT, value: "${EE_PROJECT}" }
+            - { name: EVAL_ENGINE_GKE_CLUSTER, value: "${EE_CLUSTER}" }
+            - { name: EVAL_ENGINE_GKE_ZONE, value: "${EE_ZONE}" }
             - { name: EVAL_ENGINE_K8S_NAMESPACE, value: eval-engine }
             - { name: EVAL_ENGINE_REDIS_HOST, value: redis }
           readinessProbe:

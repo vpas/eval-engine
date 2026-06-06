@@ -1,0 +1,25 @@
+# Ordered apply list for deploy/install.sh. One manifest path (relative to deploy/k8s/) per line;
+# '#' comments and blank lines ignored. Order matters (secrets → stateful → control → edge).
+# Helm-installed CRDs (KEDA / ingress-nginx / cert-manager) come from `terraform apply` BEFORE this.
+#
+# HA vs single-pod stateful: we apply the -ha variants because the rest of the config assumes them
+# (40-control-plane sets EVAL_ENGINE_CH_CLUSTER=ee; litellm points at the Sentinel-fronted redis).
+# For a cost-minimal single-node cluster, swap to 10-clickhouse.yaml / 11-redis.yaml here.
+
+00-namespace.yaml
+10-clickhouse-ha.yaml
+11-redis-ha.yaml
+20-schema-init-job.yaml
+30-litellm.yaml
+41-api-rbac.yaml
+40-control-plane.yaml          # templated: ${EE_PROJECT}/${EE_CLUSTER}/${EE_ZONE}
+50-worker.yaml
+70-keda.yaml
+90-sandbox-rbac.yaml
+60-cert-issuer.yaml
+61-oauth2-proxy.yaml           # templated: ${EE_HOST}
+80-frontend.yaml
+85-inspect-view.yaml
+62-ingress.yaml                # templated: ${EE_HOST}
+95-grafana.yaml                # templated: ${EE_HOST}/${EE_PROJECT}
+96-podmonitoring.yaml

@@ -1,3 +1,4 @@
+# Apply via deploy/install.sh (envsubst ${EE_HOST}/${EE_PROJECT}), not bare kubectl.
 # Grafana — the time-series / historical observability layer (complement to the in-app Ops tab's
 # live snapshot, docs/OPS_DASHBOARD.md). Everything is provisioned as code: three datasources
 # (ClickHouse, Neon Postgres, GMP Prometheus) and a file-provider that loads the rendered dashboard
@@ -112,7 +113,7 @@ spec:
           ports:
             - { name: http, containerPort: 3000 }
           env:
-            - { name: GF_SERVER_ROOT_URL, value: "https://35-202-212-111.nip.io/grafana" }
+            - { name: GF_SERVER_ROOT_URL, value: "https://${EE_HOST}/grafana" }
             - { name: GF_SERVER_SERVE_FROM_SUB_PATH, value: "true" }
             - { name: GF_INSTALL_PLUGINS, value: "grafana-clickhouse-datasource" }
             # Auth: trust oauth2-proxy's forwarded identity; no Grafana login screen.
@@ -179,7 +180,7 @@ spec:
           image: gke.gcr.io/prometheus-engine/frontend:v0.8.2-gke.0
           args:
             - "--web.listen-address=:9090"
-            - "--query.project-id=eval-engine"
+            - "--query.project-id=${EE_PROJECT}"
           ports:
             - { name: web, containerPort: 9090 }
           resources:
