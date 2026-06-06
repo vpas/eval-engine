@@ -1,0 +1,13 @@
+# GSM8K grade-school math — free-form numeric. The prompt_suffix steers the model to a parseable
+# final line; the numeric_answer scorer extracts the last 'ANSWER:' number and compares numerically.
+eval: gsm8k
+dataset: examples/benchmarks/gsm8k.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 0.5
+batch_size: 10
+harness:
+  type: single_turn
+  config:
+    prompt_suffix: "Reason step by step, then end with a line: 'ANSWER: <number>'."
+scorers:
+  - type: numeric_answer

@@ -1,0 +1,11 @@
+# IFEval instruction-following — the prompt IS the instruction; the ifeval scorer checks the response
+# against the sample's programmatic constraints (strict prompt-level accuracy: all must pass).
+eval: ifeval
+dataset: examples/benchmarks/ifeval.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 0.5
+batch_size: 10
+harness:
+  type: single_turn
+scorers:
+  - type: ifeval

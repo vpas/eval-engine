@@ -1,0 +1,16 @@
+# HumanEval code generation — the code_generation harness declares a SANDBOX, and the code_exec scorer
+# runs the model's completion against the sample's unit tests inside it. Needs the sandbox (Docker
+# locally / k8s in-cluster). batch_size: 1 — one sample per Inspect eval ⇒ one sandbox (>1 can deadlock).
+eval: humaneval
+dataset: examples/benchmarks/humaneval.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 1.0
+batch_size: 1
+harness:
+  type: code_generation
+  config:
+    sandbox: docker          # "k8s" in-cluster
+scorers:
+  - type: code_exec
+    config:
+      timeout: 30

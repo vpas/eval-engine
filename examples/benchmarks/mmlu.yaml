@@ -1,0 +1,11 @@
+# MMLU across 4 subjects — multiple_choice + choice. metadata.category = subject, so the dashboard's
+# per-category breakdown lights up across subjects. ~60 samples.
+eval: mmlu_subjects
+dataset: examples/benchmarks/mmlu.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 0.5
+batch_size: 15
+harness:
+  type: multiple_choice
+scorers:
+  - type: choice

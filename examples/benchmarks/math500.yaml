@@ -1,0 +1,13 @@
+# MATH-500 competition math — symbolic equivalence. prompt_suffix asks for a \boxed{} answer; the
+# math scorer (Inspect core, sympy) extracts and compares for mathematical equivalence.
+eval: math_500
+dataset: examples/benchmarks/math500.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 1.0
+batch_size: 10
+harness:
+  type: single_turn
+  config:
+    prompt_suffix: "Put your final answer in \\boxed{}."
+scorers:
+  - type: math

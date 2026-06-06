@@ -1,0 +1,13 @@
+# GPQA Diamond (hard graduate-science MCQ) — multiple_choice harness + choice scorer.
+# Needs OPENROUTER_API_KEY. ~50 samples; interactive lane. Swap model for gpt-4o-mini to go cheaper.
+eval: gpqa_diamond
+dataset: examples/benchmarks/gpqa.jsonl
+model: openrouter/anthropic/claude-3.5-haiku
+budget_usd: 1.0
+batch_size: 10
+harness:
+  type: multiple_choice
+  config:
+    cot: true          # let the model reason before selecting (GPQA is hard)
+scorers:
+  - type: choice
