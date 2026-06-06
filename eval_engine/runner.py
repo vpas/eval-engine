@@ -62,6 +62,14 @@ MAX_ATTEMPTS = int(os.environ.get("EVAL_ENGINE_MAX_ATTEMPTS", "3"))
 RETRY_BASE_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_BASE_SECONDS", "2.0"))
 RETRY_CAP_SECONDS = float(os.environ.get("EVAL_ENGINE_RETRY_CAP_SECONDS", "60.0"))
 
+# Hung-call protection. A model request that never returns must not wedge the (single-threaded) worker —
+# it would hold its claimed tasks' lease in-process forever and starve every other run. MODEL_TIMEOUT
+# bounds a single provider/gateway request (GenerateConfig.timeout); SAMPLE_TIME_LIMIT is a per-sample
+# wall-clock cap (Inspect `time_limit`). A breach surfaces as a per-sample error → routed to
+# retry-with-backoff; fail_on_error=False keeps the rest of the batch (and the worker) moving. Env-tunable.
+MODEL_TIMEOUT = int(os.environ.get("EVAL_ENGINE_MODEL_TIMEOUT", "120"))
+SAMPLE_TIME_LIMIT = int(os.environ.get("EVAL_ENGINE_SAMPLE_TIME_LIMIT", "600"))
+
 
 def _enforce_budget(run_id: str, spec: RunSpec) -> int:
     """If the run has a budget and committed cost has reached it, skip the still-queued samples
@@ -261,7 +269,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     # Sampling (DESIGN §14): epochs repeat each sample (Inspect reduces to one per-sample score);
     # temperature/seed go into the GenerateConfig that `eval` builds from **kwargs.
     epochs = spec.epochs if spec.epochs and spec.epochs > 1 else None
-    gen: dict = {}
+    gen: dict = {"timeout": MODEL_TIMEOUT}  # bound a single model request so a hung call can't wedge us
     if spec.temperature is not None:
         gen["temperature"] = spec.temperature
     if spec.seed is not None:
@@ -273,7 +281,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     log = inspect_eval(
         task, model=model, display="none",
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
-        epochs=epochs, **gen,
+        epochs=epochs, time_limit=SAMPLE_TIME_LIMIT, fail_on_error=False, **gen,
     )[0]
 
     eval_log_uri = getattr(log, "location", "") or ""  # the .eval log holding this shard's samples

@@ -14,6 +14,9 @@ spec:
     metadata:
       labels: { app: eval-engine-worker }
     spec:
+      # Let an in-flight batch finish on SIGTERM (graceful drain) before SIGKILL — above the per-sample
+      # timeout so a rolling update doesn't strand freshly-claimed tasks (eval_engine/worker._graceful_shutdown).
+      terminationGracePeriodSeconds: 150
       serviceAccountName: eval-engine-worker     # RBAC to manage agentic sandbox pods (90-sandbox-rbac)
       nodeSelector: { eval-engine/role: worker }
       tolerations:
@@ -31,6 +34,8 @@ spec:
             - { name: EVAL_ENGINE_CH_CLUSTER, value: ee }   # HA: replicated table ON CLUSTER (#16)
             - { name: EVAL_ENGINE_GCS_BUCKET, value: eval-engine-eval-engine }   # write transcripts to GCS
             - { name: EVAL_ENGINE_TRANSCRIPT_SAMPLE_RATE, value: "0.25" }        # sample-by-default; failures always kept (DESIGN §13)
+            - { name: EVAL_ENGINE_MODEL_TIMEOUT, value: "120" }                  # per-request timeout (s) — a hung gateway/provider call can't wedge the worker
+            - { name: EVAL_ENGINE_SAMPLE_TIME_LIMIT, value: "600" }              # per-sample wall-clock cap (s)
             - { name: INSPECT_K8S_DEFAULT_NAMESPACE, value: eval-sandbox }       # agentic sandbox pods land here
             # model calls via the gateway (OpenAI-compatible) → LiteLLM → OpenRouter
             - { name: OPENAI_BASE_URL, value: "http://litellm:4000/v1" }

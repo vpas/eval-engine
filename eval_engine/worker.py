@@ -9,6 +9,7 @@ safety is the lease: a dead worker's claimed tasks are reclaimed by survivors on
 from __future__ import annotations
 
 import os
+import signal
 import time
 
 from . import db, runner
@@ -17,6 +18,19 @@ from .models import RunSpec
 
 POLL_SECONDS = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
 WORKER_ID = os.environ.get("HOSTNAME", f"w-{os.getpid()}")  # pod name in K8s → unique claimer id
+
+# Graceful drain on rollout/scale-down. K8s sends SIGTERM before SIGKILL; on SIGTERM we stop claiming
+# NEW batches and let the in-flight one finish, then exit — so a rolling update never claims-then-dies
+# (which would strand tasks `running` until lease expiry and bump their attempts on reclaim). The
+# in-flight batch is bounded by the per-sample timeout (runner.MODEL_TIMEOUT/SAMPLE_TIME_LIMIT); set the
+# Deployment's terminationGracePeriodSeconds above that so the batch completes before SIGKILL.
+_STOP = False
+
+
+def _graceful_shutdown(*_) -> None:
+    global _STOP
+    _STOP = True
+    print(f"[worker {WORKER_ID}] SIGTERM — draining: finishing current batch, no new claims", flush=True)
 
 
 def _drain_run(run_id: str) -> int:
@@ -29,6 +43,8 @@ def _drain_run(run_id: str) -> int:
     samples_by_id = {str(s.id): s for s in dataset}
     processed = 0
     while True:
+        if _STOP:                       # SIGTERM: stop claiming new work, let the loop unwind + exit
+            return processed
         ids = db.control.claim_batch(run_id, WORKER_ID, spec.batch_size)
         if not ids:
             return processed
@@ -42,10 +58,16 @@ def _drain_run(run_id: str) -> int:
 
 def main() -> None:
     db.init()
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
     print(f"[worker {WORKER_ID}] up", flush=True)
     while True:
+        if _STOP:
+            print(f"[worker {WORKER_ID}] drained — exiting", flush=True)
+            return
         did = 0
         for run_id in db.control.active_runs(("running",)):
+            if _STOP:
+                break
             did += _drain_run(run_id)
         # Liveness for the ops dashboard (portable, no k8s API): claims-this-loop lets it show the
         # live worker count + in-flight pressure; a stale row = a scaled-down/crashed worker.
