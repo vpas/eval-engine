@@ -7,10 +7,12 @@ CRUD with its 422 validation, and the audit trail.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
-from eval_engine import runner
+from eval_engine import control, runner
 from eval_engine.api import app
 
 # A deterministic mock RunSpec as the POST /runs body (no API key; 'Paris' → 1/3 on qa.jsonl).
@@ -118,6 +120,34 @@ def test_entity_registry_crud_and_validation(client):
     assert client.post("/models", json=model).status_code == 201
     # GET returns the entity envelope {id, version, body, …}; the spec fields live under "body"
     assert client.get("/models/gpt-4o-mini-prod").json()["body"]["model_id"] == "openai/gpt-4o-mini"
+
+
+def test_launch_from_registered_eval(client):
+    # register a dataset (snapshots examples/qa.jsonl) + an eval bundle, then launch from the eval
+    client.post("/datasets", json={"id": "capitals", "uri": "examples/qa.jsonl"})
+    client.post("/evals", json={"id": "capitals_qa", "dataset": "capitals",
+                                "default_harness": {"type": "single_turn"},
+                                "default_scorers": [{"type": "includes"}]})
+    r = client.post("/evals/capitals_qa/launch", json={"model": "mockllm/model", "mock_output": "Paris"})
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["from_eval"] == "capitals_qa" and body["eval_version"] == 1
+
+    # the launched run inherited the eval's harness + the dataset's pinned snapshot
+    meta = client.get(f"/runs/{body['run_id']}").json()
+    assert meta["eval_id"] == "capitals_qa" and meta["harness"] == "single_turn"
+    snap = client.get("/datasets/capitals").json()["body"]["snapshot_uri"]
+    spec = json.loads(control.get_spec(body["run_id"]))
+    assert spec["dataset"] == snap and spec["model"] == "mockllm/model"
+
+
+def test_launch_from_eval_errors(client):
+    assert client.post("/evals/nope/launch", json={"model": "mockllm/model"}).status_code == 404
+    # an eval referencing an unregistered dataset → 422
+    client.post("/evals", json={"id": "orphan", "dataset": "missing_ds",
+                                "default_harness": {"type": "single_turn"},
+                                "default_scorers": [{"type": "includes"}]})
+    assert client.post("/evals/orphan/launch", json={"model": "mockllm/model"}).status_code == 422
 
 
 def test_audit_records_launch(client):

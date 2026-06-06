@@ -37,6 +37,17 @@ class EvalSpec(BaseModel):
     description: str = ""
 
 
+class LaunchFromEval(BaseModel):
+    """Launch a run *from* a registered eval (FR2/FR10): the eval supplies the dataset (its pinned
+    content-addressed snapshot) + default harness/scorers; the caller chooses the model + run knobs."""
+    model: str = "mockllm/model"
+    batch_size: int = 50
+    limit: int | None = None
+    epochs: int = 1
+    budget_usd: float | None = None
+    mock_output: str | None = None
+
+
 class ModelSpec(BaseModel):
     """A registered target/model (FR3): a logical name → provider + model id + default params."""
     id: str                                    # logical name, e.g. "gpt-4o-mini-prod"

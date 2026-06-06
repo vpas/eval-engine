@@ -63,3 +63,19 @@ export const launchRun = (spec: LaunchSpec): Promise<{ run_id: string; status: s
 // Reproduce a past run: clone its RunSpec → a new run with identical pinned inputs (FR10).
 export const rerunRun = (id: string): Promise<{ run_id: string; status: string; rerun_of: string }> =>
   fetch(`/be/runs/${id}/rerun`, { method: "POST" }).then(j);
+
+// Registered entities (FR1–3). A versioned record: the spec lives under `body`.
+export type Entity = { id: string; version: number; body: Record<string, any>; created_by: string | null; created_at: string | null };
+export const getEvals = (): Promise<Entity[]> => fetch("/be/evals", { cache: "no-store" }).then(j);
+
+// Launch a run *from* a registered eval — the eval supplies the dataset (pinned snapshot) + default
+// harness/scorers; the caller picks the model + knobs (FR2/FR10).
+export const launchFromEval = (
+  evalId: string,
+  body: { model: string; batch_size?: number; mock_output?: string },
+): Promise<{ run_id: string; status: string; from_eval: string; eval_version: number }> =>
+  fetch(`/be/evals/${evalId}/launch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(j);

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getRuns, getCatalog, launchRun, type Run, type Plugin } from "@/lib/api";
+import { getRuns, getCatalog, launchRun, getEvals, launchFromEval, type Run, type Plugin, type Entity } from "@/lib/api";
 import { StatusPill, AccuracyBar, ago } from "@/components/ui";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
@@ -95,23 +95,35 @@ function LaunchDrawer({ onClose, onLaunched }: { onClose: () => void; onLaunched
   const [cat, setCat] = useState<Plugin[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [mode, setMode] = useState<"adhoc" | "eval">("adhoc");
+  const [evals, setEvals] = useState<Entity[]>([]);
   const [f, setF] = useState({ eval: "capitals_qa", dataset: "examples/qa.jsonl", model: "openai/meta-llama/llama-3.1-8b-instruct", harness: "single_turn", scorer: "includes", batch_size: 20 });
+  const [ef, setEf] = useState({ evalId: "", model: "mockllm/model", batch_size: 20 });
 
   useEffect(() => { getCatalog().then(setCat).catch(() => setCat([])); }, []);
+  useEffect(() => { getEvals().then((es) => { setEvals(es); if (es[0]) setEf((s) => ({ ...s, evalId: es[0].id })); }).catch(() => setEvals([])); }, []);
   const harnesses = cat?.filter((p) => p.kind === "harness") ?? [];
   const scorers = cat?.filter((p) => p.kind === "scorer") ?? [];
+  const pickedEval = evals.find((e) => e.id === ef.evalId);
 
   const submit = async () => {
     setBusy(true); setErr(null);
     try {
-      const spec: any = {
-        eval: f.eval, dataset: f.dataset, model: f.model,
-        harness: { type: f.harness },
-        scorers: [{ type: f.scorer, config: { ignore_case: true } }],
-        batch_size: Number(f.batch_size) || 20,
-      };
-      if (f.model.startsWith("mockllm")) spec.mock_output = "Paris";
-      const { run_id } = await launchRun(spec);
+      let run_id: string;
+      if (mode === "eval") {
+        const body: any = { model: ef.model, batch_size: Number(ef.batch_size) || 20 };
+        if (ef.model.startsWith("mockllm")) body.mock_output = "Paris";
+        ({ run_id } = await launchFromEval(ef.evalId, body));
+      } else {
+        const spec: any = {
+          eval: f.eval, dataset: f.dataset, model: f.model,
+          harness: { type: f.harness },
+          scorers: [{ type: f.scorer, config: { ignore_case: true } }],
+          batch_size: Number(f.batch_size) || 20,
+        };
+        if (f.model.startsWith("mockllm")) spec.mock_output = "Paris";
+        ({ run_id } = await launchRun(spec));
+      }
       onLaunched(run_id);
     } catch (e) { setErr(String(e)); setBusy(false); }
   };
@@ -126,6 +138,31 @@ function LaunchDrawer({ onClose, onLaunched }: { onClose: () => void; onLaunched
           <button className="btn ghost" onClick={onClose}>esc</button>
         </div>
         <div style={{ padding: 20 }}>
+          <div className="seg" style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+            <button className={`btn ${mode === "adhoc" ? "primary" : "ghost"}`} style={{ flex: 1 }} onClick={() => setMode("adhoc")}>ad-hoc</button>
+            <button className={`btn ${mode === "eval" ? "primary" : "ghost"}`} style={{ flex: 1 }} onClick={() => setMode("eval")}>from registered eval</button>
+          </div>
+          {mode === "eval" ? (
+            <>
+              <div className="field"><label>registered eval</label>
+                {evals.length ? (
+                  <select value={ef.evalId} onChange={(e) => setEf({ ...ef, evalId: e.target.value })}>
+                    {evals.map((e) => <option key={e.id} value={e.id}>{e.id} · v{e.version}</option>)}
+                  </select>
+                ) : <div className="hint">no evals registered yet — register one via POST /evals.</div>}
+                {pickedEval && <span className="hint">dataset <b>{pickedEval.body.dataset}</b> · harness <b>{pickedEval.body.default_harness?.type}</b> · scorers <b>{(pickedEval.body.default_scorers ?? []).map((s: any) => s.type).join(", ")}</b></span>}
+              </div>
+              <div className="row">
+                <div className="field"><label>model</label><input value={ef.model} onChange={(e) => setEf({ ...ef, model: e.target.value })} /><span className="hint">openai/&lt;id&gt; via the gateway · mockllm/model for a dry run</span></div>
+                <div className="field"><label>batch size</label><input type="number" value={ef.batch_size} onChange={(e) => setEf({ ...ef, batch_size: Number(e.target.value) })} /></div>
+              </div>
+              {err && <div style={{ color: "var(--fail)", fontFamily: "var(--mono)", fontSize: 12, marginBottom: 12 }}>{err}</div>}
+              <button className="btn primary" style={{ width: "100%", padding: 12 }} disabled={busy || !ef.evalId} onClick={submit}>
+                {busy ? <><span className="spin" /> launching…</> : "▸ LAUNCH FROM EVAL"}
+              </button>
+            </>
+          ) : (
+          <>
           <div className="row">
             <div className="field"><label>eval</label><input value={f.eval} onChange={(e) => setF({ ...f, eval: e.target.value })} /></div>
             <div className="field"><label>batch size</label><input type="number" value={f.batch_size} onChange={(e) => setF({ ...f, batch_size: Number(e.target.value) })} /></div>
@@ -148,6 +185,8 @@ function LaunchDrawer({ onClose, onLaunched }: { onClose: () => void; onLaunched
           <button className="btn primary" style={{ width: "100%", padding: 12 }} disabled={busy} onClick={submit}>
             {busy ? <><span className="spin" /> launching…</> : "▸ LAUNCH"}
           </button>
+          </>
+          )}
         </div>
       </aside>
     </>

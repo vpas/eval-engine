@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from . import builtins, db, plugins, runner  # noqa: F401  populate registry
 from .db import analytics, control
-from .models import DatasetSpec, EvalSpec, ModelSpec, RunSpec
+from .models import DatasetSpec, EvalSpec, LaunchFromEval, ModelSpec, PluginRef, RunSpec
 
 # In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
 # orchestrator/worker pods execute. Set EVAL_ENGINE_API_INLINE_EXEC=1 for local single-process dev:
@@ -215,6 +215,34 @@ def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Header(defa
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     return _register("eval", spec, x_auth_request_email)
+
+
+@app.post("/evals/{eval_id}/launch", status_code=202)
+def launch_from_eval(eval_id: str, body: LaunchFromEval, bg: BackgroundTasks,
+                     x_auth_request_email: str | None = Header(default=None)):
+    """Launch a run from a registered eval: resolve its dataset (the pinned content-addressed snapshot)
+    + default harness/scorers, apply the caller's model + run knobs, then launch (FR2/FR10)."""
+    ev = control.get_entity("eval", eval_id)
+    if not ev:
+        raise HTTPException(status_code=404, detail=f"no eval {eval_id}")
+    e = ev["body"]
+    ds = control.get_entity("dataset", e["dataset"])
+    if not ds:
+        raise HTTPException(status_code=422, detail=f"eval {eval_id} references unregistered dataset {e['dataset']}")
+    dataset_uri = ds["body"].get("snapshot_uri") or ds["body"]["uri"]  # prefer the immutable snapshot
+    spec = RunSpec(
+        eval=eval_id, eval_version=ev["version"], dataset=dataset_uri, model=body.model,
+        harness=PluginRef(**e["default_harness"]),
+        scorers=[PluginRef(**s) for s in e["default_scorers"]],
+        batch_size=body.batch_size, limit=body.limit, epochs=body.epochs,
+        budget_usd=body.budget_usd, mock_output=body.mock_output,
+    )
+    run_id = runner.launch(spec, created_by=x_auth_request_email)
+    control.audit(x_auth_request_email, "run.launch_from_eval", run_id,
+                  {"eval": eval_id, "version": ev["version"], "model": body.model})
+    if INLINE_EXEC:
+        bg.add_task(runner.execute, run_id, spec)
+    return {"run_id": run_id, "status": "queued", "from_eval": eval_id, "eval_version": ev["version"]}
 
 
 @app.get("/evals")

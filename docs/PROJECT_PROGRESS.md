@@ -127,9 +127,12 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   versions are immutable (re-register a new version, no PUT/DELETE — the content-addressed stance of
   §13/§14), and `POST /evals` validates the bundled harness/scorers exist (422 otherwise). Tested:
   `test_registry` (both backends) + a FastAPI TestClient smoke (register/list/get/validation/404).
-  **Follow-up (not blocking):** the dashboard launch form still reads `/catalog`; a picker over
-  registered evals/datasets/models — and launching a run *from* a registered eval (its dataset +
-  default harness/scorers) — lands naturally with #10 (reproduce/launch).
+  **Launch-from-registered-eval — done (2026-06-05):** `POST /evals/{id}/launch` resolves the eval's
+  dataset (its pinned content-addressed **snapshot**) + default harness/scorers server-side, applies
+  the caller's model + run knobs, and launches (audited `run.launch_from_eval`). The dashboard launch
+  drawer gained an **ad-hoc | from-registered-eval** toggle: the eval mode shows a versioned-eval
+  picker (with its resolved dataset/harness/scorers) and launches via the new endpoint. Tested
+  (`test_launch_from_registered_eval`, `test_launch_from_eval_errors` — 404/422) + in-cluster.
 
 - [x] **9. Dataset versioning — content-addressed snapshots.** §13. *Done (2026-06-05):*
   `datasets.snapshot(uri)` hashes a dataset's bytes and writes an **immutable, write-once** copy keyed
