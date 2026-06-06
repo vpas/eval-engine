@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
   model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
   accuracy DOUBLE PRECISION, cost_usd DOUBLE PRECISION DEFAULT 0, dataset_hash TEXT, spec_json TEXT,
-  created_by TEXT, team TEXT, image_digest TEXT, lane TEXT, max_inflight INT,
+  created_by TEXT, team TEXT, image_digest TEXT, lane TEXT, max_inflight INT, provider_fingerprint TEXT,
   created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
 -- idempotent migrations for tables created before these columns existed
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
@@ -39,6 +39,7 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS team TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS image_digest TEXT;  -- repro pin: worker code/image (DESIGN §14)
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS lane TEXT;          -- interactive | batch (SCHEDULER §2)
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS max_inflight INT;   -- per-run concurrency cap (SCHEDULER §3)
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS provider_fingerprint TEXT;  -- repro pin: resolved model[@system_fingerprint] (DESIGN §14)
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -177,6 +178,15 @@ def set_status(run_id: str, status: str) -> None:
     _conn().execute("UPDATE runs SET status=%s WHERE id=%s", (status, run_id))
 
 
+def set_fingerprint(run_id: str, fingerprint: str) -> None:
+    """Record the provider's resolved-model version fingerprint (repro pin, DESIGN §14). First writer
+    wins (``WHERE … IS NULL``) — cheap to call per batch; a run pins the first fingerprint it sees."""
+    _conn().execute(
+        "UPDATE runs SET provider_fingerprint=%s WHERE id=%s AND provider_fingerprint IS NULL",
+        (fingerprint, run_id),
+    )
+
+
 def finalize_run(run_id: str, done: int, failed: int, accuracy: float, cost_usd: float = 0.0,
                  status: str = "completed") -> None:
     _conn().execute(
@@ -217,7 +227,7 @@ def list_runs():
 # map, so positional SELECT * would misalign created_at/finished_at). Keep in sync with api.get_run.
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
             "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, lane, "
-            "created_at, finished_at")
+            "created_at, finished_at, provider_fingerprint")
 
 
 def get_run(run_id: str):

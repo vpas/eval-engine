@@ -123,7 +123,7 @@ def get_run(run_id: str):
     cols = [
         "id", "eval_id", "eval_version", "model", "provider", "model_id", "harness", "scorers",
         "status", "total", "done", "failed", "accuracy", "cost_usd", "dataset_hash", "created_by",
-        "team", "image_digest", "lane", "created_at", "finished_at",
+        "team", "image_digest", "lane", "created_at", "finished_at", "provider_fingerprint",
     ]
     meta = dict(zip(cols, run))
     # live progress from the ledger (empty once finalized/pruned). done/failed/accuracy/cost_usd on the

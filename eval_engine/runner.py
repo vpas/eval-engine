@@ -175,6 +175,9 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
         for sid, r in good.items():
             control.commit_result(run_id, sid, r)       # (2) now flip the ledger row to 'done'
         control.mark_loaded(run_id, list(good))         #     done ⟹ loaded ⟹ durable in analytics
+        fp = next((r.get("provider_fingerprint") for r in good.values() if r.get("provider_fingerprint")), "")
+        if fp:
+            control.set_fingerprint(run_id, fp)         # repro pin: first fingerprint the run sees
     for sid in ids:
         if sid not in good:
             _settle_result(run_id, sid, results.get(sid))  # missing/errored → retry-with-backoff
@@ -233,6 +236,11 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
         tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
         completion = s.output.completion if s.output else ""
+        # Provider version fingerprint (DESIGN §14): the resolved model the provider echoes back, plus
+        # its system_fingerprint when exposed (some openai/groq models do; mock/OpenRouter often don't).
+        resolved = (getattr(s.output, "model", "") or "") if s.output else ""
+        sysfp = (getattr(s.output, "metadata", None) or {}).get("system_fingerprint") if s.output else None
+        provider_fp = f"{resolved}@{sysfp}" if sysfp else resolved
         # Inspect records an execution error (model/tool/sandbox exception) on the sample as `.error`
         # — distinct from a low score. A non-empty error_type routes the sample to retry (`_settle_result`).
         err = getattr(s, "error", None)
@@ -253,6 +261,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
             "latency_ms": 0,
             "error_type": error_type,
             "transcript_uri": uri,
+            "provider_fingerprint": provider_fp,
         }
     return out
 

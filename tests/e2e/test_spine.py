@@ -57,3 +57,11 @@ def test_epochs_reduce_to_one_row_per_sample(mock_spec):
 
     lo, hi = runner.wilson_ci(int(passed), int(n))
     assert 0.0 <= lo <= passed / n <= hi <= 1.0, (lo, passed / n, hi)  # CI brackets the rate
+
+
+def test_provider_fingerprint_pinned(mock_spec):
+    """A run records the provider's resolved-model version fingerprint (DESIGN §14, backlog #7).
+    The mock echoes its model name back as ModelOutput.model → pinned on the run."""
+    run_id = runner.run(mock_spec())
+    fp = db.control.get_run(run_id)[21]  # RUN_COLS: …finished_at(20), provider_fingerprint(21)
+    assert fp == "mockllm/model", fp

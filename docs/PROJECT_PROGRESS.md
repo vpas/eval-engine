@@ -106,10 +106,13 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `--build-arg GIT_SHA=$(git rev-parse --short HEAD)`), which `runner` records as `image_digest` on
   every run. New `team`/`image_digest` columns (PG + SQLite migrations); surfaced in `GET /runs/{id}`.
   `sampling{epochs,temperature,seed}` (#4) and `budget` (#3) already landed, and `dataset_hash` was
-  already pinned — so a run's inputs are now pinned per §14. **Partial:** the per-call provider
-  version-fingerprint (e.g. OpenAI `system_fingerprint`) isn't recorded — Inspect's `ModelOutput`
-  doesn't surface it cleanly; capturing it needs digging into the raw provider response (left as a
-  documented follow-up). Tested (`test_distributed` asserts the pins are recorded).
+  already pinned — so a run's inputs are now pinned per §14. Tested (`test_distributed` asserts the
+  pins are recorded). **Provider version-fingerprint — done (2026-06-05):** a `provider_fingerprint`
+  column on `runs` records the **resolved model the provider echoes back** (`ModelOutput.model`) plus
+  its **`system_fingerprint`** when exposed (`model@fp`; some openai/groq models surface it,
+  mock/OpenRouter often don't). `runner._execute_batch` captures it per sample; `control.set_fingerprint`
+  pins the first one seen (NULL-guarded, first-writer-wins); surfaced in `GET /runs/{id}`. Tested
+  (`test_provider_fingerprint_pinned`) + in-cluster.
 
 ---
 
