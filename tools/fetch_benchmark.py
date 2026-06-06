@@ -151,8 +151,34 @@ def build_ifeval(k: int) -> list[dict]:
     return [out[j] for j in keep]
 
 
+def build_swebench(k: int) -> list[dict]:
+    """SWE-bench Lite (agentic software engineering). Narrowed to the PyTest-family repos our vendored
+    grader covers (eval_engine/swebench.py:SUPPORTED_REPOS) — honest, like the IFEval narrowing. For
+    each instance we precompute the **self-contained eval_script** (applies the held-out test patch +
+    runs the repo's tests) with the real `swebench` package here (tooling-only), and embed it so the
+    runtime needs no swebench/torch deps. The per-instance official image is recorded for the sandbox."""
+    import json as _json
+    from swebench.harness.test_spec.test_spec import make_test_spec
+    from eval_engine.swebench import SUPPORTED_REPOS, image_for
+
+    ds = _load("princeton-nlp/SWE-bench_Lite", split="test")
+    eligible = [i for i in range(len(ds)) if ds[i]["repo"] in SUPPORTED_REPOS]
+    out = []
+    for i in (eligible if len(eligible) <= k else [eligible[j] for j in _subsample(len(eligible), k)]):
+        r = ds[i]
+        f2p = r["FAIL_TO_PASS"] if isinstance(r["FAIL_TO_PASS"], list) else _json.loads(r["FAIL_TO_PASS"])
+        p2p = r["PASS_TO_PASS"] if isinstance(r["PASS_TO_PASS"], list) else _json.loads(r["PASS_TO_PASS"])
+        eval_script = make_test_spec(dict(r)).eval_script
+        out.append({"id": r["instance_id"], "input": r["problem_statement"], "target": "",
+                    "metadata": {"category": r["repo"], "repo": r["repo"],
+                                 "instance_id": r["instance_id"], "image": image_for(r["instance_id"]),
+                                 "FAIL_TO_PASS": f2p, "PASS_TO_PASS": p2p, "eval_script": eval_script}})
+    return out
+
+
 BUILDERS = {
     "gpqa": (build_gpqa, 50),
+    "swebench": (build_swebench, 15),
     "mmlu": (build_mmlu, 60),
     "gsm8k": (build_gsm8k, 50),
     "math500": (build_math500, 40),

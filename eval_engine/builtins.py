@@ -20,6 +20,7 @@ from inspect_ai.tool import bash, python
 from inspect_ai.util import SandboxEnvironmentSpec, sandbox
 
 from . import ifeval as _ifeval
+from . import swebench as _swebench
 from .plugins import harness, scorer
 
 PROTOTYPE_ROOT = Path(__file__).resolve().parent.parent  # for resolving sandbox compose paths
@@ -87,6 +88,31 @@ class CodeGenerationConfig(BaseModel):
 def code_generation(cfg: CodeGenerationConfig) -> tuple[Solver, SandboxEnvironmentSpec]:
     solver = chain([system_message(cfg.system), generate()]) if cfg.system else generate()
     return solver, _sandbox_spec(cfg.sandbox, cfg.compose_file, cfg.k8s_values)
+
+
+_SWE_SYSTEM = """You are an expert software engineer fixing a real GitHub issue.
+
+The repository is already checked out at /testbed (your working directory). Use the bash tool to \
+explore the code, then EDIT the source files in /testbed to resolve the issue described below. Do not \
+write new test files — a hidden test suite will judge your fix. When you believe the issue is fixed, \
+submit. The Python environment is the conda env 'testbed' (activate with \
+`source /opt/miniconda3/bin/activate testbed` if you want to run code)."""
+
+
+class SWEBenchConfig(BaseModel):
+    message_limit: int = 40   # agent turn cap (exploration + edits)
+    tool_timeout: int = 120   # per bash call
+
+
+@harness("swe_bench", "1.0.0", SWEBenchConfig,
+         description="Agentic software-engineering (SWE-bench): a bash agent edits the repo at /testbed "
+                     "inside the instance's official image; pair with the 'swe_bench' scorer. The "
+                     "per-instance sandbox is set per-sample from the dataset (metadata.image).")
+def swe_bench(cfg: SWEBenchConfig) -> Solver:
+    # The sandbox is per-SAMPLE (each instance runs in its own official image — set on Sample.sandbox by
+    # the dataset loader), so the harness returns ONLY a solver; the runner passes no task-level sandbox.
+    agent = basic_agent(tools=[bash(timeout=cfg.tool_timeout)], message_limit=cfg.message_limit)
+    return chain([system_message(_SWE_SYSTEM), agent])
 
 
 class MultipleChoiceConfig(BaseModel):
@@ -348,5 +374,47 @@ def ifeval(cfg: IFEvalConfig) -> Scorer:
             ok = total > 0 and satisfied == total
             return Score(value=CORRECT if ok else INCORRECT, answer="",
                          explanation=f"{satisfied}/{total} instructions satisfied")
+        return score
+    return _factory()
+
+
+# ---- swe_bench (SWE-bench): apply the held-out test patch + run the repo's tests IN THE SANDBOX.
+
+class SWEBenchScorerConfig(BaseModel):
+    timeout: int = 1200  # the test suite can be slow; generous wall-clock cap for the eval script
+
+
+@scorer(
+    "swe_bench",
+    "1.0.0",
+    SWEBenchScorerConfig,
+    primary_metric="accuracy",
+    description="Score a SWE-bench instance: run the precomputed eval script (applies the held-out "
+                "test patch + runs the repo's tests) in the instance sandbox, then resolve iff the "
+                "FAIL_TO_PASS tests pass and PASS_TO_PASS tests still pass. Pair with 'swe_bench' harness.",
+)
+def swe_bench_scorer(cfg: SWEBenchScorerConfig) -> Scorer:
+    @inspect_scorer(metrics=[accuracy(), stderr()], name="swe_bench")
+    def _factory() -> Scorer:
+        async def score(state: TaskState, target: Target) -> Score:
+            md = state.metadata or {}
+            eval_script = md.get("eval_script", "")
+            if not eval_script:
+                return Score(value=INCORRECT, explanation="no eval_script in sample metadata")
+            try:
+                # The agent has edited /testbed; the eval script applies the test patch + runs tests.
+                result = await sandbox().exec(["bash", "-c", eval_script], timeout=cfg.timeout)
+                log = (result.stdout or "") + "\n" + (result.stderr or "")
+            except Exception as e:  # sandbox/timeout → unresolved (surfaced for debugging)
+                return Score(value=INCORRECT, explanation=f"eval-script error: {e}"[:500])
+            report = _swebench.grade(log, md.get("repo", ""),
+                                     md.get("FAIL_TO_PASS", []), md.get("PASS_TO_PASS", []))
+            f2p, p2p = report["fail_to_pass"], report["pass_to_pass"]
+            return Score(
+                value=CORRECT if report["resolved"] else INCORRECT,
+                answer="resolved" if report["resolved"] else "unresolved",
+                explanation=f"FAIL_TO_PASS {f2p[0]}/{f2p[1]}, PASS_TO_PASS {p2p[0]}/{p2p[1]} "
+                            f"(parsed {report['n_parsed']} tests)",
+            )
         return score
     return _factory()

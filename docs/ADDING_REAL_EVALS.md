@@ -24,7 +24,12 @@
 > - **Known limitation:** the `math` scorer (Inspect core, sympy) handles integers/fractions/decimals/√
 >   reliably but is finicky on bare algebraic (`x+1`) and complex (`6+9i`) answers — an inherent scorer
 >   limitation shared by upstream MATH harnesses, not a wiring bug.
-> - **SWE-bench** and **multimodal**: still deferred (§2).
+> - **SWE-bench Lite**: IMPLEMENTED (2026-06-06) — `swe_bench` harness (bash agent in each instance's
+>   official `swebench/sweb.eval.x86_64.*` image at /testbed, per-sample sandbox) + `swe_bench` scorer
+>   (runs the precomputed, embedded eval script; resolves via FAIL_TO_PASS/PASS_TO_PASS). The runtime
+>   stays lean: `swebench` is **tooling-only** (the converter precomputes each instance's eval script),
+>   and the PyTest log-parsers are vendored into `eval_engine/swebench.py`. Subset narrowed to the
+>   PyTest-family Lite repos the grader covers. **multimodal**: still deferred (§2).
 
 ---
 

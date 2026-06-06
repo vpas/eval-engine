@@ -45,10 +45,13 @@ SUITE = {
                   "config": {"prompt_suffix": "Put your final answer in \\boxed{}."}},
                  [{"type": "math"}]),
     "humaneval": ("humaneval",
-                  {"type": "code_generation", "config": {"sandbox": "docker"}},
+                  {"type": "code_generation", "config": {"sandbox": "SANDBOX"}},  # filled from --sandbox
                   [{"type": "code_exec", "config": {"timeout": 30}}]),
     "ifeval": ("ifeval",
                {"type": "single_turn"}, [{"type": "ifeval"}]),
+    "swe_bench_lite": ("swebench",
+                       {"type": "swe_bench", "config": {"message_limit": 40}},
+                       [{"type": "swe_bench"}]),
 }
 
 
@@ -63,8 +66,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--api", default="http://localhost:8080", help="control-plane API base URL")
     ap.add_argument("--dataset-uri-prefix", default=str(REPO),
-                    help="prefix the API reads dataset files from (default: this repo root)")
+                    help="prefix the API reads dataset files from (default: this repo root). For the "
+                         "cluster pass /app (where the image holds examples/benchmarks/).")
+    ap.add_argument("--sandbox", default="docker", choices=["docker", "k8s"],
+                    help="sandbox for the code_generation (humaneval) harness: docker (local) | k8s "
+                         "(in-cluster per-sample pods).")
     args = ap.parse_args()
+
+    # fill the humaneval harness sandbox from --sandbox
+    for _eid, (_stem, harness, _scorers) in SUITE.items():
+        if harness.get("config", {}).get("sandbox") == "SANDBOX":
+            harness["config"]["sandbox"] = args.sandbox
 
     def uri(stem: str) -> str:
         return f"{args.dataset_uri_prefix.rstrip('/')}/{BENCH}/{stem}.jsonl"

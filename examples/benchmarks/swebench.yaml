@@ -1,0 +1,17 @@
+# SWE-bench Lite (agentic software engineering). The swe_bench harness runs a bash agent INSIDE each
+# instance's official image (repo at /testbed); the swe_bench scorer applies the held-out test patch
+# and runs the repo's tests (resolved iff FAIL_TO_PASS pass + PASS_TO_PASS still pass). The per-instance
+# sandbox is set per-sample from metadata.image (k8s in-cluster via EVAL_ENGINE_SWE_SANDBOX=k8s).
+# batch_size: 1 — one instance per Inspect eval ⇒ one sandbox. Needs the cluster (large per-instance
+# images on the gVisor pool). gpt-4o-mini resolves few; a stronger coding model resolves more.
+eval: swe_bench_lite
+dataset: examples/benchmarks/swebench.jsonl
+model: openrouter/openai/gpt-4o-mini
+budget_usd: 2.0
+batch_size: 1
+harness:
+  type: swe_bench
+  config:
+    message_limit: 40
+scorers:
+  - type: swe_bench

@@ -45,15 +45,21 @@ def load_jsonl(path: str, limit: int | None = None) -> tuple[MemoryDataset, str]
         if not line:
             continue
         rec = json.loads(line)
-        samples.append(
-            Sample(
-                id=str(rec.get("id", i)),
-                input=rec["input"],
-                target=rec.get("target", ""),
-                choices=rec.get("choices"),  # multiple_choice harness (a lettered choice list)
-                metadata=rec.get("metadata", {}),
-            )
+        meta = rec.get("metadata", {})
+        sample = Sample(
+            id=str(rec.get("id", i)),
+            input=rec["input"],
+            target=rec.get("target", ""),
+            choices=rec.get("choices"),  # multiple_choice harness (a lettered choice list)
+            metadata=meta,
         )
+        # Per-sample sandbox (SWE-bench): each instance runs in its own official image. When a sample
+        # carries metadata.image, attach its sandbox here so the agent + scorer share that container
+        # (k8s/docker per EVAL_ENGINE_SWE_SANDBOX). Inspect uses a sample's sandbox over the task's.
+        if meta.get("image"):
+            from . import swebench  # lazy: only SWE-bench samples need it
+            sample.sandbox = swebench.persample_sandbox(meta["image"])
+        samples.append(sample)
     if limit:
         samples = samples[:limit]
     return MemoryDataset(samples), content_hash
