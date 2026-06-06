@@ -56,7 +56,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   then terminal `failed`. `runner._execute_batch` captures Inspect's per-sample `.error` (an execution
   error, distinct from a low score) and routes it via `_settle_result` to commit-or-retry; the
   single-process `runner.execute` waits out backoffs before finalize (distributed path uses the
-  orchestrator's `queued==0` finalize gate). Tested on SQLite + Postgres (`test_retry_backoff`):
+  orchestrator's `queued==0` finalize gate). Tested on Postgres + ClickHouse (`test_retry_backoff`):
   re-queue → `not_before` blocks the claim → attempt-cap → terminal; `exactly-once` unaffected.
 
 - [x] **3. Budget caps + `BudgetExceeded` terminal class.** FR6, §8. *Done (2026-06-05):*
@@ -66,7 +66,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   still-`queued` tasks to a **distinct terminal `budget_skipped`** status (error_type
   `budget_exceeded`) — *not* `failed`, so it neither inflates `failed_samples` nor burns retries;
   in-flight samples finish. The finalize gate counts `budget_skipped` as terminal, `archive_and_prune`
-  records it, and a budget-capped run finalizes with status `budget_exceeded`. Tested on SQLite +
+  records it, and a budget-capped run finalizes with status `budget_exceeded`. Tested on Postgres + ClickHouse
   Postgres (`test_budget_stop`); e2e on the cluster (run capped mid-flight, remaining samples skipped).
 
 - [x] **4. Epochs + confidence intervals.** §14, FR8. *Done (2026-06-05):* `RunSpec.epochs` +
@@ -93,8 +93,8 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   orchestrator computes `control.live_rollup` (one-pass done/failed/passed/cost over committed ledger
   rows) and `update_live` writes done + failed + live accuracy + `cost_usd` onto the `runs` row — so
   clients read live progress/score/cost from one authoritative place (the runs list now shows live
-  accuracy mid-run, not just at finalize). Added a `cost_usd` column (PG `ALTER … IF NOT EXISTS`;
-  SQLite guarded PRAGMA migration); `finalize_run` persists final cost. Also fixed a latent bug:
+  accuracy mid-run, not just at finalize). Added a `cost_usd` column (PG `ALTER … IF NOT EXISTS`);
+  `finalize_run` persists final cost. Also fixed a latent bug:
   `get_run` used `SELECT *` mapped positionally, misaligning `created_at`/`finished_at` past the
   unmapped `spec_json`/`created_by` — now an explicit `RUN_COLS` (kept in sync with `api.get_run`),
   which also surfaces `cost_usd` + `created_by`. Tested (`test_live_rollup`, both backends).
@@ -104,7 +104,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   tenancy-ready; enforcement deferred), and a **worker image/code pin** — the Dockerfile stamps the
   build's git SHA (`ARG GIT_SHA` → `ENV EVAL_ENGINE_IMAGE_DIGEST`, built with
   `--build-arg GIT_SHA=$(git rev-parse --short HEAD)`), which `runner` records as `image_digest` on
-  every run. New `team`/`image_digest` columns (PG + SQLite migrations); surfaced in `GET /runs/{id}`.
+  every run. New `team`/`image_digest` columns (PG `ALTER … IF NOT EXISTS` migrations); surfaced in `GET /runs/{id}`.
   `sampling{epochs,temperature,seed}` (#4) and `budget` (#3) already landed, and `dataset_hash` was
   already pinned — so a run's inputs are now pinned per §14. Tested (`test_distributed` asserts the
   pins are recorded). **Provider version-fingerprint — done (2026-06-05):** a `provider_fingerprint`
@@ -123,7 +123,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
 - [x] **8. Dataset / Eval / Model registration + CRUD.** FR1–3. *Done (2026-06-05):* typed entity
   specs (`DatasetSpec` / `EvalSpec` / `ModelSpec`) + a versioned registry (`control.register_entity`
   / `list_entities` / `get_entity`, backed by a generic `entities(kind,id,version,body)` table on
-  PG + SQLite). API: `POST/GET /datasets`, `/evals`, `/models` (+ `GET /{id}` → latest version);
+  PG). API: `POST/GET /datasets`, `/evals`, `/models` (+ `GET /{id}` → latest version);
   versions are immutable (re-register a new version, no PUT/DELETE — the content-addressed stance of
   §13/§14), and `POST /evals` validates the bundled harness/scorers exist (422 otherwise). Tested:
   `test_registry` (both backends) + a FastAPI TestClient smoke (register/list/get/validation/404).
@@ -157,7 +157,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `max_inflight`=5, many iterators progress), else `batch` (`max_inflight`=50); explicit `RunSpec.lane`
   overrides. **(c)** The orchestrator's `_admit` does two-lane admission: a global cap on running runs
   + a reserved interactive slice that batch borrows only when there's no interactive demand and yields
-  (by attrition, never mid-run) when there is. New `lane`/`max_inflight` columns. Tested on SQLite +
+  (by attrition, never mid-run) when there is. New `lane`/`max_inflight` columns. Tested on Postgres + ClickHouse
   Postgres (`test_max_inflight_cap`, `test_lane_classification`); exactly-once (12 workers) unaffected.
 
 - [x] **12. `multiple_choice` harness.** §7. *Done (2026-06-05):* `multiple_choice` harness (Inspect's
@@ -168,7 +168,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   `llm_judge`). Tested (`test_multiple_choice_plugins`).
 
 - [x] **13. Audit log.** §8 (auth: audit), §13. *Done (2026-06-05):* append-only `audit_log` table
-  (PG + SQLite); `control.audit(actor, action, target, detail)` records every mutating action and
+  (PG); `control.audit(actor, action, target, detail)` records every mutating action and
   `list_audit` reads it newest-first. Wired into `run.launch`, `run.rerun`, and
   `{dataset,eval,model}.register` (actor = the OIDC `X-Auth-Request-Email`); exposed at `GET /audit`.
   Tested (`test_audit`, both backends + TestClient).
@@ -250,7 +250,7 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   (2) For an *ungraceful* death (SIGKILL/OOM/node loss) where SIGTERM never ran, the standby loop
   `reap_stale_leader`s — terminates the lock holder once it's been idle past `STALE_LEADER_SECONDS`
   (20s; a live leader refreshes its lock connection every 2s tick via `leader_alive`, so idle>20s is a
-  safe "crashed" signal). Both no-ops on the single-process SQLite backend.
+  safe "crashed" signal).
 
 ## Explicitly out of scope (deferred — see `docs/FUTURE.md`)
 

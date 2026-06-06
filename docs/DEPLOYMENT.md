@@ -103,9 +103,9 @@ drop Ray. The current claim path uses a **fixed per-run `max_inflight`** cap (no
 - [x] **Worker** (`eval_engine.worker`) — claim→execute→commit→load loop over active runs; pod name = claimer id.
 - [x] **Orchestrator** (`eval_engine.orchestrator`) — admit queued→running; finalize when terminal
       (gate on authoritative `total`; safety-sweep load → aggregate → archive → prune → completed). One replica.
-- [x] **API** — `POST /runs` launches only in the cluster (inline execute kept for local sqlite dev via env toggle).
+- [x] **API** — `POST /runs` launches only in the cluster (inline execute kept for local single-process dev via env toggle).
 - [x] **Local smoke** — `tests/test_distributed.py`: launch→admit→drain→finalize, exactly-once, ledger
-      pruned — passes on **both sqlite and real Postgres+ClickHouse** (via `infra/up.sh`).
+      pruned — passes against **Postgres + ClickHouse** (via `infra/up.sh`).
 - Deferred to a later pass (not needed for the QA e2e): the `run:<id>:stop` Redis flag (cancel/budget),
   two-lane admission + per-run cap, live-metrics on the `runs` row.
 
