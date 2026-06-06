@@ -40,6 +40,14 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS image_digest TEXT;  -- repro pin: work
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS lane TEXT;          -- interactive | batch (SCHEDULER §2)
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS max_inflight INT;   -- per-run concurrency cap (SCHEDULER §3)
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS provider_fingerprint TEXT;  -- repro pin: resolved model[@system_fingerprint] (DESIGN §14)
+-- Training-monitor provenance (docs/TRAINING_MONITOR.md §2): a checkpoint-eval run is an ordinary run
+-- TAGGED with the training run / checkpoint / step + a `sweep` group. NULL for every ad-hoc run.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS training_run_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint_id TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS step INT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS sweep TEXT;
+CREATE INDEX IF NOT EXISTS ix_runs_ckpt ON runs(checkpoint_id);
+CREATE INDEX IF NOT EXISTS ix_runs_train ON runs(training_run_id);
 
 CREATE TABLE IF NOT EXISTS sample_tasks(
   run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
@@ -65,6 +73,43 @@ CREATE TABLE IF NOT EXISTS entities(
 CREATE TABLE IF NOT EXISTS audit_log(
   id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(),
   actor TEXT, action TEXT, target TEXT, detail JSONB);
+
+-- ===== Training monitor (docs/TRAINING_MONITOR.md) ========================================
+-- A monitored (mocked) training run; MUTABLE (status/current_step advance), so a dedicated table
+-- rather than the immutable entity registry. `body` holds the full TrainingRunSpec (suite/config/…).
+CREATE TABLE IF NOT EXISTS training_runs(
+  id TEXT PRIMARY KEY, model TEXT, base TEXT, status TEXT DEFAULT 'watching',
+  current_step INT DEFAULT 0, planned_steps INT, source TEXT, owner TEXT, body JSONB,
+  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
+
+-- One discovered checkpoint. `model_ref` is the opaque handle we eval; `train_metrics` is the optional
+-- trainer telemetry that powers the §8 cross-check. UNIQUE(run,step) makes discovery idempotent.
+CREATE TABLE IF NOT EXISTS checkpoints(
+  id TEXT PRIMARY KEY, training_run_id TEXT, step INT, model_ref TEXT, tokens BIGINT,
+  wall_time TIMESTAMPTZ, status TEXT DEFAULT 'discovered', train_metrics JSONB,
+  discovered_at TIMESTAMPTZ DEFAULT now(), UNIQUE(training_run_id, step));
+CREATE INDEX IF NOT EXISTS ix_ckpt_run ON checkpoints(training_run_id, step);
+
+-- Per-(training_run, eval, step) score rollup — the time series the chart + detectors read. Computed
+-- at reconcile from the per-checkpoint run's analytics summary (kept in PG so we don't re-query CH).
+CREATE TABLE IF NOT EXISTS checkpoint_scores(
+  training_run_id TEXT, eval_id TEXT, step INT, run_id TEXT, n INT, passed INT,
+  accuracy DOUBLE PRECISION, ci_lo DOUBLE PRECISION, ci_hi DOUBLE PRECISION,
+  sample_errors INT, expected DOUBLE PRECISION,
+  PRIMARY KEY(training_run_id, eval_id, step));
+
+-- A detected anomaly + its diagnosis (one per (run,eval,step); a sustained dip collapses to one row).
+CREATE TABLE IF NOT EXISTS anomalies(
+  id TEXT PRIMARY KEY, training_run_id TEXT, eval_id TEXT, step INT, kind TEXT, severity TEXT,
+  delta DOUBLE PRECISION, from_step INT, diagnosis TEXT, cause TEXT, signals JSONB,
+  categories JSONB, samples JSONB, created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(training_run_id, eval_id, step));
+
+-- MOCK-ONLY: the checkpoint-ref → real-model resolver (§4). In production the gateway resolves a
+-- `checkpoint:…` alias natively; here a small table maps it to an OpenRouter/mock model so the rest of
+-- the engine treats the checkpoint as "served by trainer infra" without knowing it's faked.
+CREATE TABLE IF NOT EXISTS checkpoint_models(
+  model_ref TEXT PRIMARY KEY, real_model TEXT, mock_output TEXT, params JSONB);
 """
 
 _local = threading.local()
@@ -145,12 +190,14 @@ def new_run_id() -> str:
 def create_run(meta: dict) -> None:
     _conn().execute(
         "INSERT INTO runs(id,eval_id,eval_version,model,provider,model_id,harness,scorers,"
-        "status,total,done,failed,dataset_hash,spec_json,created_by,team,image_digest,lane,max_inflight) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s,%s,%s,%s,%s)",
+        "status,total,done,failed,dataset_hash,spec_json,created_by,team,image_digest,lane,max_inflight,"
+        "training_run_id,checkpoint_id,step,sweep) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,0,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (meta["id"], meta["eval_id"], meta["eval_version"], meta["model"], meta["provider"],
          meta["model_id"], meta["harness"], json.dumps(meta["scorers"]), meta["total"],
          meta["dataset_hash"], meta.get("spec_json"), meta.get("created_by"),
-         meta.get("team"), meta.get("image_digest"), meta.get("lane"), meta.get("max_inflight")),
+         meta.get("team"), meta.get("image_digest"), meta.get("lane"), meta.get("max_inflight"),
+         meta.get("training_run_id"), meta.get("checkpoint_id"), meta.get("step"), meta.get("sweep")),
     )
 
 
@@ -468,3 +515,190 @@ def archive_and_prune(run_id: str) -> None:
         (run_id,),
     )
     con.execute("DELETE FROM sample_tasks WHERE run_id=%s", (run_id,))
+
+
+# ===== Training monitor (docs/TRAINING_MONITOR.md) ==========================================
+
+def create_training_run(spec: dict) -> None:
+    """Register a training run to monitor (idempotent on id — re-register updates its spec/status)."""
+    _conn().execute(
+        "INSERT INTO training_runs(id,model,base,status,current_step,planned_steps,source,owner,body) "
+        "VALUES(%s,%s,%s,'watching',0,%s,%s,%s,%s) "
+        "ON CONFLICT(id) DO UPDATE SET model=EXCLUDED.model, base=EXCLUDED.base, "
+        "planned_steps=EXCLUDED.planned_steps, source=EXCLUDED.source, owner=EXCLUDED.owner, "
+        "body=EXCLUDED.body, updated_at=now()",
+        (spec["id"], spec.get("model", ""), spec.get("base", ""), spec.get("planned_steps"),
+         spec.get("source", ""), spec.get("owner", ""), json.dumps(spec)),
+    )
+
+
+def update_training_run(tr_id: str, *, status: str | None = None, current_step: int | None = None,
+                        finished: bool = False) -> None:
+    sets, vals = ["updated_at=now()"], []
+    if status is not None:
+        sets.append("status=%s"); vals.append(status)
+    if current_step is not None:
+        sets.append("current_step=GREATEST(coalesce(current_step,0), %s)"); vals.append(current_step)
+    if finished:
+        sets.append("finished_at=now()")
+    vals.append(tr_id)
+    _conn().execute(f"UPDATE training_runs SET {', '.join(sets)} WHERE id=%s", vals)
+
+
+def _tr_row(r) -> dict:
+    return {"id": r[0], "model": r[1], "base": r[2], "status": r[3], "current_step": r[4],
+            "planned_steps": r[5], "source": r[6], "owner": r[7], "body": r[8],
+            "created_at": r[9].isoformat() if r[9] else None,
+            "finished_at": r[10].isoformat() if r[10] else None}
+
+
+_TR_COLS = ("id, model, base, status, current_step, planned_steps, source, owner, body, "
+            "created_at, finished_at")
+
+
+def get_training_run(tr_id: str) -> dict | None:
+    r = _conn().execute(f"SELECT {_TR_COLS} FROM training_runs WHERE id=%s", (tr_id,)).fetchone()
+    return _tr_row(r) if r else None
+
+
+def list_training_runs() -> list[dict]:
+    rows = _conn().execute(f"SELECT {_TR_COLS} FROM training_runs ORDER BY created_at DESC").fetchall()
+    return [_tr_row(r) for r in rows]
+
+
+def active_training_runs() -> list[str]:
+    rows = _conn().execute(
+        "SELECT id FROM training_runs WHERE status IN ('watching','training') ORDER BY created_at"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def insert_checkpoint(ckpt: dict) -> bool:
+    """Record a discovered checkpoint. Returns True if newly inserted (idempotent on (run,step))."""
+    rows = _conn().execute(
+        "INSERT INTO checkpoints(id,training_run_id,step,model_ref,tokens,wall_time,train_metrics) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(training_run_id,step) DO NOTHING RETURNING id",
+        (ckpt["id"], ckpt["training_run_id"], ckpt["step"], ckpt["model_ref"], ckpt.get("tokens", 0),
+         ckpt.get("wall_time"), json.dumps(ckpt.get("train_metrics", {}))),
+    ).fetchall()
+    return bool(rows)
+
+
+def discovered_steps(tr_id: str) -> set[int]:
+    rows = _conn().execute(
+        "SELECT step FROM checkpoints WHERE training_run_id=%s", (tr_id,)
+    ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def _ckpt_row(r) -> dict:
+    return {"id": r[0], "training_run_id": r[1], "step": r[2], "model_ref": r[3], "tokens": r[4],
+            "status": r[5], "train_metrics": r[6] or {},
+            "discovered_at": r[7].isoformat() if r[7] else None}
+
+
+def list_checkpoints(tr_id: str, status: str | None = None) -> list[dict]:
+    sql = ("SELECT id,training_run_id,step,model_ref,tokens,status,train_metrics,discovered_at "
+           "FROM checkpoints WHERE training_run_id=%s")
+    vals: list = [tr_id]
+    if status:
+        sql += " AND status=%s"; vals.append(status)
+    sql += " ORDER BY step"
+    return [_ckpt_row(r) for r in _conn().execute(sql, vals).fetchall()]
+
+
+def set_checkpoint_status(ckpt_id: str, status: str) -> None:
+    _conn().execute("UPDATE checkpoints SET status=%s WHERE id=%s", (status, ckpt_id))
+
+
+def runs_for_checkpoint(ckpt_id: str) -> list[dict]:
+    """The per-eval runs launched for a checkpoint + their terminal state (for reconcile)."""
+    rows = _conn().execute(
+        "SELECT id, eval_id, status, coalesce(failed,0), coalesce(total,0) FROM runs WHERE checkpoint_id=%s",
+        (ckpt_id,),
+    ).fetchall()
+    return [{"run_id": r[0], "eval_id": r[1], "status": r[2], "failed": r[3], "total": r[4]} for r in rows]
+
+
+def run_for_step(tr_id: str, eval_id: str, step: int) -> str | None:
+    """The run_id of a given eval's checkpoint-eval at a step (to diff baseline vs current)."""
+    r = _conn().execute(
+        "SELECT id FROM runs WHERE training_run_id=%s AND eval_id=%s AND step=%s ORDER BY created_at DESC LIMIT 1",
+        (tr_id, eval_id, step),
+    ).fetchone()
+    return r[0] if r else None
+
+
+def upsert_checkpoint_score(s: dict) -> None:
+    _conn().execute(
+        "INSERT INTO checkpoint_scores(training_run_id,eval_id,step,run_id,n,passed,accuracy,ci_lo,ci_hi,"
+        "sample_errors,expected) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON CONFLICT(training_run_id,eval_id,step) DO UPDATE SET run_id=EXCLUDED.run_id, n=EXCLUDED.n, "
+        "passed=EXCLUDED.passed, accuracy=EXCLUDED.accuracy, ci_lo=EXCLUDED.ci_lo, ci_hi=EXCLUDED.ci_hi, "
+        "sample_errors=EXCLUDED.sample_errors, expected=EXCLUDED.expected",
+        (s["training_run_id"], s["eval_id"], s["step"], s.get("run_id"), s.get("n"), s.get("passed"),
+         s.get("accuracy"), s.get("ci_lo"), s.get("ci_hi"), s.get("sample_errors", 0), s.get("expected")),
+    )
+
+
+def set_checkpoint_expected(tr_id: str, eval_id: str, step: int, expected: float) -> None:
+    _conn().execute(
+        "UPDATE checkpoint_scores SET expected=%s WHERE training_run_id=%s AND eval_id=%s AND step=%s",
+        (expected, tr_id, eval_id, step),
+    )
+
+
+def checkpoint_scores(tr_id: str, eval_id: str | None = None) -> list[dict]:
+    sql = ("SELECT eval_id,step,run_id,n,passed,accuracy,ci_lo,ci_hi,sample_errors,expected "
+           "FROM checkpoint_scores WHERE training_run_id=%s")
+    vals: list = [tr_id]
+    if eval_id:
+        sql += " AND eval_id=%s"; vals.append(eval_id)
+    sql += " ORDER BY eval_id, step"
+    rows = _conn().execute(sql, vals).fetchall()
+    return [{"eval_id": r[0], "step": r[1], "run_id": r[2], "n": r[3], "passed": r[4],
+             "accuracy": r[5], "ci_lo": r[6], "ci_hi": r[7], "sample_errors": r[8], "expected": r[9]}
+            for r in rows]
+
+
+def insert_anomaly(a: dict) -> None:
+    _conn().execute(
+        "INSERT INTO anomalies(id,training_run_id,eval_id,step,kind,severity,delta,from_step,diagnosis,"
+        "cause,signals,categories,samples) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON CONFLICT(training_run_id,eval_id,step) DO UPDATE SET kind=EXCLUDED.kind, "
+        "severity=EXCLUDED.severity, delta=EXCLUDED.delta, from_step=EXCLUDED.from_step, "
+        "diagnosis=EXCLUDED.diagnosis, cause=EXCLUDED.cause, signals=EXCLUDED.signals, "
+        "categories=EXCLUDED.categories, samples=EXCLUDED.samples",
+        (a["id"], a["training_run_id"], a["eval_id"], a["step"], a["kind"], a["severity"], a["delta"],
+         a.get("from_step"), a.get("diagnosis"), a.get("cause"), json.dumps(a.get("signals", [])),
+         json.dumps(a.get("categories", [])), json.dumps(a.get("samples", []))),
+    )
+
+
+def list_anomalies(tr_id: str) -> list[dict]:
+    rows = _conn().execute(
+        "SELECT id,eval_id,step,kind,severity,delta,from_step,diagnosis,cause,signals,categories,samples "
+        "FROM anomalies WHERE training_run_id=%s ORDER BY step DESC", (tr_id,),
+    ).fetchall()
+    return [{"id": r[0], "eval": r[1], "step": r[2], "kind": r[3], "severity": r[4], "delta": r[5],
+             "from": r[6], "diagnosis": r[7], "cause": r[8], "signals": r[9] or [],
+             "categories": r[10] or [], "samples": r[11] or []} for r in rows]
+
+
+# --- mock checkpoint-model resolver (§4) -------------------------------------------------------------
+
+def set_checkpoint_model(model_ref: str, real_model: str, mock_output: str | None = None,
+                         params: dict | None = None) -> None:
+    _conn().execute(
+        "INSERT INTO checkpoint_models(model_ref,real_model,mock_output,params) VALUES(%s,%s,%s,%s) "
+        "ON CONFLICT(model_ref) DO UPDATE SET real_model=EXCLUDED.real_model, "
+        "mock_output=EXCLUDED.mock_output, params=EXCLUDED.params",
+        (model_ref, real_model, mock_output, json.dumps(params or {})),
+    )
+
+
+def get_checkpoint_model(model_ref: str) -> dict | None:
+    r = _conn().execute(
+        "SELECT real_model, mock_output, params FROM checkpoint_models WHERE model_ref=%s", (model_ref,)
+    ).fetchone()
+    return {"real_model": r[0], "mock_output": r[1], "params": r[2] or {}} if r else None

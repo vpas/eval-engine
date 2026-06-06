@@ -36,7 +36,8 @@ def pytest_collection_modifyitems(items):
 
 # The mutable control tables wiped between tests for isolation (analytics is run_id-scoped, so its
 # rows don't cross-contaminate and don't need truncating).
-_CONTROL_TABLES = "runs, sample_tasks, failed_task_archive, entities, audit_log"
+_CONTROL_TABLES = ("runs, sample_tasks, failed_task_archive, entities, audit_log, "
+                   "training_runs, checkpoints, checkpoint_scores, anomalies, checkpoint_models")
 
 
 def _backends_reachable() -> bool:

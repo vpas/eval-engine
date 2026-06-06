@@ -140,15 +140,34 @@ def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
     return tokens_in * prompt + tokens_out * completion
 
 
+def _resolve_model(spec: RunSpec) -> tuple[str, str | None]:
+    """Resolve the model actually CALLED for inference. For a training-checkpoint run the spec's model
+    is an opaque ``checkpoint:<tr>:<step>`` handle (docs/TRAINING_MONITOR.md §4); a mock resolver maps
+    it to a real OpenRouter/mock model behind the scenes, so the rest of the engine treats the
+    checkpoint as 'served by trainer infra' without knowing it's faked. In production the gateway would
+    resolve a ``checkpoint:`` alias natively. Non-checkpoint models pass through unchanged. Returns
+    (exec_model, mock_output_override)."""
+    if spec.model.startswith("checkpoint:"):
+        m = control.get_checkpoint_model(spec.model)
+        if m:
+            return m["real_model"], (m.get("mock_output") or spec.mock_output)
+    return spec.model, spec.mock_output
+
+
+def _build_model(model: str, mock_output: str | None, mock_tool_calls, n: int):
+    if model.startswith("mockllm"):
+        if mock_tool_calls:  # scripted agentic mock: emit the tool-call sequence in order
+            outs = [ModelOutput.for_tool_call(model, tc["tool"], tc.get("args", {}))
+                    for tc in mock_tool_calls]
+            return get_model(model, custom_outputs=outs)
+        out = mock_output or "Paris"
+        return get_model(model, custom_outputs=[ModelOutput.from_content(model, out) for _ in range(n + 2)])
+    return get_model(model)
+
+
 def _model_for(spec: RunSpec, n: int):
-    if spec.model.startswith("mockllm"):
-        if spec.mock_tool_calls:  # scripted agentic mock: emit the tool-call sequence in order
-            outs = [ModelOutput.for_tool_call(spec.model, tc["tool"], tc.get("args", {}))
-                    for tc in spec.mock_tool_calls]
-            return get_model(spec.model, custom_outputs=outs)
-        out = spec.mock_output or "Paris"
-        return get_model(spec.model, custom_outputs=[ModelOutput.from_content(spec.model, out) for _ in range(n + 2)])
-    return get_model(spec.model)
+    exec_model, mock_output = _resolve_model(spec)
+    return _build_model(exec_model, mock_output, spec.mock_tool_calls, n)
 
 
 def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str],
@@ -247,8 +266,12 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         gen["temperature"] = spec.temperature
     if spec.seed is not None:
         gen["seed"] = spec.seed
+    # Resolve the model actually called (a checkpoint ref → real model; §4) — used for both the
+    # Inspect model object and for pricing (so cost reflects the real provider, not the opaque ref).
+    exec_model, mock_output = _resolve_model(spec)
+    model = _build_model(exec_model, mock_output, spec.mock_tool_calls, len(ids) * max(1, spec.epochs))
     log = inspect_eval(
-        task, model=_model_for(spec, len(ids) * max(1, spec.epochs)), display="none",
+        task, model=model, display="none",
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
         epochs=epochs, **gen,
     )[0]
@@ -286,7 +309,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
             "scores": score_vals,
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
-            "cost_usd": _cost_usd(spec.model, tokens_in, tokens_out),  # prod: LiteLLM gateway
+            "cost_usd": _cost_usd(exec_model, tokens_in, tokens_out),  # prod: LiteLLM gateway
             "latency_ms": 0,
             "error_type": error_type,
             "transcript_uri": uri,
@@ -320,15 +343,18 @@ def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> Non
     control.mark_loaded(run_id, ids)
 
 
-def launch(spec: RunSpec, created_by: str | None = None) -> str:
+def launch(spec: RunSpec, created_by: str | None = None, provenance: dict | None = None) -> str:
     """CONTROL-PLANE action: create the run + expand the ledger (queued). Returns run_id.
 
     ``created_by`` is the authenticated user's email (from the OIDC proxy header), recorded for
-    attribution; None when unauthenticated (e.g. local CLI/dev).
+    attribution; None when unauthenticated (e.g. local CLI/dev). ``provenance`` optionally tags the run
+    as a training checkpoint-eval (``training_run_id`` / ``checkpoint_id`` / ``step`` / ``sweep``,
+    docs/TRAINING_MONITOR.md §2) — NULL/absent for an ordinary ad-hoc run.
     """
     dataset, dataset_hash = load_jsonl(spec.dataset, spec.limit)
     samples_by_id = {str(s.id): s for s in dataset}
     provider, model_id = _split_model(spec.model)
+    prov = provenance or {}
 
     run_id = control.new_run_id()
     lane, max_inflight = _classify(spec, len(samples_by_id))
@@ -342,6 +368,8 @@ def launch(spec: RunSpec, created_by: str | None = None) -> str:
         "team": spec.team,                    # ownership (tenancy-ready; enforcement deferred)
         "image_digest": IMAGE_DIGEST,         # repro pin: the worker code/image that ran this (§14)
         "lane": lane, "max_inflight": max_inflight,  # admission lane + per-run cap (SCHEDULER §2/§3)
+        "training_run_id": prov.get("training_run_id"), "checkpoint_id": prov.get("checkpoint_id"),
+        "step": prov.get("step"), "sweep": prov.get("sweep"),  # checkpoint-eval provenance (§2)
     })
     control.expand_tasks(
         run_id,

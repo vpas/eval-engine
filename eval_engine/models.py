@@ -58,6 +58,62 @@ class ModelSpec(BaseModel):
     description: str = ""
 
 
+# --- Training monitor (docs/TRAINING_MONITOR.md). A new vNext track: we MONITOR an external (mocked)
+# trainer's checkpoint stream and continuously eval each checkpoint. These are additive — an ordinary
+# run never touches them.
+
+class SuiteEntry(BaseModel):
+    """One eval in a training run's suite (run on EVERY checkpoint). ``role='canary'`` marks a trivial
+    sanity eval any functional model should ace — a canary collapse is a decisive training/serving-fault
+    signal that separates a broken checkpoint from a model merely weak on a hard eval (§8)."""
+    eval: str                                   # registered EvalSpec id
+    version: int = 1
+    role: str = "standard"                      # standard | canary
+    color: str | None = None                    # chart line color (display only)
+    sample_limit: int | None = None             # per-eval dataset subsample override (cost vs cadence)
+
+
+class TrainingRunConfig(BaseModel):
+    """Per-training-run cost/cadence policy — fully configurable per run. Lets a cheap run sub-sample
+    every checkpoint while a milestone run evals the full suite at full size (the user's ask)."""
+    eval_every: int = 1                         # eval every Kth discovered checkpoint
+    sample_limit: int | None = None             # default per-checkpoint dataset subsample (None = full)
+    milestone_every: int | None = None          # every Nth evaluated checkpoint runs the FULL suite full-size
+    max_pending_checkpoints: int | None = None  # skip-stale safety valve: cap the un-evaluated backlog (keep latest)
+    lane: str = "interactive"                   # admission lane for checkpoint-evals (timely feedback)
+    epochs: int = 1
+    budget_usd: float | None = None             # optional aggregate budget across the whole training run
+
+
+class TrainingRunSpec(BaseModel):
+    """A training run we MONITOR (the trainer is mocked / out of scope, DESIGN §1 non-goal). Registered
+    then watched: the monitor polls ``source`` for new checkpoints and evals each against ``suite``."""
+    id: str
+    model: str                                  # the model being trained (display + ckpt model-id prefix)
+    base: str = ""                              # base/seed model
+    planned_steps: int = 0
+    source: str                                 # object-storage prefix we poll (gs://… or a local dir)
+    suite: list[SuiteEntry]
+    owner: str = ""
+    hardware: str = ""                          # provenance/display, e.g. "256× H100"
+    precision: str = ""                         # provenance/display, e.g. "bf16"
+    glyph: str = ""                             # 2-char avatar (display)
+    started: str | None = None
+    config: TrainingRunConfig = Field(default_factory=TrainingRunConfig)
+
+
+class CheckpointManifest(BaseModel):
+    """The per-checkpoint contract the (mocked) trainer writes — nothing about *how* it was trained.
+    ``model_ref`` is the opaque handle the engine evaluates *as if* trainer infra served it; a mock
+    resolver maps it to a real model behind the scenes (§4)."""
+    training_run_id: str
+    step: int
+    model_ref: str
+    tokens: int = 0
+    wall_time: str | None = None
+    train_metrics: dict = Field(default_factory=dict)   # {loss, grad, lr, throughput} — §8 cross-check
+
+
 class RunSpec(BaseModel):
     eval: str
     eval_version: int = 1          # pin eval@version (DESIGN §7 — the eval is a versioned bundle)

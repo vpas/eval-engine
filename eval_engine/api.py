@@ -17,9 +17,10 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
-from . import builtins, db, plugins, runner  # noqa: F401  populate registry
+from . import builtins, db, plugins, runner, training  # noqa: F401  populate registry
 from .db import analytics, control
-from .models import DatasetSpec, EvalSpec, LaunchFromEval, ModelSpec, PluginRef, RunSpec
+from .models import (DatasetSpec, EvalSpec, LaunchFromEval, ModelSpec, PluginRef, RunSpec,
+                     TrainingRunSpec)
 
 # In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
 # orchestrator/worker pods execute. Set EVAL_ENGINE_API_INLINE_EXEC=1 for local single-process dev:
@@ -268,3 +269,72 @@ def list_models():
 @app.get("/models/{model_id}")
 def get_model(model_id: str):
     return _get("model", model_id)
+
+
+# --- Training monitor (docs/TRAINING_MONITOR.md). Register a training run to watch, then read its
+# checkpoint trajectory / anomalies. The monitor role (eval_engine.training) discovers + fans out +
+# reconciles on its own loop; these endpoints are the read surface (+ a manual scan for dev/test).
+# The frontend for this lands with the full prototype-based dashboard rewrite — API only here.
+
+@app.post("/training", status_code=201)
+def register_training(spec: TrainingRunSpec, x_auth_request_email: str | None = Header(default=None)):
+    """Register a training run to monitor. Its suite evals must already be registered evals."""
+    for entry in spec.suite:
+        if not control.get_entity("eval", entry.eval, entry.version):
+            raise HTTPException(status_code=422, detail=f"suite eval not registered: {entry.eval}")
+    training.register(spec)
+    control.audit(x_auth_request_email, "training.register", spec.id,
+                  {"model": spec.model, "suite": [e.eval for e in spec.suite]})
+    return {"id": spec.id, "status": "watching"}
+
+
+@app.get("/training")
+def list_training():
+    return control.list_training_runs()
+
+
+@app.get("/training/{tr_id}")
+def get_training(tr_id: str):
+    tr = control.get_training_run(tr_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    tr["best_checkpoints"] = training.best_checkpoints(tr_id)
+    tr["anomaly_count"] = len(control.list_anomalies(tr_id))
+    return tr
+
+
+@app.get("/training/{tr_id}/checkpoints")
+def training_checkpoints(tr_id: str):
+    if not control.get_training_run(tr_id):
+        raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    return control.list_checkpoints(tr_id)
+
+
+@app.get("/training/{tr_id}/series")
+def training_series(tr_id: str):
+    """The score-vs-step series per eval (accuracy + Wilson CI + expected band) — the chart's data."""
+    if not control.get_training_run(tr_id):
+        raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    series: dict[str, list] = {}
+    for s in control.checkpoint_scores(tr_id):
+        series.setdefault(s["eval_id"], []).append(s)
+    return series
+
+
+@app.get("/training/{tr_id}/anomalies")
+def training_anomalies(tr_id: str):
+    if not control.get_training_run(tr_id):
+        raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    return control.list_anomalies(tr_id)
+
+
+@app.post("/training/{tr_id}/scan", status_code=202)
+def scan_training(tr_id: str):
+    """Manually run one monitor tick for this run (discover → fan out → reconcile). Normally the
+    leader-elected monitor loop does this; exposed for dev/test and on-demand refresh."""
+    if not control.get_training_run(tr_id):
+        raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    training.discover(tr_id)
+    fanned = training.fan_out(tr_id)
+    evaluated = training.reconcile(tr_id)
+    return {"fanned_out": fanned, "evaluated": evaluated}
