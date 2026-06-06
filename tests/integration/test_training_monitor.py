@@ -114,7 +114,13 @@ def test_cadence_skips_checkpoints(tmp_path):
     mock.setup(); mock.emit_all(); mock.finish("completed")
     training.register_from_source(source)
     training.discover(tr_id)
-    training.fan_out(tr_id, inline=True)
+    # Cadence (which checkpoints to eval vs skip) is decided in fan_out BEFORE any execution, and the
+    # evaluating/skipped statuses are set regardless of inline. So this test runs inline=False: it
+    # asserts the cadence decision directly without executing the suite (12 runs × 60 mock samples)
+    # through the backends — that heavy inline load was an unnecessary flakiness vector under the full
+    # suite (a transient backend error mid-execution would abort fan_out, stranding a later checkpoint
+    # at 'discovered'). The execute path is covered by the trajectory/diagnosis tests above.
+    training.fan_out(tr_id, inline=False)
     ckpts = {c["step"]: c["status"] for c in control.list_checkpoints(tr_id)}
     assert ckpts[2000] == "evaluating"   # idx 0 → evaluated
     assert ckpts[6000] == "skipped"      # idx 1 → skipped
