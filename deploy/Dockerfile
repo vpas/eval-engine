@@ -21,7 +21,7 @@ WORKDIR /app
 #    drop the stub so only third-party deps remain. This is what makes code edits rebuild fast.
 COPY pyproject.toml ./
 RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
-    && pip install '.[openrouter,gcs,k8s,ops]' \
+    && pip install '.[openrouter,gcs,k8s,ops,benchmarks]' \
     && pip uninstall -y eval-engine
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
@@ -29,7 +29,7 @@ COPY eval_engine/ ./eval_engine/
 COPY static/ ./static/
 COPY examples/ ./examples/
 COPY deploy/sandbox/ ./deploy/sandbox/
-RUN pip install -e '.[openrouter,gcs,k8s,ops]' --no-deps
+RUN pip install -e '.[openrouter,gcs,k8s,ops,benchmarks]' --no-deps
 
 # Reproducibility pin (DESIGN §14): stamp the build's git SHA so every run records the exact worker
 # code that produced it. Placed late so changing it only rebuilds this tiny layer (deps/code cached).

@@ -6,7 +6,7 @@ sandbox-executing `code_exec` path is exercised e2e elsewhere (needs Docker); he
 import pytest
 
 from eval_engine import builtins, ifeval, plugins  # noqa: F401  importing builtins populates registry
-from eval_engine.builtins import _extract_code, _extract_number
+from eval_engine.builtins import _assemble_program, _extract_code, _extract_number
 
 
 def test_catalog_spans_the_new_eval_shapes():
@@ -55,6 +55,30 @@ def test_extract_code_prefers_fenced_blocks():
     out = "Sure:\n```python\ndef f():\n    return 1\n```\nthanks"
     assert _extract_code(out) == "def f():\n    return 1"
     assert _extract_code("def g():\n    return 2") == "def g():\n    return 2"  # bare fallback
+
+
+# The HumanEval contract: the `test` field defines `def check(candidate)` but never calls it — the
+# program MUST append `check(entry)`, else every solution passes trivially (regression guard).
+_HUMANEVAL_TEST = "def check(candidate):\n    assert candidate(2, 3) == 5\n"
+
+
+def test_assemble_program_appends_check_call():
+    prog = _assemble_program("```python\ndef add(a, b):\n    return a + b\n```",
+                             "def add(a, b):\n", "add", _HUMANEVAL_TEST)
+    assert prog.rstrip().endswith("check(add)")
+    assert "def check(candidate)" in prog and "def add(a, b)" in prog
+
+
+def test_assemble_program_prepends_stub_when_model_omits_signature():
+    # Model returns only the body fragment (no `def add`): the stub must be prepended.
+    prog = _assemble_program("```python\n    return a + b\n```", "def add(a, b):\n", "add", _HUMANEVAL_TEST)
+    assert "def add(a, b):" in prog
+
+
+def test_assemble_program_does_not_double_call_when_test_invokes_check():
+    test_with_call = _HUMANEVAL_TEST + "\ncheck(add)\n"
+    prog = _assemble_program("def add(a,b):\n    return a+b", "def add(a, b):\n", "add", test_with_call)
+    assert prog.count("check(add)") == 1  # not appended again
 
 
 @pytest.mark.parametrize("resp,iid,kw,sat", [

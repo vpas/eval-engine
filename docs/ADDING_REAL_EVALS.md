@@ -11,6 +11,21 @@
 > design note, not a checklist item in `PROJECT_PROGRESS.md` (those are v1-design gaps; this is content
 > + a few small plugins on top of a finished spine).
 
+> **Status (2026-06-06): IMPLEMENTED.** All six benchmarks below are wired end-to-end and tested.
+> - **Plugins** (`eval_engine/builtins.py`): scorers `math`, `numeric_answer`, `code_exec`, `ifeval`;
+>   harness `code_generation`; `single_turn` gained `system` + `prompt_suffix`. IFEval verifiers live in
+>   `eval_engine/ifeval.py` (22 instruction families).
+> - **Data** (`tools/fetch_benchmark.py` → `examples/benchmarks/*.jsonl`): deterministic subsets of
+>   GPQA Diamond (50), MMLU (60), GSM8K (50), MATH-500 (40), HumanEval (40), IFEval (50).
+> - **Launch** (`examples/benchmarks/*.yaml` for the CLI; `tools/seed_benchmarks.py` for the dashboard).
+> - **Tests:** 96 unit + 2 full-spine integration (mock model: ledger→analytics→category rollup) + a
+>   `code_exec` sandbox e2e (correct→pass / wrong→fail). The full benchmark suite has **not** been run
+>   against a real model yet (needs `OPENROUTER_API_KEY` + the running cluster) — see §6 for the budget.
+> - **Known limitation:** the `math` scorer (Inspect core, sympy) handles integers/fractions/decimals/√
+>   reliably but is finicky on bare algebraic (`x+1`) and complex (`6+9i`) answers — an inherent scorer
+>   limitation shared by upstream MATH harnesses, not a wiring bug.
+> - **SWE-bench** and **multimodal**: still deferred (§2).
+
 ---
 
 ## 1. What the engine supports today (the substrate we build on)

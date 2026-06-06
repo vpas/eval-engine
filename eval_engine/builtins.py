@@ -278,6 +278,20 @@ def _extract_code(completion: str) -> str:
     return "\n\n".join(b.strip("\n") for b in blocks) if blocks else completion.strip()
 
 
+def _assemble_program(completion: str, stub: str, entry: str, test: str) -> str:
+    """Build the executable test program (HumanEval contract): extracted code (+ the signature stub if
+    the model didn't redefine the entry function) + the test harness + a top-level ``check(entry)``
+    call. The test DEFINES ``def check(candidate)`` but doesn't invoke it, so we append the call unless
+    the test already calls check() at top level (not the ``def`` line)."""
+    code = _extract_code(completion)
+    if entry and stub and f"def {entry}" not in code:
+        code = stub + "\n" + code
+    program = code + "\n\n" + test
+    if entry and not re.search(r"(?m)^\s*check\s*\(", test):
+        program += f"\n\ncheck({entry})\n"
+    return program
+
+
 @scorer(
     "code_exec",
     "1.0.0",
@@ -293,16 +307,10 @@ def code_exec(cfg: CodeExecConfig) -> Scorer:
         async def score(state: TaskState, target: Target) -> Score:
             md = state.metadata or {}
             completion = state.output.completion if state.output else ""
-            code = _extract_code(completion)
-            stub = md.get("prompt", "")
-            entry = md.get("entry_point", "")
             test = md.get("test", "") or target.text
-            # If the model didn't redefine the target function, prepend the signature stub.
-            if entry and stub and f"def {entry}" not in code:
-                code = stub + "\n" + code
-            program = code + "\n\n" + test
-            if entry and "check(" not in test:
-                program += f"\n\ncheck({entry})\n"
+            program = _assemble_program(completion, md.get("prompt", ""),
+                                        md.get("entry_point", ""), test)
+            code = _extract_code(completion)
             try:
                 result = await sandbox().exec(["python3", "-c", program], timeout=cfg.timeout)
                 ok = result.success

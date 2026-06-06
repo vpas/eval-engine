@@ -38,6 +38,11 @@ k8s = ["inspect-k8s-sandbox"]
 # ops dashboard probes: a Redis client (master/replica health) + the Kubernetes client (pod phase /
 # restarts / KEDA, the Tier-2 infra truth). Both degrade gracefully when absent (local dev).
 ops = ["redis", "kubernetes"]
+# real benchmark suite (docs/ADDING_REAL_EVALS.md): sympy backs the `math` scorer (Inspect core's
+# mathematical-equivalence checking for MATH/AIME). `regex` rides in transitively via inspect-ai.
+# NB: `datasets` (HF) is NOT here — it's one-shot ingestion tooling (tools/fetch_benchmark.py), never
+# imported by the engine at runtime.
+benchmarks = ["sympy"]
 # test suite (pytest). Integration/e2e tests also need infra/up.sh (Postgres + ClickHouse).
 test = ["pytest>=8"]
 
