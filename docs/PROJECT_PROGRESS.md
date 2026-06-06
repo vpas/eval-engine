@@ -209,11 +209,23 @@ load-bearing the design says it is. Build top-down; update the box + a one-line 
   **multi-node** cluster (anti-affinity across nodes) — a deliberate departure from the cost-minimal
   single-node design (Redis state is intentionally soft/rebuildable). Gated behind a cost decision.
 
-- [ ] **17. Canonical per-`run_id` cost tally from the gateway.** §8 / DEPLOYMENT "A5". Today cost is the
-  worker-side catalog price (equal in dollars, but not the canonical gateway tally).
+- [⊘] **17. Canonical per-`run_id` cost tally from the gateway.** §8 / DEPLOYMENT "A5". Today cost is the
+  worker-side catalog price (equal in dollars, but not the canonical gateway tally). *Decision
+  (2026-06-05): keep the catalog price.* The gateway fronts OpenRouter at catalog rate, so the
+  worker-side price **equals** the gateway spend in dollars today; the canonical form would need a
+  LiteLLM spend-DB + per-call `run_id` tagging threaded through Inspect (not cleanly exposed) for the
+  same figure — deferred as uncertain-payoff (DEPLOYMENT.md "Canonical A5"). Re-open if a provider is
+  fronted whose gateway price diverges from the catalog (e.g. negotiated/volume pricing).
 
-- [ ] **18. gVisor (T2) isolation for agentic sandboxes.** `SANDBOXING.md`. Today runc
-  (`CLUSTER_DEFAULT`); needs a GKE-Sandbox node pool (addable later w/o cluster recreation).
+- [x] **18. gVisor (T2) isolation for agentic sandboxes.** `SANDBOXING.md`. *Done (2026-06-05):* added
+  a **GKE-Sandbox (gVisor) node pool** (`deploy/terraform` — autoscales 0..2, ~$0 idle; `sandbox_config`
+  is `google-beta`-only in provider v6, so that resource uses the `google-beta` provider, and the live
+  pool was bootstrapped via `gcloud` + `terraform import`ed). Flipped the sandbox `runtimeClassName`
+  from `CLUSTER_DEFAULT` (runc) → **`gvisor`** in `deploy/sandbox/k8s-agent-env-values.yaml`; GKE
+  injects the matching toleration/nodeSelector so per-sample sandbox pods land on the gVisor pool.
+  Verified in-cluster: an agentic run's sandbox pod showed `runtimeClassName=gvisor` scheduled onto a
+  `gke-eval-engine-sandbox-…` node (the pool auto-provisioned 0→1), and the in-pod `bash` read the
+  sandbox-only secret (proof the tool ran inside the gVisor sandbox).
 
 ---
 

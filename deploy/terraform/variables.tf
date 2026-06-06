@@ -35,3 +35,15 @@ variable "worker_max_nodes" {
   default     = 3
   description = "Spot worker pool autoscales 0..this. Idle = 0 nodes = $0."
 }
+
+variable "sandbox_max_nodes" {
+  type        = number
+  default     = 2
+  description = "GKE-Sandbox (gVisor) pool autoscales 0..this for T2 agentic isolation. Idle = 0 nodes = $0."
+}
+
+variable "ha_stateful" {
+  type        = bool
+  default     = false
+  description = "When true, scale the system pool to 3 nodes so the replicated ClickHouse/Redis pods can spread across nodes (anti-affinity) for HA (#16). Off = cost-minimal single node."
+}

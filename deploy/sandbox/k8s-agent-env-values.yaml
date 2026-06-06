@@ -1,11 +1,11 @@
 # Helm values for inspect-k8s-sandbox's agent-env chart on THIS cluster.
-# Our GKE cluster has no GKE Sandbox (gVisor) node pool, so override the chart's default
-# runtimeClassName (gvisor) with the chart's magic "CLUSTER_DEFAULT" string → the sandbox pod runs
-# on a normal node (runc), no gVisor nodeSelector. Weaker isolation than gVisor; acceptable for the
-# in-cluster proof. Production T2 isolation = a GKE Sandbox node pool (docs/SANDBOXING.md, FUTURE.md §4).
+# T2 isolation (#18): the cluster now has a GKE-Sandbox (gVisor) node pool (deploy/terraform), so the
+# sandbox pod runs under the `gvisor` RuntimeClass. GKE injects the matching toleration + nodeSelector
+# for runtimeClassName: gvisor, so the per-sample pod is scheduled onto the gVisor pool and isolated by
+# the gVisor user-space kernel (docs/SANDBOXING.md). (Revert to "CLUSTER_DEFAULT" for plain runc.)
 services:
   default:
-    runtimeClassName: CLUSTER_DEFAULT
+    runtimeClassName: gvisor
     # Mirror the Docker air-gap proof (deploy/sandbox/airgap-compose.yaml): a secret that exists ONLY
     # inside the sandbox — never in the worker env nor the prompt. examples/sandbox_qa.jsonl sb1 can
     # only be answered by reading it WITH the bash tool, so a passing score is itself proof the tool

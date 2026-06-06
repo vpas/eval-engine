@@ -30,10 +30,12 @@ resource "google_container_cluster" "primary" {
 
 # Always-on pool: hosts the control plane + Orchestrator + LiteLLM + ClickHouse/Redis + KEDA operator.
 resource "google_container_node_pool" "system" {
-  name       = "system"
-  location   = var.zone
-  cluster    = google_container_cluster.primary.name
-  node_count = 1
+  name     = "system"
+  location = var.zone
+  cluster  = google_container_cluster.primary.name
+  # 1 node = cost-minimal default; 3 when ha_stateful so replicated ClickHouse/Redis spread across
+  # nodes via anti-affinity (#16). cloud-down.sh scales this to 0 to pause billing regardless.
+  node_count = var.ha_stateful ? 3 : 1
 
   node_config {
     machine_type = var.system_machine_type
@@ -69,6 +71,36 @@ resource "google_container_node_pool" "workers" {
       key    = "eval-engine/worker"
       value  = "true"
       effect = "NO_SCHEDULE"
+    }
+  }
+}
+
+# GKE-Sandbox (gVisor) pool for T2 agentic isolation (docs/SANDBOXING.md, #18). Autoscales 0..N so it
+# costs ~nothing idle. GKE auto-creates the `gvisor` RuntimeClass and taints these nodes
+# (sandbox.gke.io/runtime=gvisor:NoSchedule); a sandbox pod sets runtimeClassName: gvisor and GKE
+# injects the matching toleration + nodeSelector, so per-sample sandbox pods land here under gVisor.
+resource "google_container_node_pool" "sandbox" {
+  provider = google-beta # sandbox_config is beta-only in provider v6
+  name     = "sandbox"
+  location = var.zone
+  cluster  = google_container_cluster.primary.name
+
+  autoscaling {
+    min_node_count = 0
+    max_node_count = var.sandbox_max_nodes
+  }
+
+  node_config {
+    machine_type = var.worker_machine_type
+    spot         = true
+    image_type   = "COS_CONTAINERD" # gVisor requires Container-Optimized OS + containerd
+    disk_type    = "pd-standard"
+    disk_size_gb = 30
+    oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    labels       = { "eval-engine/role" = "sandbox" }
+
+    sandbox_config {
+      sandbox_type = "gvisor"
     }
   }
 }
