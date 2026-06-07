@@ -41,7 +41,7 @@ def test_model_for_mock_output_builds_offline():
 
 def test_model_for_mock_tool_calls_builds_offline():
     # the scripted-agentic branch: a tool-call sequence becomes the mock's outputs.
-    spec = _spec(mock_tool_calls=[{"tool": "bash", "args": {"cmd": "ls"}},
+    spec = _spec(mock_tool_calls=[{"tool": "bash", "args": {"command": "ls"}},
                                   {"tool": "submit", "args": {"answer": "x"}}])
     m = _model_for(spec, n=1)
     assert isinstance(m, Model)

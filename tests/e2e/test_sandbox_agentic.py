@@ -44,7 +44,7 @@ def _spec() -> RunSpec:
         harness=PluginRef(type="agentic", config={"tools": ["bash"]}),
         scorers=[PluginRef(type="includes", config={"ignore_case": True})],
         mock_tool_calls=[
-            {"tool": "bash", "args": {"cmd": "printenv EE_SANDBOX_SECRET"}},
+            {"tool": "bash", "args": {"command": "printenv EE_SANDBOX_SECRET"}},
             {"tool": "submit", "args": {"answer": SECRET}},
         ],
     )
