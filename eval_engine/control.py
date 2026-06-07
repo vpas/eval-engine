@@ -31,8 +31,17 @@ DSN = os.environ.get(
 
 
 def _dsn_host() -> str:
-    """host=… token from the DSN for logs — never the password (DSN carries credentials)."""
-    return next((tok.split("=", 1)[1] for tok in DSN.split() if tok.startswith("host=")), "?")
+    """Host from the DSN for logs — never the password (the DSN carries credentials). Handles both
+    the libpq keyword form (``host=… port=…``) and the URI form (``postgresql://user:pass@host/db``,
+    what the managed/in-cluster secret uses)."""
+    for tok in DSN.split():
+        if tok.startswith("host="):
+            return tok.split("=", 1)[1]
+    try:
+        from urllib.parse import urlparse
+        return urlparse(DSN).hostname or "?"  # .hostname is host only — no user/password
+    except Exception:  # noqa: BLE001
+        return "?"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
