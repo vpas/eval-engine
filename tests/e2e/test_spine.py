@@ -6,6 +6,7 @@ the single-process runner, now via the api/worker/orchestrator roles. Schema + p
 come from the autouse ``clean_db`` fixture (tests/e2e/conftest.py); the spec from ``mock_spec``.
 """
 from eval_engine import db, orchestrator, runner, worker
+from eval_engine.datasets import load_jsonl
 from eval_engine.models import RunSpec
 
 
@@ -66,3 +67,42 @@ def test_provider_fingerprint_pinned(mock_spec):
     run_id = runner.run(mock_spec())
     fp = db.control.get_run(run_id)["provider_fingerprint"]
     assert fp == "mockllm/model", fp
+
+
+def _drain_one_batch(spec, run_id: str) -> int:
+    """Claim + execute + commit a SINGLE batch of a running run (one iteration of worker._drain_run),
+    so a test can advance a run partway and then act on it mid-flight."""
+    dataset, _ = load_jsonl(spec.dataset, spec.limit)
+    samples_by_id = {str(s.id): s for s in dataset}
+    ids = db.control.claim_batch(run_id, "w-test", spec.batch_size)
+    if not ids:
+        return 0
+    results = runner.execute_batch(spec, run_id, samples_by_id, ids)
+    runner.commit_batch(spec, run_id, samples_by_id, ids, results)
+    return len(ids)
+
+
+def test_cancel_mid_run_keeps_finished_samples_and_settles_cancelled(mock_spec):
+    """A different terminal lifecycle than the happy path: cancel AFTER some samples have committed.
+    The already-done sample's result is retained in analytics, the still-queued ones are cancelled, the
+    ledger is pruned, and the run settles as ``cancelled`` (DESIGN §8 cancel = stop-scheduling +
+    finalize-as-cancelled). Drives the spine launch → admit → partial drain → cancel → terminal."""
+    spec = mock_spec(batch_size=1)  # 3 samples, one per batch → easy to stop after the first
+    run_id = runner.launch(spec)
+    orchestrator.tick()                              # queued → running
+    assert run_id in db.control.active_runs(("running",))
+
+    assert _drain_one_batch(spec, run_id) == 1       # one sample committed; two still queued
+    assert db.analytics.run_summary(run_id)[0] == 1, "the finished sample must be durable before cancel"
+
+    summary = db.control.cancel_run(run_id)
+    assert summary == {"cancelled_queued": 2, "done": 1, "failed": 0}, summary
+
+    run = db.control.get_run(run_id)
+    assert run["status"] == "cancelled" and run["done"] == 1
+    assert db.control.ledger_size(run_id) == 0, "ledger should be pruned at cancel, like any finalize"
+    # the partial result survives the cancel — a cancelled run still shows what it managed to score.
+    assert db.analytics.run_summary(run_id)[0] == 1
+
+    # idempotent: cancelling an already-terminal run is a no-op (no double-finalize).
+    assert db.control.cancel_run(run_id) is None
