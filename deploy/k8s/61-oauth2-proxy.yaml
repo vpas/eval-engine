@@ -48,6 +48,10 @@ spec:
             - --set-xauthrequest=true
             - --cookie-csrf-per-request=true
             - --cookie-csrf-expire=5m
+            # Inject X-Forwarded-Email/User into the UPSTREAM request (proxy mode). --set-xauthrequest
+            # alone only sets auth_request RESPONSE headers, which never reach a proxied upstream like
+            # Grafana — Grafana's auth-proxy reads X-Forwarded-Email (see 95-grafana.yaml).
+            - --pass-user-headers=true
           env:
             - name: OAUTH2_PROXY_CLIENT_ID
               valueFrom: { secretKeyRef: { name: oauth2-proxy, key: client-id } }

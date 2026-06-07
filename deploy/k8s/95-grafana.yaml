@@ -116,12 +116,15 @@ spec:
             - { name: GF_SERVER_ROOT_URL, value: "https://${EE_HOST}/grafana" }
             - { name: GF_SERVER_SERVE_FROM_SUB_PATH, value: "true" }
             - { name: GF_INSTALL_PLUGINS, value: "grafana-clickhouse-datasource" }
-            # Auth: trust oauth2-proxy's forwarded identity; no Grafana login screen.
+            # Auth: trust oauth2-proxy's forwarded identity; no Grafana login screen. We read
+            # X-Forwarded-Email — the header oauth2-proxy injects into the UPSTREAM request in proxy
+            # mode (via --pass-user-headers=true). NB: --set-xauthrequest sets X-Auth-Request-* only on
+            # the auth_request RESPONSE, not the upstream request, so that header never reaches us here.
             - { name: GF_AUTH_PROXY_ENABLED, value: "true" }
-            - { name: GF_AUTH_PROXY_HEADER_NAME, value: "X-Auth-Request-Email" }
+            - { name: GF_AUTH_PROXY_HEADER_NAME, value: "X-Forwarded-Email" }
             - { name: GF_AUTH_PROXY_HEADER_PROPERTY, value: "email" }
             - { name: GF_AUTH_PROXY_AUTO_SIGN_UP, value: "true" }
-            - { name: GF_AUTH_PROXY_HEADERS, value: "Email:X-Auth-Request-Email" }
+            - { name: GF_AUTH_PROXY_HEADERS, value: "Email:X-Forwarded-Email" }
             - { name: GF_USERS_ALLOW_SIGN_UP, value: "false" }
             - { name: GF_USERS_AUTO_ASSIGN_ORG_ROLE, value: "Editor" }
             - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
