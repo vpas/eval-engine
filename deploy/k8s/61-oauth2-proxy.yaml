@@ -34,8 +34,11 @@ spec:
             - --provider=google
             - --email-domain=*
             - --authenticated-emails-file=/etc/oauth2-proxy/emails
-            # Path-based upstreams: /grafana/* → Grafana (it serves from that sub-path and trusts the
-            # forwarded X-Auth-Request-Email); everything else → the Next.js frontend (catch-all).
+            # Path-based upstreams: /grafana(/.*)? → Grafana (it serves from that sub-path and trusts
+            # the forwarded X-Auth-Request-Email); everything else → the Next.js frontend (catch-all).
+            # The exact `/grafana` (no trailing slash) entry is needed so the bare URL reaches Grafana
+            # (which 302s to /grafana/) instead of falling through to the frontend's 404.
+            - --upstream=http://grafana:3000/grafana
             - --upstream=http://grafana:3000/grafana/
             - --upstream=http://eval-engine-frontend:3000
             - --http-address=0.0.0.0:4180
