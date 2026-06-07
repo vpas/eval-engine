@@ -149,6 +149,20 @@ def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = D
     return {"run_id": new_id, "status": "queued", "rerun_of": run_id}
 
 
+@app.post("/runs/{run_id}/cancel", status_code=202)
+def cancel_run(run_id: str, x_auth_request_email: str | None = Header(default=None)):
+    """Cancel a still-active run: stop scheduling + finalize as ``cancelled`` (in-flight samples a
+    worker already claimed finish naturally — best-effort). 404 if unknown, 409 if already terminal."""
+    if not control.get_run(run_id):
+        raise HTTPException(status_code=404, detail=f"no run {run_id}")
+    result = control.cancel_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="run is already finished")
+    control.audit(x_auth_request_email, "run.cancel", run_id, result)
+    log.info("cancelled run_id=%s by=%s (%s)", run_id, x_auth_request_email or "-", result)
+    return {"run_id": run_id, "status": "cancelled", **result}
+
+
 @app.get("/runs")
 def list_runs():
     cols = ["id", "eval", "eval_version", "model", "accuracy", "total", "cost", "created_at",

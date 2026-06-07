@@ -174,3 +174,26 @@ def test_audit_records_launch(client):
     entries = client.get("/audit").json()
     launch = next(e for e in entries if e["action"] == "run.launch" and e["target"] == run_id)
     assert launch["actor"] == "auditor@x" and launch["detail"]["eval"] == "capitals_qa"
+
+
+def test_cancel_run(client):
+    # POST /runs creates the run queued + expands the ledger; no orchestrator/worker runs in this test,
+    # so it stays queued — a clean target to cancel.
+    run_id = client.post("/runs", json=SPEC, headers={"X-Auth-Request-Email": "me@x.com"}).json()["run_id"]
+    assert client.get(f"/runs/{run_id}").json()["status"] == "queued"
+
+    c = client.post(f"/runs/{run_id}/cancel", headers={"X-Auth-Request-Email": "me@x.com"})
+    assert c.status_code == 202, c.text
+    assert c.json()["status"] == "cancelled" and c.json()["cancelled_queued"] == 3  # qa.jsonl has 3
+
+    meta = client.get(f"/runs/{run_id}").json()
+    assert meta["status"] == "cancelled"
+    assert meta["progress"] == {}  # ledger pruned at cancel → no live rows
+
+    # already terminal → 409 (not a double-finalize), unknown → 404
+    assert client.post(f"/runs/{run_id}/cancel").status_code == 409
+    assert client.post("/runs/nope/cancel").status_code == 404
+
+    # audited
+    actions = {(e["action"], e["target"]) for e in client.get("/audit").json()}
+    assert ("run.cancel", run_id) in actions

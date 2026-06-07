@@ -273,6 +273,40 @@ def finalize_run(run_id: str, done: int, failed: int, accuracy: float, cost_usd:
     )
 
 
+_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "budget_exceeded")
+
+
+def cancel_run(run_id: str) -> dict | None:
+    """User-initiated cancel: stop scheduling and finalize the run as ``cancelled``. Returns a small
+    summary, or None if the run is missing / already terminal (idempotent — safe to click twice).
+
+    The status flip is atomic + guarded (``WHERE status NOT IN terminal``) so it never races the
+    orchestrator into a double-finalize. Flipping off ``running`` removes the run from the workers'
+    and orchestrator's work lists, so no new batches are claimed; queued tasks are marked terminal so
+    an in-flight ``_drain_run`` loop stops on its next (empty) claim. It's BEST-EFFORT for a sample a
+    worker has already claimed — we don't kill the process, so that one batch finishes and commits
+    (harmlessly, against soon-pruned rows). We snapshot the committed counts, then prune the ledger —
+    exactly the finalize cleanup, so the run settles like any other terminal run."""
+    con = _conn()
+    flipped = con.execute(
+        "UPDATE runs SET status='cancelled', finished_at=now() "
+        "WHERE id=%s AND status <> ALL(%s) RETURNING id",
+        (run_id, list(_TERMINAL_STATUSES)),
+    ).fetchone()
+    if not flipped:
+        return None
+    cancelled = con.execute(
+        "UPDATE sample_tasks SET status='cancelled' WHERE run_id=%s AND status='queued' "
+        "RETURNING sample_id",
+        (run_id,),
+    ).fetchall()
+    c = counts(run_id)  # committed-so-far, before we prune the ledger
+    done, failed = c.get("done", 0), c.get("failed", 0)
+    con.execute("UPDATE runs SET done=%s, failed=%s WHERE id=%s", (done, failed, run_id))
+    archive_and_prune(run_id)
+    return {"cancelled_queued": len(cancelled), "done": done, "failed": failed}
+
+
 def live_rollup(run_id: str) -> tuple[int, int, int, float]:
     """One-pass live (done, failed, passed_so_far, cost_so_far) over committed ledger rows — the
     orchestrator's per-tick runs-row rollup (DESIGN §8 "Live metrics")."""

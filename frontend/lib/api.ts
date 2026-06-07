@@ -109,6 +109,7 @@ const post = (url: string, body?: unknown) =>
 
 export const launchRun = (spec: LaunchSpec): Promise<{ run_id: string; status: string }> => post("/be/runs", spec);
 export const rerunRun = (id: string): Promise<{ run_id: string; status: string; rerun_of: string }> => post(`/be/runs/${id}/rerun`);
+export const cancelRun = (id: string): Promise<{ run_id: string; status: string; cancelled_queued: number; done: number; failed: number }> => post(`/be/runs/${id}/cancel`);
 export const launchFromEval = (
   evalId: string,
   body: { model: string; batch_size?: number; limit?: number; epochs?: number; budget_usd?: number; mock_output?: string; temperature?: number; seed?: number; transcript_sample_rate?: number },

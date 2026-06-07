@@ -4,7 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
 import {
-  getRun, getResults, getTranscript, rerunRun, getRunLogsUrl, getRunLive, ago, fmtCost, fmtN, pct,
+  getRun, getResults, getTranscript, rerunRun, cancelRun, getRunLogsUrl, getRunLive, ago, fmtCost, fmtN, pct,
   type RunDetail, type Results, type RunLive, type LiveSample,
 } from "@/lib/api";
 
@@ -19,6 +19,7 @@ export default function RunPage() {
   const [logsUrl, setLogsUrl] = useState<string | null>(null);
   const [live, setLive] = useState<RunLive | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => { getRunLogsUrl(id).then((r) => setLogsUrl(r.url)).catch(() => {}); }, [id]);
 
@@ -54,6 +55,20 @@ export default function RunPage() {
     router.push(`/runs/${r.run_id}`);
   };
 
+  const cancel = async () => {
+    if (!confirm(`Cancel run ${run.id}?\n\nQueued samples are skipped; any in-flight samples finish. This can't be undone.`)) return;
+    setCancelling(true);
+    setErr(null);
+    try {
+      await cancelRun(id);
+      setRun(await getRun(id));   // reflect 'cancelled' immediately (the poll loop also catches up)
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="page wide">
       <button className="btn ghost sm" onClick={() => router.push("/")} style={{ marginBottom: 14 }}><Icon name="arrowleft" />all runs</button>
@@ -69,6 +84,11 @@ export default function RunPage() {
             </div>
             <div className="vcenter gap8">
               {logsUrl && <a className="btn ghost sm" href={logsUrl} target="_blank" rel="noreferrer"><Icon name="external" size={12} />Worker logs</a>}
+              {isActive && (
+                <button className="btn sm danger" disabled={cancelling} onClick={cancel}>
+                  <Icon name="stop" />{cancelling ? "Cancelling…" : "Cancel run"}
+                </button>
+              )}
               {!isActive && (
                 <>
                   <button className="btn sm" onClick={() => router.push(`/compare?ids=${run.id}`)}><Icon name="compare" />Compare</button>
