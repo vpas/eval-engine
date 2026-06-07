@@ -350,6 +350,15 @@ ones rendered via `envsubst`) and secret creation — both in `deploy/install.sh
 **Why migration is cheap:** the LB IP is reserved, so the host (and the Google OAuth redirect URI) is
 stable — you register it once and never touch OAuth on a rebuild.
 
+**Rerunning on the EXISTING cluster (no `terraform apply`):** `install.sh` is idempotent — every step
+is `kubectl apply` (a no-op when unchanged), and litellm carries a `config-hash` annotation so it rolls
+*only* when its manifest changes (no blind restart). There's no `terraform output` to read, so export
+the current values first:
+```bash
+export EE_HOST=35-202-212-111.nip.io EE_PROJECT=eval-engine EE_CLUSTER=eval-engine EE_ZONE=us-central1-a
+deploy/install.sh        # safe to rerun; IAM (monitoring.viewer) is a one-time idempotent gcloud grant
+```
+
 **Remaining manual / same-project assumptions:**
 - The **OAuth client** (consent screen, test users, the web client id/secret) is created once in the
   GCP console — not Terraform-able. With a reserved IP it's a one-time setup, not per-migration.

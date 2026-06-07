@@ -6,8 +6,13 @@
 #   ../secrets.sh                                  # the ~5 k8s secrets (from env)
 #   ../install.sh                                  # this: render + apply manifests + dashboards
 #
-# Cluster-specific values come from `terraform output` (override with EE_* env if not using TF here).
-# Re-running is safe: every step is `kubectl apply` (the schema-init Job is recreated explicitly).
+# Cluster-specific values come from `terraform output`, or EE_* env if you're NOT driving this cluster
+# from Terraform (e.g. the existing cluster — just `export EE_HOST=... EE_PROJECT=...` first).
+#
+# Fully idempotent — safe to rerun on a live cluster: every step is `kubectl apply` (a no-op when
+# nothing changed), the schema-init Job is recreated explicitly, and litellm carries a config-hash
+# annotation so it rolls ONLY when its manifest changes (no blind restart). IAM bindings live in
+# Terraform (iam.tf); `gcloud add-iam-policy-binding` is itself idempotent if you grant them by hand.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,8 +35,11 @@ gcloud container clusters get-credentials "$EE_CLUSTER" --zone "$EE_ZONE" --proj
 
 # Files carrying ${EE_*} placeholders → render with envsubst (explicit var list so shell-style
 # ${HOSTNAME##*-} in the redis/clickhouse manifests is left untouched).
-TEMPLATED=" 40-control-plane.yaml 61-oauth2-proxy.yaml 62-ingress.yaml 95-grafana.yaml "
-SUBST_VARS='${EE_HOST} ${EE_PROJECT} ${EE_CLUSTER} ${EE_ZONE} ${EE_NAMESPACE}'
+TEMPLATED=" 30-litellm.yaml 40-control-plane.yaml 61-oauth2-proxy.yaml 62-ingress.yaml 95-grafana.yaml "
+# Config-hash drives litellm's roll-on-change annotation (hashing the file-with-placeholder is stable
+# across reruns; changes only when the manifest's content changes).
+export EE_LITELLM_CFG_HASH="$(sha256sum "$K8S/30-litellm.yaml" | cut -c1-12)"
+SUBST_VARS='${EE_HOST} ${EE_PROJECT} ${EE_CLUSTER} ${EE_ZONE} ${EE_NAMESPACE} ${EE_LITELLM_CFG_HASH}'
 
 apply_one() {
   local f="$1" path="$K8S/$1"
@@ -59,9 +67,6 @@ else
   echo "   ! jsonnet/jb not on PATH — skipping dashboards. Render later with:"
   echo "     export PATH=\$PATH:/usr/local/go/bin:\$HOME/go/bin && make -C deploy/grafana apply"
 fi
-
-# LiteLLM only re-reads its ConfigMap on restart (no-op on a fresh install).
-kubectl rollout restart deploy/litellm -n "$EE_NAMESPACE" >/dev/null 2>&1 || true
 
 echo "→ waiting for core rollouts"
 for d in eval-engine-api eval-engine-orch litellm eval-engine-frontend grafana; do

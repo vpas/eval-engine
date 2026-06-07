@@ -74,6 +74,10 @@ spec:
   template:
     metadata:
       labels: { app: litellm }
+      # Config-hash so `kubectl apply` rolls the gateway ONLY when this file's content changes (litellm
+      # reads its ConfigMap at startup). deploy/install.sh fills ${EE_LITELLM_CFG_HASH} = sha256(file);
+      # makes reruns idempotent (no blind rollout restart). Unsubstituted = literal placeholder = no-op.
+      annotations: { eval-engine/config-hash: "${EE_LITELLM_CFG_HASH}" }
     spec:
       nodeSelector: { eval-engine/role: system }
       containers:
