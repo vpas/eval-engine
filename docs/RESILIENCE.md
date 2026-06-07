@@ -184,6 +184,15 @@ a full pod reschedule (minutes) instead of a ~1s handover.
 > connection changes; the rest of the app keeps the pooled endpoint. This is the orchestrator-lock slice
 > of item D, promoted from deferred because at `replicas: 2` it's a correctness requirement, not a
 > tuning nicety.
+>
+> **One-time cleanup after the fix:** the split-brain era left an *orphaned* advisory lock — a PgBouncer
+> server backend (`application_name='pgbouncer'`) still holding `pg_try_advisory_lock(LEADER_KEY)`. The
+> auto-reaper (`reap_stale_leader`, needs `state='idle'` for >20s) never cleared it because pgbouncer
+> keeps reusing that backend, resetting `state_change`. Symptom: every orchestrator pod stuck logging
+> `standby — another holder has leadership` with no live leader. Clear it once by terminating the holder
+> via the **direct** endpoint:
+> `SELECT pg_terminate_backend(a.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.locktype='advisory' AND l.granted AND l.classid=0 AND l.objid = (LEADER_KEY & x'FFFFFFFF'::bigint);`
+> No recurrence after the fix — the leader lock now only ever travels the session-mode endpoint.
 
 ### 4.3 — ClickHouse sits on the worker's critical write path
 The ack-before-flip commit (`runner._commit_batch`) does `analytics.insert(...)` **before**
