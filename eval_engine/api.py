@@ -63,10 +63,12 @@ def auth_email(
     x_auth_request_email: str | None = Header(default=None),
 ) -> str | None:
     """The authenticated user's email, from the OIDC proxy (oauth2-proxy) — recorded as ``created_by``
-    / audit actor. In oauth2-proxy *proxy* mode the identity arrives as ``X-Forwarded-Email``
-    (``--pass-user-headers``); ``X-Auth-Request-Email`` (``--set-xauthrequest``) is only set on the
-    auth_request *response* and never reaches an upstream, so prefer the former and keep the latter as
-    a fallback (e.g. nginx auth_request deployments). Absent on the internal/port-forward path."""
+    / audit actor (endpoints take it as ``actor: … = Depends(auth_email)``). In oauth2-proxy *proxy*
+    mode the identity arrives as ``X-Forwarded-Email`` (``--pass-user-headers``); ``X-Auth-Request-
+    Email`` (``--set-xauthrequest``) is only set on the auth_request *response* and never reaches an
+    upstream, so prefer the former and keep the latter as a fallback (e.g. nginx auth_request
+    deployments). Absent on the internal/port-forward path. (The parameter names ARE the bound header
+    names — don't rename them.)"""
     return x_forwarded_email or x_auth_request_email
 
 
@@ -113,7 +115,7 @@ def ops_logs(component: str | None = None, pod: str | None = None, run_id: str |
 
 @app.post("/runs", status_code=202)
 def create_run(spec: RunSpec, bg: BackgroundTasks,
-               x_auth_request_email: str | None = Depends(auth_email)):
+               actor: str | None = Depends(auth_email)):
     """Validate + create the run, expand the ledger, kick off background execution.
 
     ``created_by`` is the authenticated user from the OIDC proxy (see ``auth_email``). Absent on the
@@ -126,31 +128,31 @@ def create_run(spec: RunSpec, bg: BackgroundTasks,
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
 
-    run_id = runner.launch(spec, created_by=x_auth_request_email)
-    control.audit(x_auth_request_email, "run.launch", run_id, {"eval": spec.eval, "model": spec.model})
+    run_id = runner.launch(spec, created_by=actor)
+    control.audit(actor, "run.launch", run_id, {"eval": spec.eval, "model": spec.model})
     if INLINE_EXEC:
         bg.add_task(runner.execute, run_id, spec)  # local dev only; cluster uses orchestrator+workers
     return {"run_id": run_id, "status": "queued"}
 
 
 @app.post("/runs/{run_id}/rerun", status_code=202)
-def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = Depends(auth_email)):
+def rerun(run_id: str, bg: BackgroundTasks, actor: str | None = Depends(auth_email)):
     """Reproduce a past run (FR10, §9.9): clone its stored RunSpec → a new Run with identical pinned
     inputs (eval@version, dataset content hash, model + params + seed, epochs, budget, image digest)."""
     spec_json = control.get_spec(run_id)
     if not spec_json:
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
     spec = RunSpec.model_validate_json(spec_json)
-    new_id = runner.launch(spec, created_by=x_auth_request_email)
-    control.audit(x_auth_request_email, "run.rerun", new_id, {"rerun_of": run_id})
-    log.info("rerun %s → new run_id=%s by=%s", run_id, new_id, x_auth_request_email or "-")
+    new_id = runner.launch(spec, created_by=actor)
+    control.audit(actor, "run.rerun", new_id, {"rerun_of": run_id})
+    log.info("rerun %s → new run_id=%s by=%s", run_id, new_id, actor or "-")
     if INLINE_EXEC:
         bg.add_task(runner.execute, new_id, spec)
     return {"run_id": new_id, "status": "queued", "rerun_of": run_id}
 
 
 @app.post("/runs/{run_id}/cancel", status_code=202)
-def cancel_run(run_id: str, x_auth_request_email: str | None = Header(default=None)):
+def cancel_run(run_id: str, actor: str | None = Depends(auth_email)):
     """Cancel a still-active run: stop scheduling + finalize as ``cancelled`` (in-flight samples a
     worker already claimed finish naturally — best-effort). 404 if unknown, 409 if already terminal."""
     if not control.get_run(run_id):
@@ -158,8 +160,8 @@ def cancel_run(run_id: str, x_auth_request_email: str | None = Header(default=No
     result = control.cancel_run(run_id)
     if result is None:
         raise HTTPException(status_code=409, detail="run is already finished")
-    control.audit(x_auth_request_email, "run.cancel", run_id, result)
-    log.info("cancelled run_id=%s by=%s (%s)", run_id, x_auth_request_email or "-", result)
+    control.audit(actor, "run.cancel", run_id, result)
+    log.info("cancelled run_id=%s by=%s (%s)", run_id, actor or "-", result)
     return {"run_id": run_id, "status": "cancelled", **result}
 
 
@@ -271,7 +273,7 @@ def _get(kind: str, ent_id: str):
 
 
 @app.post("/datasets", status_code=201)
-def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Depends(auth_email)):
+def register_dataset(spec: DatasetSpec, actor: str | None = Depends(auth_email)):
     # Content-address the data (FR1, §13): snapshot the bytes to immutable storage + pin the hash, so
     # the version is reproducible by content. Best-effort — if the uri isn't readable from the API
     # (e.g. a client-side path), register the metadata as-is.
@@ -281,7 +283,7 @@ def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Depen
         spec = spec.model_copy(update={"content_hash": content_hash, "snapshot_uri": snapshot_uri})
     except Exception:  # noqa: BLE001
         pass
-    return _register("dataset", spec, x_auth_request_email)
+    return _register("dataset", spec, actor)
 
 
 @app.get("/datasets")
@@ -295,7 +297,7 @@ def get_dataset(ds_id: str):
 
 
 @app.post("/evals", status_code=201)
-def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Depends(auth_email)):
+def register_eval(spec: EvalSpec, actor: str | None = Depends(auth_email)):
     # Validate referenced plugins exist (an eval bundles a harness + scorers).
     try:
         plugins.get("harness", spec.default_harness.type, spec.default_harness.version)
@@ -303,12 +305,12 @@ def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Depends(aut
             plugins.get("scorer", s.type, s.version)
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
-    return _register("eval", spec, x_auth_request_email)
+    return _register("eval", spec, actor)
 
 
 @app.post("/evals/{eval_id}/launch", status_code=202)
 def launch_from_eval(eval_id: str, body: LaunchFromEval, bg: BackgroundTasks,
-                     x_auth_request_email: str | None = Depends(auth_email)):
+                     actor: str | None = Depends(auth_email)):
     """Launch a run from a registered eval: resolve its dataset (the pinned content-addressed snapshot)
     + default harness/scorers, apply the caller's model + run knobs, then launch (FR2/FR10)."""
     ev = control.get_entity("eval", eval_id)
@@ -328,8 +330,8 @@ def launch_from_eval(eval_id: str, body: LaunchFromEval, bg: BackgroundTasks,
         temperature=body.temperature, seed=body.seed,
         transcript_sample_rate=body.transcript_sample_rate,
     )
-    run_id = runner.launch(spec, created_by=x_auth_request_email)
-    control.audit(x_auth_request_email, "run.launch_from_eval", run_id,
+    run_id = runner.launch(spec, created_by=actor)
+    control.audit(actor, "run.launch_from_eval", run_id,
                   {"eval": eval_id, "version": ev["version"], "model": body.model})
     if INLINE_EXEC:
         bg.add_task(runner.execute, run_id, spec)
@@ -347,8 +349,8 @@ def get_eval(eval_id: str):
 
 
 @app.post("/models", status_code=201)
-def register_model(spec: ModelSpec, x_auth_request_email: str | None = Depends(auth_email)):
-    return _register("model", spec, x_auth_request_email)
+def register_model(spec: ModelSpec, actor: str | None = Depends(auth_email)):
+    return _register("model", spec, actor)
 
 
 @app.get("/models")
@@ -357,7 +359,7 @@ def list_models():
 
 
 @app.get("/models/{model_id}")
-def get_model(model_id: str):
+def get_model_entity(model_id: str):  # not Inspect's get_model — this is the registered ModelSpec
     return _get("model", model_id)
 
 
@@ -367,13 +369,13 @@ def get_model(model_id: str):
 # The frontend for this lands with the full prototype-based dashboard rewrite — API only here.
 
 @app.post("/training", status_code=201)
-def register_training(spec: TrainingRunSpec, x_auth_request_email: str | None = Depends(auth_email)):
+def register_training(spec: TrainingRunSpec, actor: str | None = Depends(auth_email)):
     """Register a training run to monitor. Its suite evals must already be registered evals."""
     for entry in spec.suite:
         if not control.get_entity("eval", entry.eval, entry.version):
             raise HTTPException(status_code=422, detail=f"suite eval not registered: {entry.eval}")
     training.register(spec)
-    control.audit(x_auth_request_email, "training.register", spec.id,
+    control.audit(actor, "training.register", spec.id,
                   {"model": spec.model, "suite": [e.eval for e in spec.suite]})
     return {"id": spec.id, "status": "watching"}
 

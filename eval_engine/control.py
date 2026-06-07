@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -43,7 +44,6 @@ def _dsn_host() -> str:
         if tok.startswith("host="):
             return tok.split("=", 1)[1]
     try:
-        from urllib.parse import urlparse
         return urlparse(DSN).hostname or "?"  # .hostname is host only — no user/password
     except Exception:  # noqa: BLE001
         return "?"
