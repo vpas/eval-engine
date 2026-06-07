@@ -44,11 +44,14 @@ def _ddl() -> str:
             "TTL finished_at + INTERVAL 12 MONTH")
 
 _client = None
+# Process-global, NOT per-client: the schema is server-side (CREATE … IF NOT EXISTS), so it only needs
+# ensuring once per process. (Same rationale + shape as control.py's _conn/_ensure_schema.)
 _init_done = False
 
 
 def _c():
-    global _client
+    """The ClickHouse client, connecting + ensuring the schema once per process on first use."""
+    global _client, _init_done
     if _client is None:
         host = os.environ.get("EVAL_ENGINE_CH_HOST", "localhost")
         log.debug("opening ClickHouse client to host=%s (cluster=%s)", host, CH_CLUSTER or "-")
@@ -58,11 +61,6 @@ def _c():
             username=os.environ.get("EVAL_ENGINE_CH_USER", "default"),
             password=os.environ.get("EVAL_ENGINE_CH_PASSWORD", ""),
         )
-    return _c_inited()
-
-
-def _c_inited():
-    global _init_done
     if not _init_done:
         _client.command(_ddl())
         _init_done = True

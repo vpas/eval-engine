@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS checkpoint_models(
 """
 
 _local = threading.local()
+# Process-global, NOT per-connection: the schema is server-side and uses CREATE … IF NOT EXISTS, so it
+# only needs ensuring once per process — a later reconnect (or another thread's connection) skips it,
+# which is correct because the schema already exists server-side. (Same rationale in analytics.py.)
 _init_done = False
 
 
@@ -155,7 +158,16 @@ def _conn() -> psycopg.Connection:
                   _dsn_host(), threading.current_thread().name)
         con = psycopg.connect(DSN, autocommit=True)
         _local.con = con
+        _ensure_schema(con)  # ensure once per process on the first connection (idempotent)
     return con
+
+
+def _ensure_schema(con: psycopg.Connection) -> None:
+    global _init_done
+    if not _init_done:
+        con.execute(SCHEMA)
+        _init_done = True
+        log.info("Postgres schema ensured (host=%s)", _dsn_host())
 
 
 def _dict_rows(sql: str, params=()) -> list[dict]:
@@ -258,11 +270,9 @@ def run_as_leader(key: int, tick: Callable[[], None], *, tick_seconds: float, st
 
 
 def init() -> None:
-    global _init_done
-    if not _init_done:
-        _conn().execute(SCHEMA)
-        _init_done = True
-        log.info("Postgres schema ensured (host=%s)", _dsn_host())
+    """Ensure the schema early (process startup) — fail-fast + the API's reachability retry loop.
+    Idempotent; ``_conn()`` also ensures lazily, so a query before init() still works."""
+    _ensure_schema(_conn())
 
 
 def new_run_id() -> str:
