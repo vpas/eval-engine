@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 
 from . import db, runner
@@ -18,6 +19,10 @@ from .models import RunSpec
 
 POLL_SECONDS = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
 WORKER_ID = os.environ.get("HOSTNAME", f"w-{os.getpid()}")  # pod name in K8s → unique claimer id
+# Lease heartbeat: renew our claimed tasks' leases this often while executing, so a long batch
+# (agentic / SWE-bench — image pull + multi-turn agent + test run, easily > the 600s claim lease)
+# isn't reclaimed + redone by another worker. Well under the lease so a missed beat is harmless.
+LEASE_RENEW_SECONDS = float(os.environ.get("EVAL_ENGINE_LEASE_RENEW_SECONDS", "120"))
 
 # Graceful drain on rollout/scale-down. K8s sends SIGTERM before SIGKILL; on SIGTERM we stop claiming
 # NEW batches and let the in-flight one finish, then exit — so a rolling update never claims-then-dies
@@ -31,6 +36,29 @@ def _graceful_shutdown(*_) -> None:
     global _STOP
     _STOP = True
     print(f"[worker {WORKER_ID}] SIGTERM — draining: finishing current batch, no new claims", flush=True)
+
+
+def _execute_with_heartbeat(spec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict:
+    """Run the (possibly long) batch while a background daemon renews our lease — so an agentic/
+    SWE-bench batch that outlives the claim lease isn't reclaimed by another worker mid-flight. The
+    renewer uses its own thread-local PG connection; it stops the moment execution returns or raises
+    (and if the whole worker dies, the lease simply lapses → reclaim, preserving crash safety)."""
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(LEASE_RENEW_SECONDS):
+            try:
+                db.control.renew_lease(run_id, ids, WORKER_ID)
+            except Exception:  # noqa: BLE001  a transient renew failure just risks one early reclaim
+                pass
+
+    t = threading.Thread(target=beat, name=f"lease-{run_id}", daemon=True)
+    t.start()
+    try:
+        return runner._execute_batch(spec, run_id, samples_by_id, ids)
+    finally:
+        stop.set()
+        t.join(timeout=2)
 
 
 def _drain_run(run_id: str) -> int:
@@ -50,7 +78,7 @@ def _drain_run(run_id: str) -> int:
             return processed
         # run_id in the log line so the ops dashboard's per-run "worker logs" deep link matches.
         print(f"[worker {WORKER_ID}] run_id={run_id} claimed {len(ids)}", flush=True)
-        results = runner._execute_batch(spec, run_id, samples_by_id, ids)
+        results = _execute_with_heartbeat(spec, run_id, samples_by_id, ids)
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
         runner._commit_batch(spec, run_id, samples_by_id, ids, results)
         processed += len(ids)

@@ -329,6 +329,22 @@ def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) 
     return [r[0] for r in rows]
 
 
+def renew_lease(run_id: str, ids: list[str], worker: str, lease_seconds: float = 600.0) -> int:
+    """Lease heartbeat: extend the lease on tasks WE still hold and are still executing. A long batch
+    (agentic / SWE-bench: image pull + multi-turn agent + test run) can outlive the claim lease, after
+    which another worker would reclaim the still-running task and redo it. The worker calls this
+    periodically while it executes; if the worker dies, renewal stops and the lease lapses → reclaim
+    (crash safety preserved). Guarded by ``claimed_by`` + ``status='running'`` so we never extend a row
+    another worker has since reclaimed or that's already committed. Returns # rows renewed."""
+    if not ids:
+        return 0
+    return _conn().execute(
+        "UPDATE sample_tasks SET lease_expires_at=now() + make_interval(secs => %s) "
+        "WHERE run_id=%s AND sample_id = ANY(%s) AND claimed_by=%s AND status='running'",
+        (lease_seconds, run_id, list(ids), worker),
+    ).rowcount
+
+
 def lane_running_counts() -> dict[str, int]:
     """Count of currently-RUNNING runs per lane — input to two-lane admission (SCHEDULER §2)."""
     rows = _conn().execute(

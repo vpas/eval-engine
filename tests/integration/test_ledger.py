@@ -118,6 +118,29 @@ def test_lease_reclaim():
         _cleanup(run_id)
 
 
+def test_renew_lease_prevents_reclaim():
+    """The lease heartbeat: a worker still executing a long batch renews its lease, so a peer can't
+    reclaim the still-running task — but a renew by the WRONG worker (or after commit) is a no-op."""
+    run_id = _make_run(3)
+    try:
+        a = control.claim_batch(run_id, "A", 3, lease_seconds=1.0)  # A claims, short lease
+        assert len(a) == 3
+        time.sleep(1.3)                                              # lease would now be expired…
+        renewed = control.renew_lease(run_id, a, "A", lease_seconds=60)  # …but A heartbeats
+        assert renewed == 3, f"heartbeat renewed {renewed}/3"
+        b = control.claim_batch(run_id, "B", 3, lease_seconds=60)   # B must NOT reclaim renewed tasks
+        assert b == [], f"renewed tasks were reclaimed: {b}"
+
+        # a heartbeat from a DIFFERENT worker (e.g. after a real reclaim) renews nothing
+        assert control.renew_lease(run_id, a, "B", lease_seconds=60) == 0
+        # …and once a task is committed, renewing it is a no-op (status no longer 'running')
+        control.commit_result(run_id, a[0], _fake_result())
+        assert control.renew_lease(run_id, [a[0]], "A", lease_seconds=60) == 0
+        print("  [lease-heartbeat] renew blocks reclaim ✓  wrong-worker/committed renew = no-op ✓")
+    finally:
+        _cleanup(run_id)
+
+
 def test_retry_backoff():
     """Transient failure re-queues with a not_before backoff (unclaimable until it elapses), to the
     attempt cap, then terminal 'failed' — on the REAL Postgres backend (FR5, ORCHESTRATION §7)."""
