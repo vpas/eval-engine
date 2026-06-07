@@ -47,6 +47,17 @@ def _sandbox_spec(sandbox_kind: str, compose_file: str, k8s_values: str | None) 
         raise FileNotFoundError(f"sandbox compose file not found: {compose}")
     return SandboxEnvironmentSpec("docker", str(compose))
 
+
+class SandboxConfig(BaseModel):
+    """Shared sandbox declaration for harnesses that provision one (docs/SANDBOXING §4/§7): a local
+    hardened, air-gapped Docker compose by default, an in-cluster per-sample K8s pod when
+    ``sandbox="k8s"``. Only ``sandbox: docker|k8s`` changes between local and cluster — a config
+    choice, not a code change. Harness configs needing a sandbox inherit these fields."""
+    sandbox: str = "docker"                       # "docker" (local) | "k8s" (cluster)
+    compose_file: str = _DEFAULT_COMPOSE          # docker only: hardened AIR-GAPPED spec
+    k8s_values: str | None = _DEFAULT_K8S_VALUES  # k8s: Helm values (cluster-specific runtime)
+
+
 # --------------------------------------------------------------------------- harnesses
 
 
@@ -71,14 +82,11 @@ def single_turn(cfg: SingleTurnConfig) -> Solver:
     return chain(steps) if len(steps) > 1 else steps[0]
 
 
-class CodeGenerationConfig(BaseModel):
+class CodeGenerationConfig(SandboxConfig):
     """Code-gen harness for execution-scored benchmarks (HumanEval/MBPP). The *solver* is a plain
     one-shot generate, but the harness still declares a **sandbox** — because the `code_exec` scorer
     runs the model's code against the unit tests inside it (docs/PLUGINS.md: a harness may declare a
     sandbox for its scorer, not just for tool calls). Pair with the `code_exec` scorer."""
-    sandbox: str = "docker"                                # "docker" (local) | "k8s" (cluster)
-    compose_file: str = _DEFAULT_COMPOSE
-    k8s_values: str | None = _DEFAULT_K8S_VALUES
     system: str = ""
 
 
@@ -163,11 +171,8 @@ def multiple_choice_harness(cfg: MultipleChoiceConfig) -> Solver:
     return chain([multiple_choice(cot=cfg.cot), _mc_answer_fallback()])
 
 
-class AgenticConfig(BaseModel):
+class AgenticConfig(SandboxConfig):
     tools: list[str] = ["bash"]                            # sandbox tools to expose: bash | python
-    sandbox: str = "docker"                                # "docker" (local) | "k8s" (cluster)
-    compose_file: str = "deploy/sandbox/airgap-compose.yaml"  # docker only: hardened AIR-GAPPED spec
-    k8s_values: str | None = "deploy/sandbox/k8s-agent-env-values.yaml"  # k8s: Helm values (cluster-specific runtime)
     message_limit: int = 12                                # cap the agent loop
     tool_timeout: int = 30
 
