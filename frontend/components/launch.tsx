@@ -46,10 +46,20 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
   const limit = slice === "subset" ? subsetNum : undefined;
   const modelOpts = Array.from(new Set([...MODEL_SUGGESTIONS, ...models.map((m) => `${m.body.provider}/${m.body.model_id}`)]));
 
+  // Required-field validation. Epochs is always required (>=1); subset size only when the subset slice
+  // is chosen. Optional fields (temperature/seed/budget) treat empty as a deliberate "unset", so they
+  // don't flag. Errors surface once a field is blurred (touched) — or on a launch attempt — rather than
+  // mid-type, and we BLOCK launch instead of silently defaulting (which would hide what actually ran).
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const blur = (k: string) => setTouched((t) => ({ ...t, [k]: true }));
+  const epochsInvalid = epochs.trim() === "" || !(Number(epochs) >= 1);
+  const subsetInvalid = slice === "subset" && (subsetN.trim() === "" || !(Number(subsetN) >= 1));
+  const canLaunch = !!evalId && chosen.length > 0 && !epochsInvalid && !subsetInvalid;
+
   const toggle = (id: string) => setMulti((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
   const launch = async () => {
-    if (!evalId || chosen.length === 0) return;
+    if (!canLaunch) { setTouched((t) => ({ ...t, epochs: true, subsetN: true })); return; }
     setBusy(true);
     setErr(null);
     try {
@@ -118,8 +128,13 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
                   <div className={`chip ${slice === "subset" ? "on" : ""}`} onClick={() => setSlice("subset")}>subset</div>
                   {slice === "subset" && (
                     <div className="vcenter gap8">
-                      <input className="input" type="number" style={{ width: 110 }} value={subsetN} onChange={(e) => setSubsetN(e.target.value)} />
+                      <input
+                        className={`input${touched.subsetN && subsetInvalid ? " err" : ""}`}
+                        type="number" min="1" style={{ width: 110 }} value={subsetN}
+                        onChange={(e) => setSubsetN(e.target.value)} onBlur={() => blur("subsetN")}
+                      />
                       <span className="subtle mono" style={{ fontSize: 11 }}>samples</span>
+                      {touched.subsetN && subsetInvalid && <span className="err-msg">required — enter a sample count ≥ 1</span>}
                     </div>
                   )}
                 </div>
@@ -155,8 +170,13 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
 
               <Section n="4" title="Sampling & budget" hint="Epochs repeat each sample for CIs; the budget cap is a terminal BudgetExceeded signal.">
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 420 }}>
-                  <div className="field"><label>Epochs <span className="subtle">(repeat for CIs)</span></label>
-                    <input className="input" type="number" min="1" value={epochs} onChange={(e) => setEpochs(e.target.value)} />
+                  <div className="field"><label>Epochs <span className="req">*</span> <span className="subtle">(repeat for CIs)</span></label>
+                    <input
+                      className={`input${touched.epochs && epochsInvalid ? " err" : ""}`}
+                      type="number" min="1" value={epochs}
+                      onChange={(e) => setEpochs(e.target.value)} onBlur={() => blur("epochs")}
+                    />
+                    {touched.epochs && epochsInvalid && <span className="hint err">required — enter a whole number ≥ 1</span>}
                   </div>
                   <div className="field"><label>Temperature</label>
                     <input className="input" type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(e.target.value)} />
@@ -209,7 +229,7 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
         <div className="fs-foot">
           <span className="grow" />
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary lg" disabled={busy || !evalId || chosen.length === 0} onClick={launch}>
+          <button className="btn primary lg" disabled={busy || !canLaunch} onClick={launch}>
             <Icon name="rocket" />{busy ? "Launching…" : mode === "matrix" ? `Launch ${chosen.length} runs` : "Launch run"}
           </button>
         </div>
