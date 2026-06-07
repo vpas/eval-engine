@@ -23,9 +23,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
-import sys
-import time
 
 from . import runner, storage, training_analysis as ta
 from .db import analytics, control
@@ -397,33 +394,14 @@ def tick(inline: bool = INLINE) -> None:
         reconcile(tr_id)
 
 
-def _graceful_shutdown(*_) -> None:
-    log.warning("[monitor] SIGTERM — releasing leadership")
-    control.release_leader(LEADER_KEY)
-    sys.exit(0)
-
-
 def main() -> None:
     from . import db
     db.init()
-    signal.signal(signal.SIGTERM, _graceful_shutdown)
-    log.info("[monitor] starting — contending for leadership")
-    while not control.acquire_leader(LEADER_KEY):
-        if control.reap_stale_leader(LEADER_KEY, STALE_LEADER_SECONDS):
-            log.warning("[monitor] reaped a stale leader — retrying for leadership")
-            continue
-        log.info("[monitor] standby — another monitor holds leadership")
-        time.sleep(5)
-    log.info("[monitor] up, leader — tick=%.1fs, inline=%s", TICK_SECONDS, INLINE)
-    while True:
-        if not control.leader_alive():
-            log.warning("[monitor] lost leadership; exiting to re-contend")
-            return
-        try:
-            tick()
-        except Exception:  # noqa: BLE001  one bad run must not kill the loop
-            log.exception("[monitor] tick error")
-        time.sleep(TICK_SECONDS)
+    # Leader-elected (shared loop): only one monitor ticks; a standby takes over on handover/reap.
+    # swallow_tick_errors=True — one bad training run must not kill the monitor loop.
+    control.run_as_leader(LEADER_KEY, tick, tick_seconds=TICK_SECONDS,
+                          stale_seconds=STALE_LEADER_SECONDS, name="monitor",
+                          swallow_tick_errors=True)
 
 
 if __name__ == "__main__":

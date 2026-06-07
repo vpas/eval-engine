@@ -20,8 +20,6 @@ Everything is idempotent: a crash mid-finalize just re-runs the (no-op-on-reentr
 from __future__ import annotations
 
 import os
-import signal
-import sys
 import time
 
 from . import db, runner
@@ -105,36 +103,17 @@ def tick() -> None:
     db.control.prune_heartbeats(3600.0)
 
 
-def _graceful_shutdown(*_) -> None:
-    """SIGTERM (k8s pod delete / rollout): release the leader lock so the next pod takes over in ~1s
-    instead of stalling until our pooled connection times out (bug B1)."""
-    log.warning("SIGTERM — releasing leadership")
-    db.control.release_leader(LEADER_KEY)
-    sys.exit(0)
-
-
 def main() -> None:
     db.init()
-    signal.signal(signal.SIGTERM, _graceful_shutdown)
-    # Leader election: block as a standby until we hold the advisory lock, so running >1 orchestrator
-    # replica is safe (only the leader ticks). A standby takes over when the leader's lock releases —
-    # either gracefully (SIGTERM handover) or, if the old leader died ungracefully, by reaping its
-    # lingering pooled connection once it's been idle past the threshold (bug B1).
-    log.info("starting (pod=%s) — contending for leadership", POD)
-    while not db.control.acquire_leader(LEADER_KEY):
-        if db.control.reap_stale_leader(LEADER_KEY, STALE_LEADER_SECONDS):
-            log.warning("reaped a stale leader (lingering lock) — retrying for leadership")
-            continue
-        log.info("standby — another orchestrator holds leadership")
-        db.control.heartbeat("orchestrator", POD, {"leader": False})  # visible as a standby
-        time.sleep(5)
-    log.info("up, leader (pod=%s) — tick=%.1fs, global_max_running=%d", POD, TICK_SECONDS, GLOBAL_MAX_RUNNING)
-    while True:
-        if not db.control.leader_alive():
-            log.warning("lost leadership; exiting to re-contend")
-            return  # k8s restarts the pod → it re-enters as a standby
-        tick()
-        time.sleep(TICK_SECONDS)
+    # Leader election (shared loop): block as a standby until we hold the advisory lock, so running >1
+    # orchestrator replica is safe (only the leader ticks). A standby takes over when the lock releases
+    # — gracefully (SIGTERM handover) or, on an ungraceful death, by reaping the lingering idle lock
+    # (bug B1). A tick error propagates → pod restart → re-contend (no swallow). The standby heartbeat
+    # makes it observable; the leader heartbeats from inside tick().
+    db.control.run_as_leader(
+        LEADER_KEY, tick, tick_seconds=TICK_SECONDS, stale_seconds=STALE_LEADER_SECONDS,
+        name="orchestrator",
+        on_standby=lambda: db.control.heartbeat("orchestrator", POD, {"leader": False}))
 
 
 if __name__ == "__main__":

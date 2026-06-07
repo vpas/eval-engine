@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sys
 import threading
+import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -210,6 +214,47 @@ def reap_stale_leader(key: int, idle_seconds: float = 20.0) -> int:
         (classid, objid, idle_seconds),
     ).fetchall()
     return len(rows)
+
+
+def run_as_leader(key: int, tick: Callable[[], None], *, tick_seconds: float, stale_seconds: float,
+                  name: str = "leader", on_standby: Callable[[], None] | None = None,
+                  swallow_tick_errors: bool = False) -> None:
+    """Run ``tick`` on an interval under leader election (the shared orchestrator + training-monitor
+    loop). Contend for the advisory ``key`` (reaping a stale holder per ``reap_stale_leader``), block
+    as a standby until we win it, then tick every ``tick_seconds`` while we hold it; return when
+    leadership is lost so the caller's process can restart and re-contend. Registers a SIGTERM handler
+    that releases the lock for a fast (~1s) rollout handover (bug B1).
+
+    ``on_standby`` runs once per standby poll (e.g. a heartbeat so a standby is observable).
+    ``swallow_tick_errors`` logs+continues on a tick exception (the monitor: one bad run mustn't kill
+    the loop) rather than letting it propagate (the orchestrator: crash → pod restart → re-contend)."""
+    def _handover(*_):
+        log.warning("[%s] SIGTERM — releasing leadership", name)
+        release_leader(key)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _handover)
+
+    log.info("[%s] contending for leadership", name)
+    while not acquire_leader(key):
+        if reap_stale_leader(key, stale_seconds):
+            log.warning("[%s] reaped a stale leader (lingering lock) — retrying for leadership", name)
+            continue
+        log.info("[%s] standby — another holder has leadership", name)
+        if on_standby:
+            on_standby()
+        time.sleep(5)
+
+    log.info("[%s] up, leader — tick=%.1fs", name, tick_seconds)
+    while leader_alive():
+        if swallow_tick_errors:
+            try:
+                tick()
+            except Exception:  # noqa: BLE001  one bad tick must not kill the loop
+                log.exception("[%s] tick error", name)
+        else:
+            tick()
+        time.sleep(tick_seconds)
+    log.warning("[%s] lost leadership; exiting to re-contend", name)
 
 
 def init() -> None:
