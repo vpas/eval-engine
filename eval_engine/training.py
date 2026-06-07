@@ -96,13 +96,13 @@ def register_from_source(source: str) -> TrainingRunSpec:
 # --------------------------------------------------------------------------- discover
 
 def discover(tr_id: str) -> list[dict]:
-    """Poll the source; record any not-yet-seen checkpoints. Returns the newly-recorded ones. Also
-    re-reads run.json to advance current_step and pick up a terminal trainer status."""
+    """Poll the source; record any not-yet-seen checkpoints. Returns the newly-recorded ones, and
+    advances current_step to the latest discovered step (flipping watching→training on first sight).
+    The trainer's terminal status is picked up separately in :func:`_maybe_finalize`."""
     tr = control.get_training_run(tr_id)
     if not tr:
         return []
     source = tr["source"]
-    run_json = SOURCE.read_run(source) or {}
     seen = control.discovered_steps(tr_id)
     new: list[dict] = []
     for man in SOURCE.list_checkpoints(source):

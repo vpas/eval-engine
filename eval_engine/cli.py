@@ -70,7 +70,7 @@ def _print_report(run_id: str):
         print(f"  {row.sample_id:<8} {'✓' if row.passed else '✗':<5} {(row.group_key or '-'):<12} "
               f"{row.primary_score:<6.2f} {out} → {tgt}")
 
-    print(f"\n  accuracy by category (analytics slice):")
+    print("\n  accuracy by category (analytics slice):")
     for c in analytics.by_category(run_id):
         print(f"    {c.group_key or '(none)':<14} n={c.n} passed={c.passed} acc={c.accuracy}")
     print()

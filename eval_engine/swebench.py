@@ -8,7 +8,8 @@ now pass and the PASS_TO_PASS tests still pass.
 Two halves live here:
 - ``persample_sandbox(image)`` — the per-sample sandbox spec pointing at the instance image (k8s in
   cluster, docker locally). Driven by ``EVAL_ENGINE_SWE_SANDBOX`` (default docker).
-- ``resolved(test_output, repo, fail_to_pass, pass_to_pass)`` — grade the test log. The per-repo
+- ``grade(log, repo, fail_to_pass, pass_to_pass)`` — grade the test log (returns a report dict whose
+  ``resolved`` key is the RESOLVED_FULL verdict). The per-repo
   PyTest log parsers are **vendored from SWE-bench (MIT)** so the *runtime* needs no heavy swebench/
   torch/datasets deps; the converter (tools/fetch_benchmark.py) uses the real ``swebench`` package
   (tooling-only) to precompute each instance's self-contained ``eval_script``, embedded in the dataset.
