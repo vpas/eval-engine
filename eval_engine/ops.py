@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -330,6 +331,73 @@ def probe_kubernetes() -> dict | None:
     except Exception:  # noqa: BLE001
         pass
     return {"workloads": workloads, "keda": keda}
+
+
+# --- orphaned-sandbox reaper (leader-elected; driven by the orchestrator) ------------------------
+# Agentic sandboxes are one ephemeral inspect-k8s-sandbox helm release per sample, torn down by
+# Inspect when the sample finishes. If the owning worker dies mid-eval (SIGKILL on rollout / OOM /
+# node drain) before that teardown runs, the release leaks — and on the small, hard-capped sandbox
+# node pool a couple of leaks can wedge it (each sandbox ~fills a node), so every new sample's helm
+# install then times out. This is the safety net that reclaims them; the leak source itself is
+# tightened by giving the worker enough terminationGracePeriod to finish + tear down on drain.
+#
+# A sandbox's whole lifetime is bounded: helm install (≤ its install timeout, image pull included) +
+# the per-sample wall-clock cap + teardown. A release older than that cap is therefore an orphan, and
+# reaping by age can NEVER race a live sandbox — a real one is always younger than the cutoff.
+SAMPLE_TIME_LIMIT_S = float(os.environ.get("EVAL_ENGINE_SAMPLE_TIME_LIMIT", "600"))
+SANDBOX_REAP_AFTER_S = float(os.environ.get(
+    "EVAL_ENGINE_SANDBOX_REAP_AFTER_SECONDS", str(2 * SAMPLE_TIME_LIMIT_S + 600)))  # ≈30m at defaults
+
+
+def _orphan_releases(latest_age_s: dict[str, float], cutoff_s: float) -> list[str]:
+    """Pure policy split: of {release: age_seconds}, the names old enough to be orphans. Sorted
+    oldest-first so the most-stranded nodes are reclaimed first if we ever cap a sweep."""
+    return [name for name, _ in sorted(latest_age_s.items(), key=lambda kv: kv[1], reverse=True)
+            if cutoff_s <= latest_age_s[name]]
+
+
+def reap_orphan_sandboxes(now: datetime | None = None) -> list[str]:
+    """``helm uninstall`` sandbox releases in ``SANDBOX_NS`` older than ``SANDBOX_REAP_AFTER_S``,
+    returning the reaped release names. No-ops (``[]``) when not in-cluster / the k8s client is absent
+    (dev). Best-effort and self-isolating: every failure is logged, never raised — cleanup must never
+    break the orchestrator tick that drives it."""
+    try:
+        from kubernetes import client, config
+        config.load_incluster_config()
+    except Exception:  # noqa: BLE001 — not in-cluster / client missing (local dev)
+        return []
+    core = client.CoreV1Api()
+    try:
+        # Helm 3 stores each release revision as a Secret labelled owner=helm, name=<release>.
+        secrets = core.list_namespaced_secret(
+            SANDBOX_NS, label_selector="owner=helm", timeout_seconds=4).items
+    except Exception as e:  # noqa: BLE001
+        print(f"[reaper] listing helm releases in {SANDBOX_NS} failed: {e}", flush=True)
+        return []
+    now = now or datetime.now(timezone.utc)
+    # newest secret per release name = that release's current revision → its age.
+    newest: dict[str, datetime] = {}
+    for s in secrets:
+        name = (s.metadata.labels or {}).get("name")
+        ts = s.metadata.creation_timestamp
+        if name and ts and (name not in newest or ts > newest[name]):
+            newest[name] = ts
+    ages = {name: (now - ts).total_seconds() for name, ts in newest.items()}
+    reaped: list[str] = []
+    for name in _orphan_releases(ages, SANDBOX_REAP_AFTER_S):
+        try:
+            r = subprocess.run(["helm", "uninstall", name, "-n", SANDBOX_NS, "--timeout", "120s"],
+                               capture_output=True, text=True, timeout=150)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"[reaper] helm uninstall {name!r} errored: {e}", flush=True)
+            continue
+        if r.returncode == 0:
+            reaped.append(name)
+            print(f"[reaper] uninstalled orphan sandbox {name!r} (age {_fmt_dur(ages[name])})", flush=True)
+        else:
+            print(f"[reaper] helm uninstall {name!r} failed: {(r.stderr or r.stdout).strip()[:200]}",
+                  flush=True)
+    return reaped
 
 
 # --- the snapshot --------------------------------------------------------------------------------

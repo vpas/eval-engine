@@ -88,6 +88,7 @@ spec:
       labels: { app: eval-engine-orch }
     spec:
       nodeSelector: { eval-engine/role: system }
+      serviceAccountName: eval-engine-orch   # RBAC to helm-uninstall leaked sandboxes (90-sandbox-rbac)
       # Keep the standby off the leader's node where possible (soft; single-zone POC — RESILIENCE §3.1).
       topologySpreadConstraints:
         - maxSkew: 1

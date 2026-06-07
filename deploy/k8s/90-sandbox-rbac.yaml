@@ -1,6 +1,8 @@
 # Agentic sandboxing: inspect-k8s-sandbox helm-installs an ephemeral pod per sample into the
 # eval-sandbox namespace. The worker runs as a dedicated ServiceAccount with rights to manage those
-# resources there (cross-namespace: SA lives in eval-engine, Role/binding in eval-sandbox).
+# resources there (cross-namespace: SA lives in eval-engine, Role/binding in eval-sandbox). The
+# orchestrator shares the same Role so its leader-elected reaper (ops.reap_orphan_sandboxes) can
+# helm-uninstall sandbox releases leaked by workers that died mid-eval.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -11,6 +13,12 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: eval-engine-worker
+  namespace: eval-engine
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eval-engine-orch
   namespace: eval-engine
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -48,4 +56,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: eval-engine-worker
+    namespace: eval-engine
+  - kind: ServiceAccount        # orchestrator: the leaked-sandbox reaper (helm uninstall)
+    name: eval-engine-orch
     namespace: eval-engine

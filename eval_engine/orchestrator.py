@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import time
 
-from . import db, runner
+from . import db, ops, runner
 # Cadence / admission / leader knobs live in config (shared with ops + the monitor) so a default can't
 # diverge between the orchestrator that enforces them and the dashboard that displays them. Two-lane
 # admission (SCHEDULER §2): a global cap on concurrently-running runs + a reserved interactive slice
@@ -36,6 +36,12 @@ from .models import RunSpec
 log = get_logger(__name__)
 
 LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
+# Orphaned-sandbox reaper cadence (ops.reap_orphan_sandboxes). Far slower than the tick: a leak only
+# strands a sandbox node and the reap cutoff is ~30m, so a check every few minutes reclaims promptly
+# enough without shelling out to helm on every 2s tick. (GLOBAL_MAX_RUNNING / INTERACTIVE_RESERVE /
+# STALE_LEADER_SECONDS now come from config, shared with the ops dashboard + monitor.)
+REAP_INTERVAL_SECONDS = float(os.environ.get("EVAL_ENGINE_SANDBOX_REAP_INTERVAL_SECONDS", "300"))
+_last_reap = 0.0
 
 
 def _admit() -> None:
@@ -100,6 +106,18 @@ def tick() -> None:
     # so the table stays small. The cutoff is well above any single batch's wall-clock cap, so a busy
     # worker is never pruned; the snapshot already age-filters for liveness, this just bounds growth.
     db.control.prune_heartbeats(3600.0)
+
+    # Reclaim sandbox nodes stranded by leaked per-sample helm releases (a worker SIGKILLed mid-eval
+    # before Inspect's teardown). Leader-only + throttled; age-based so it can't race a live sandbox.
+    global _last_reap
+    if time.time() - _last_reap >= REAP_INTERVAL_SECONDS:
+        _last_reap = time.time()
+        try:
+            reaped = ops.reap_orphan_sandboxes()
+            if reaped:
+                log.info("reaped %d orphan sandbox(es): %s", len(reaped), reaped)
+        except Exception:  # noqa: BLE001 — cleanup must never break the tick
+            log.exception("sandbox reaper failed")
 
 
 def main() -> None:

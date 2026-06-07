@@ -14,9 +14,15 @@ spec:
     metadata:
       labels: { app: eval-engine-worker }
     spec:
-      # Let an in-flight batch finish on SIGTERM (graceful drain) before SIGKILL — above the per-sample
-      # timeout so a rolling update doesn't strand freshly-claimed tasks (eval_engine/worker._graceful_shutdown).
-      terminationGracePeriodSeconds: 150
+      # Let an in-flight batch finish on SIGTERM (graceful drain) before SIGKILL, so a rollout/scale-down
+      # doesn't strand freshly-claimed tasks (eval_engine/worker._graceful_shutdown). Must exceed the
+      # WHOLE agentic wall-clock — sandbox setup (helm install + image pull, ≤~600s) + the per-sample cap
+      # (EVAL_ENGINE_SAMPLE_TIME_LIMIT=600s) — otherwise SIGKILL lands mid-eval before Inspect tears the
+      # sandbox down, leaking the per-sample helm release and wedging the small sandbox node pool. A
+      # draining worker exits as soon as its batch finishes, so this is only an upper bound (short
+      # non-agentic batches drain in seconds). The orchestrator's reaper (ops.reap_orphan_sandboxes) is
+      # the backstop for the leaks this can't prevent (OOM/SIGKILL/node drain).
+      terminationGracePeriodSeconds: 1200
       serviceAccountName: eval-engine-worker     # RBAC to manage agentic sandbox pods (90-sandbox-rbac)
       nodeSelector: { eval-engine/role: worker }
       tolerations:
