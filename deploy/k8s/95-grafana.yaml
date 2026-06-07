@@ -177,7 +177,10 @@ spec:
       nodeSelector: { eval-engine/role: system }
       containers:
         - name: frontend
-          image: gke.gcr.io/prometheus-engine/frontend:v0.8.2-gke.0
+          # Pinned to the prometheus-engine release this cluster's managed collection runs
+          # (gmp-system operator/collector = v0.18.0-gke.2). Keep in sync when GKE bumps GMP; the
+          # region-specific AR mirror is what GKE nodes pull from (us-central1 = our cluster region).
+          image: us-central1-artifactregistry.gcr.io/gke-release/gke-release/prometheus-engine/frontend:v0.18.0-gke.2
           args:
             - "--web.listen-address=:9090"
             - "--query.project-id=${EE_PROJECT}"
