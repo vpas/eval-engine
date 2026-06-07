@@ -51,12 +51,12 @@ ee.dashboard('Eval Engine — Fleet & Orchestration', 'ee-fleet', [
       FROM runs WHERE $__timeFilter(queued_at) GROUP BY 1 ORDER BY 1
     |||, 'A',
   )]),
-  ee.timeseries('Audit activity / hour', pg, [ee.pgTS(
+  ee.size(ee.timeseries('Audit activity / hour', pg, [ee.pgTS(
     |||
       SELECT $__timeGroupAlias(ts, '1h'), action, count(*) AS n
       FROM audit_log WHERE $__timeFilter(ts) GROUP BY 1, action ORDER BY 1
     |||, 'A',
-  )]),
+  )]), 24, 8),
 
   ee.row('Latency (completed runs in window)'),
   ee.table('Recent run timings', pg, [ee.pgTable(

@@ -33,7 +33,22 @@ make deploy        # apply dashboards + (re)apply the Grafana stack (k8s/95-graf
 Add a dashboard: drop `dashboards/<name>.jsonnet` (copy an existing one), `make apply`. The file
 provider picks it up within ~30s; Grafana need not restart.
 
+## Panel sizing (info density)
+
+Dashboards lay out with grafonnet `wrapPanels`, which **honours each panel's own size** and wraps to
+a new line at the 24-column grid (empty `ee.row(...)` panels are section breaks). The constructors in
+`lib/ee.libsonnet` bake in sensible default footprints, so most dashboards need no manual `gridPos`:
+
+| Helper | Default `w×h` | Use |
+|---|---|---|
+| `ee.stat` | `6×4` | one compact KPI; four sit in a row as a strip |
+| `ee.timeseries` / `ee.barchart` | `12×8` | two per row |
+| `ee.table` | `24×8` | full width so many-column rows aren't truncated |
+
+Override any single panel with `ee.size(panel, w, h)` — e.g. pack a table (`16`) next to a bar chart
+(`8`) on one line. KPI clusters are a strip of `stat`s (the panel title labels each).
+
 ## Access
 
 Behind the existing OAuth gate at **https://35-202-212-111.nip.io/grafana** — no separate login
-(Grafana trusts the `X-Auth-Request-Email` oauth2-proxy forwards). Folder: **Eval Engine**.
+(Grafana trusts the `X-Forwarded-Email` oauth2-proxy forwards). Folder: **Eval Engine**.

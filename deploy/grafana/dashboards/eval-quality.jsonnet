@@ -42,7 +42,8 @@ ee.dashboard('Eval Engine — Quality', 'ee-eval-quality', [
   )]),
 
   ee.row('Leaderboard'),
-  ee.table('Model × eval leaderboard', ds, [ee.chTable(
+  // Table (16) + attempt-distribution bar (8) share one 24-col line.
+  ee.size(ee.table('Model × eval leaderboard', ds, [ee.chTable(
     |||
       SELECT model_id, toString(eval_id) AS eval, count() AS n,
              round(avg(passed), 4) AS pass_rate,
@@ -50,9 +51,9 @@ ee.dashboard('Eval Engine — Quality', 'ee-eval-quality', [
              round(sum(cost_usd), 4) AS cost_usd
       FROM sample_results
     ||| + where + ' GROUP BY model_id, eval ORDER BY pass_rate DESC', 'A',
-  )]),
-  ee.barchart('Attempt distribution (retries)', ds, [ee.chTable(
+  )]), 16, 8),
+  ee.size(ee.barchart('Attempt distribution (retries)', ds, [ee.chTable(
     'SELECT toString(attempt) AS attempt, count() AS n FROM sample_results ' +
     where + ' GROUP BY attempt ORDER BY attempt', 'A',
-  )]),
+  )]), 8, 8),
 ], vars=[vEval, vModel])

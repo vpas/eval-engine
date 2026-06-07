@@ -29,18 +29,19 @@ ee.dashboard('Eval Engine — Cost & Tokens', 'ee-cost-tokens', [
   )], 'currencyUSD'),
 
   ee.row('Tokens'),
+  // Throughput chart (12) + cost-by-model table (12) share one line.
   ee.timeseries('Token throughput (in/out per min)', ch, [
     ee.chTS('SELECT $__timeInterval(finished_at) AS time, sum(tokens_in) AS tokens_in ' + where + ' GROUP BY time ORDER BY time', 'A'),
     ee.chTS('SELECT $__timeInterval(finished_at) AS time, sum(tokens_out) AS tokens_out ' + where + ' GROUP BY time ORDER BY time', 'B'),
   ]),
-  ee.table('Cost by model', ch, [ee.chTable(
+  ee.size(ee.table('Cost by model', ch, [ee.chTable(
     |||
       SELECT model_id, count() AS n, round(sum(cost_usd), 4) AS cost_usd,
              sum(tokens_in) AS tok_in, sum(tokens_out) AS tok_out,
              round(sum(cost_usd) / count(), 6) AS cost_per_sample
       FROM sample_results
     ||| + where + ' GROUP BY model_id ORDER BY cost_usd DESC', 'A',
-  )]),
+  )]), 12, 8),
 
   ee.row('Live budget burn (in-flight runs)'),
   // Live cost is published on the Postgres runs row by the orchestrator tick; budget cap lives in

@@ -9,6 +9,13 @@ local ee = import '../lib/ee.libsonnet';
 local p = ee.dsProm;
 
 ee.dashboard('Eval Engine — Model Gateway', 'ee-gateway', [
+  ee.row('Now'),
+  // At-a-glance KPI strip (mixed units → four compact stats rather than one block).
+  ee.stat('Request rate', p, [ee.prom('sum(rate(litellm_proxy_total_requests_metric_total[$__rate_interval]))')], 'reqps'),
+  ee.stat('Failed rate', p, [ee.prom('sum(rate(litellm_proxy_failed_requests_metric_total[$__rate_interval]))')], 'reqps'),
+  ee.stat('Latency p95', p, [ee.prom('histogram_quantile(0.95, sum(rate(litellm_request_total_latency_metric_bucket[$__rate_interval])) by (le))')], 's'),
+  ee.stat('Spend (tally)', p, [ee.prom('sum(litellm_spend_metric_total)')], 'currencyUSD'),
+
   ee.row('Throughput & errors'),
   ee.timeseries('Request rate by model', p, [ee.prom(
     'sum(rate(litellm_proxy_total_requests_metric_total[$__rate_interval])) by (model)', '{{model}}',

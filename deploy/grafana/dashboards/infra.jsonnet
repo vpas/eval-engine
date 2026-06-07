@@ -10,6 +10,13 @@ local p = ee.dsProm;
 local nsSel = 'namespace="eval-engine"';
 
 ee.dashboard('Eval Engine — Infra', 'ee-infra', [
+  ee.row('Now'),
+  // At-a-glance KPI strip (mixed units → four compact stats).
+  ee.stat('Worker replicas', p, [ee.prom('kube_deployment_status_replicas_available{' + nsSel + ', deployment="eval-engine-worker"}')]),
+  ee.stat('Cluster nodes', p, [ee.prom('count(kube_node_info)')]),
+  ee.stat('Memory (working set)', p, [ee.prom('sum(container_memory_working_set_bytes{' + nsSel + ', container!=""})')], 'bytes'),
+  ee.stat('CPU (cores)', p, [ee.prom('sum(rate(container_cpu_usage_seconds_total{' + nsSel + ', container!=""}[$__rate_interval]))')]),
+
   ee.row('Autoscaling & topology'),
   ee.timeseries('Worker replicas (KEDA 0→N)', p, [
     ee.prom('kube_deployment_status_replicas{' + nsSel + ', deployment="eval-engine-worker"}', 'desired', 'A'),
