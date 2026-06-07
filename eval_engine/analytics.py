@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import NamedTuple
+import time
+from typing import Callable, NamedTuple, TypeVar
 
 import clickhouse_connect
+from clickhouse_connect.driver.exceptions import InterfaceError, OperationalError
 
 from .logs import get_logger
 
@@ -73,6 +75,40 @@ def init() -> None:
     _c()
 
 
+# Connection resilience (docs/RESILIENCE.md item A; mirrors control._run). The module-global client is
+# never re-created on failure on its own, so a transient ClickHouse unavailability (rollout, node loss,
+# brief network blip) would otherwise crash the worker mid-commit — and because the ack-before-flip
+# commit inserts to ClickHouse BEFORE flipping the ledger to 'done', that stalls execution, not just
+# reads. So every insert/query runs through `_run`: on a connection error it drops the cached client
+# (schema is server-side, so a rebuilt client skips DDL) and retries with bounded backoff.
+_RETRYABLE = (OperationalError, InterfaceError)
+_RETRY_TRIES = 3
+_RETRY_BASE_S = 0.2
+_RETRY_CAP_S = 2.0
+_T = TypeVar("_T")
+
+
+def _run(op: Callable[[clickhouse_connect.driver.Client], _T]) -> _T:
+    """Run ``op(client)`` with reconnect-on-broken-connection + bounded-backoff retry. A retried insert
+    is safe: ReplacingMergeTree(attempt) collapses an identical re-insert (same key + attempt) on merge
+    / FINAL, so a lost-ack double-insert is deduped — the same property the ack-before-flip commit relies
+    on for re-claimed samples."""
+    global _client
+    last: Exception | None = None
+    for i in range(_RETRY_TRIES):
+        try:
+            return op(_c())
+        except _RETRYABLE as e:
+            last = e
+            _client = None  # drop the cached client; _c() rebuilds it (schema already ensured server-side)
+            if i == _RETRY_TRIES - 1:
+                break
+            log.warning("ClickHouse connection lost (%s) — reconnecting, retry %d/%d",
+                        e.__class__.__name__, i + 1, _RETRY_TRIES - 1)
+            time.sleep(min(_RETRY_BASE_S * (2 ** i), _RETRY_CAP_S))
+    raise last  # type: ignore[misc]
+
+
 _COLUMNS = [
     "run_id", "sample_id", "eval_id", "eval_version", "provider", "model_id", "harness_type",
     "group_key", "passed", "primary_score", "scores", "tokens_in", "tokens_out", "cost_usd",
@@ -114,13 +150,13 @@ def make_row(*, run_id, sample_id, eval_id, eval_version, provider, model_id, ha
 def insert(rows: list[tuple]) -> None:
     if not rows:
         return
-    _c().insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS,
-                settings=_INSERT_SETTINGS)
+    _run(lambda c: c.insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS,
+                            settings=_INSERT_SETTINGS))
     log.debug("inserted %d sample row(s) into ClickHouse (run_id=%s)", len(rows), rows[0][0])
 
 
 def _q(sql, params=None):
-    return _c().query(sql, parameters=params or {}).result_rows
+    return _run(lambda c: c.query(sql, parameters=params or {}).result_rows)
 
 
 def _num(x) -> float | int:

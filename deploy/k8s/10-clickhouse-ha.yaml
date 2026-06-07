@@ -141,3 +141,14 @@ spec:
       spec:
         accessModes: ["ReadWriteOnce"]
         resources: { requests: { storage: 10Gi } }
+---
+# Never let a voluntary disruption (node upgrade/drain) drop the Keeper raft quorum: keep ≥2 of 3 up.
+# (RESILIENCE.md §12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: clickhouse
+  namespace: eval-engine
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: clickhouse } }

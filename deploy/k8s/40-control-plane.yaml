@@ -1,4 +1,5 @@
-# Control plane: FastAPI (launch + status/results) and the single Orchestrator (admit/finalize).
+# Control plane: FastAPI (launch + status/results) and the Orchestrator (admit/finalize), each HA at
+# 2 replicas (API load-balanced; orchestrator leader-elected → 1 active + 1 warm standby) with PDBs.
 # Both on the always-on system node. Postgres = Neon (secret), ClickHouse = in-cluster Service.
 # NOTE: contains ${EE_PROJECT}/${EE_CLUSTER}/${EE_ZONE} placeholders — apply via deploy/install.sh
 # (envsubst from `terraform output`), not a bare `kubectl apply -f`.
@@ -9,13 +10,20 @@ metadata:
   namespace: eval-engine
   labels: { app: eval-engine-api }
 spec:
-  replicas: 1
+  replicas: 2                       # HA: stateless control-plane surface; survive a pod/node loss (RESILIENCE.md B)
   selector: { matchLabels: { app: eval-engine-api } }
   template:
     metadata:
       labels: { app: eval-engine-api }
     spec:
       nodeSelector: { eval-engine/role: system }
+      # Spread replicas across nodes when the system pool has >1 (ha_stateful); soft so a 1-node pool
+      # still schedules both. zone-spread is N/A (single-zone POC — RESILIENCE.md §3.1).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: eval-engine-api } }
       serviceAccountName: eval-engine-api      # read-only infra access for the ops dashboard (41-api-rbac)
       containers:
         - name: api
@@ -55,6 +63,16 @@ spec:
   ports:
     - { name: http, port: 8077, targetPort: 8077 }
 ---
+# Keep ≥1 API up across voluntary disruptions (node upgrade/drain, autoscaler). (RESILIENCE.md B/§12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eval-engine-api
+  namespace: eval-engine
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: eval-engine-api } }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -62,13 +80,20 @@ metadata:
   namespace: eval-engine
   labels: { app: eval-engine-orch }
 spec:
-  replicas: 1                       # single orchestrator (leader-election is a later refinement)
+  replicas: 2                       # leader-elected (control.run_as_leader): one ticks, the other is a
+                                    # warm standby that takes over in ~1s on loss (RESILIENCE.md §4.2)
   selector: { matchLabels: { app: eval-engine-orch } }
   template:
     metadata:
       labels: { app: eval-engine-orch }
     spec:
       nodeSelector: { eval-engine/role: system }
+      # Keep the standby off the leader's node where possible (soft; single-zone POC — RESILIENCE §3.1).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: eval-engine-orch } }
       containers:
         - name: orchestrator
           image: us-central1-docker.pkg.dev/eval-engine/eval-engine/app:latest
@@ -83,3 +108,13 @@ spec:
           resources:
             requests: { cpu: "100m", memory: "384Mi" }
             limits:   { memory: "1Gi" }
+---
+# Keep the warm-standby orchestrator schedulable across voluntary disruptions. (RESILIENCE.md §4.2/§12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eval-engine-orch
+  namespace: eval-engine
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: eval-engine-orch } }

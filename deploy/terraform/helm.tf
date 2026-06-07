@@ -30,7 +30,16 @@ resource "helm_release" "keda" {
   version          = var.keda_chart_version
   namespace        = "keda"
   create_namespace = true
-  depends_on       = [google_container_node_pool.system]
+
+  # HA: 2 operator replicas (it leader-elects internally) so a node/pod loss doesn't freeze worker
+  # autoscaling — without it, an operator outage strands the worker Deployment at its current count
+  # (no scale-up on a burst, no scale-to-zero when idle). (RESILIENCE.md E.)
+  set {
+    name  = "operator.replicaCount"
+    value = "2"
+  }
+
+  depends_on = [google_container_node_pool.system]
 }
 
 # Ingress controller, pinned to the reserved static IP so the LB address (and the nip.io host) is

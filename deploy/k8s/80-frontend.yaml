@@ -7,13 +7,18 @@ metadata:
   namespace: eval-engine
   labels: { app: eval-engine-frontend }
 spec:
-  replicas: 1
+  replicas: 2                       # HA: stateless UI; survive a pod/node loss (RESILIENCE.md B)
   selector: { matchLabels: { app: eval-engine-frontend } }
   template:
     metadata:
       labels: { app: eval-engine-frontend }
     spec:
       nodeSelector: { eval-engine/role: system }
+      topologySpreadConstraints:    # spread across nodes when >1 (soft; single-zone POC — RESILIENCE §3.1)
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: eval-engine-frontend } }
       containers:
         - name: frontend
           image: us-central1-docker.pkg.dev/eval-engine/eval-engine/frontend:latest
@@ -39,3 +44,13 @@ spec:
   selector: { app: eval-engine-frontend }
   ports:
     - { name: http, port: 3000, targetPort: 3000 }
+---
+# Keep ≥1 frontend up across voluntary disruptions. (RESILIENCE.md B/§12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eval-engine-frontend
+  namespace: eval-engine
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: eval-engine-frontend } }

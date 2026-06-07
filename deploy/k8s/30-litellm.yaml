@@ -49,8 +49,13 @@ data:
       # filter a deployment that is over its rpm/tpm BEFORE routing → over-limit returns HTTP 429.
       routing_strategy: usage-based-routing-v2
       enable_pre_call_checks: true
-      num_retries: 0
-      allowed_fails: 0
+      num_retries: 0          # still fail-fast: never retry/cooldown-WAIT in-request (would hang the worker)
+      # allowed_fails: tolerate a few transient upstream 5xx within the window before cooling a deployment
+      # down, so ONE bad response no longer downs the whole model (the cascade that stuck runs — see the
+      # image-pin note below). cooldown_time bounds how long a genuinely-bad deployment stays out.
+      # (RESILIENCE.md F. The worker's own EVAL_ENGINE_MODEL_TIMEOUT still caps any single hung call.)
+      allowed_fails: 3
+      cooldown_time: 30
       # The HA Redis cluster (11-redis-ha.yaml: 3 replicas + Sentinel auto-failover, verified) backs the
       # gateway. litellm connects via the stable `redis` Service. NOTE: litellm's router doesn't speak
       # Sentinel (router.py gates redis on redis_host; RedisCache ignores sentinel_nodes) and only writes
@@ -80,6 +85,11 @@ spec:
       annotations: { eval-engine/config-hash: "${EE_LITELLM_CFG_HASH}" }
     spec:
       nodeSelector: { eval-engine/role: system }
+      topologySpreadConstraints:    # spread the 2 replicas across nodes when >1 (soft; single-zone POC)
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: litellm } }
       containers:
         - name: litellm
           # PINNED off the moving `main-stable` tag (2026-06-06): an earlier main-stable build's
@@ -124,3 +134,13 @@ spec:
   selector: { app: litellm }
   ports:
     - { name: http, port: 4000, targetPort: 4000 }
+---
+# Keep ≥1 gateway up across voluntary disruptions — all model traffic flows through here. (RESILIENCE.md §12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: litellm
+  namespace: eval-engine
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: litellm } }

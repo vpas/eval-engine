@@ -97,6 +97,16 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources: { requests: { storage: 1Gi } }
 ---
+# Keep ≥2 of 3 up so Sentinel keeps its failover quorum across a voluntary disruption. (RESILIENCE.md §12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis
+  namespace: eval-engine
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: redis } }
+---
 # Plain master service for any client that doesn't speak Sentinel (kept for compatibility); points at
 # whichever pod is currently master via the role label Sentinel-aware clients should prefer the
 # Sentinels. Selector matches all redis pods; reads tolerate any, writes need the master (LiteLLM uses

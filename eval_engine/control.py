@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 from urllib.parse import urlparse
 
 import psycopg
@@ -150,16 +150,96 @@ _local = threading.local()
 # which is correct because the schema already exists server-side. (Same rationale in analytics.py.)
 _init_done = False
 
+# Connection resilience (docs/RESILIENCE.md item A). A cached psycopg connection only reports `.closed`
+# on an ORDERLY close; a connection dropped underneath us (Neon failover/cold-start, idle reap, NAT
+# timeout) is NOT `.closed` and raises OperationalError/InterfaceError on the next execute — which, with
+# no try/except in the worker/orchestrator loops, crashes the process. So every query runs through
+# `_run`, which transparently reconnects + retries with bounded backoff; a long-idle connection is also
+# pinged before reuse so a dead socket is detected up front, not as a mid-loop crash.
+_RETRYABLE = (psycopg.OperationalError, psycopg.InterfaceError)
+_RETRY_TRIES = 3
+_RETRY_BASE_S = 0.2
+_RETRY_CAP_S = 2.0
+_IDLE_PING_S = 30.0
+_T = TypeVar("_T")
+
+
+def _new_conn() -> psycopg.Connection:
+    log.debug("opening Postgres connection to host=%s (thread=%s)",
+              _dsn_host(), threading.current_thread().name)
+    con = psycopg.connect(DSN, autocommit=True)
+    _local.con = con
+    _local.last = time.monotonic()
+    _ensure_schema(con)  # ensure once per process on the first connection (idempotent)
+    return con
+
+
+def _drop() -> None:
+    con = getattr(_local, "con", None)
+    if con is not None:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _local.con = None
+
+
+def _raw() -> psycopg.Connection:
+    """The thread-local connection, (re)opened as needed. A connection idle past `_IDLE_PING_S` is
+    validated with `SELECT 1` and replaced if its socket has gone away, so a stale connection surfaces
+    here rather than as a crash in the caller."""
+    con = getattr(_local, "con", None)
+    if con is not None and not con.closed:
+        if time.monotonic() - getattr(_local, "last", 0.0) > _IDLE_PING_S:
+            try:
+                con.execute("SELECT 1")
+            except Exception:  # noqa: BLE001  stale socket — drop + reconnect below
+                _drop()
+                con = None
+        if con is not None:
+            _local.last = time.monotonic()
+            return con
+    return _new_conn()
+
+
+def _run(op: Callable[[psycopg.Connection], _T]) -> _T:
+    """Run ``op(conn)`` with reconnect-on-broken-connection + bounded-backoff retry. Statements are
+    autocommit singletons, so on a dropped connection the in-flight statement never committed and a
+    retry is safe (the realistic trigger — Neon failover/cold-start — refuses/resets the connection
+    before execution). A lost-ack double-apply is possible but benign: ledger writes are idempotent
+    (`commit_result` sets fixed values; `ON CONFLICT` inserts no-op; a re-claim is lease-bounded)."""
+    last: Exception | None = None
+    for i in range(_RETRY_TRIES):
+        try:
+            return op(_raw())
+        except _RETRYABLE as e:
+            last = e
+            _drop()
+            if i == _RETRY_TRIES - 1:
+                break
+            log.warning("Postgres connection lost (%s) — reconnecting, retry %d/%d",
+                        e.__class__.__name__, i + 1, _RETRY_TRIES - 1)
+            time.sleep(min(_RETRY_BASE_S * (2 ** i), _RETRY_CAP_S))
+    raise last  # type: ignore[misc]
+
+
+class _ConnProxy:
+    """What ``_conn()`` returns: routes ``.execute()`` / ``.cursor()`` through ``_run`` so every call
+    site gets transparent reconnect + retry without touching the (many) call sites. ``.execute`` is the
+    hot path; ``.cursor`` opens on a live connection (its sole user, ``_dict_rows`` / ``expand_tasks``,
+    wraps the whole cursor block in ``_run`` itself for retry coverage)."""
+    def execute(self, query, params=None):
+        return _run(lambda c: c.execute(query, params))
+
+    def cursor(self, **kw):
+        return _raw().cursor(**kw)
+
+
+_proxy = _ConnProxy()
+
 
 def _conn() -> psycopg.Connection:
-    con = getattr(_local, "con", None)
-    if con is None or con.closed:
-        log.debug("opening Postgres connection to host=%s (thread=%s)",
-                  _dsn_host(), threading.current_thread().name)
-        con = psycopg.connect(DSN, autocommit=True)
-        _local.con = con
-        _ensure_schema(con)  # ensure once per process on the first connection (idempotent)
-    return con
+    return _proxy  # type: ignore[return-value]  # proxy quacks like a Connection for our call sites
 
 
 def _ensure_schema(con: psycopg.Connection) -> None:
@@ -174,8 +254,10 @@ def _dict_rows(sql: str, params=()) -> list[dict]:
     """Run a SELECT and return rows as dicts keyed by column name (psycopg ``dict_row``). Callers then
     read by name instead of by position, so adding/reordering a SELECT column can't silently misalign
     a downstream consumer (the failure mode that broke the CLI when the runs table grew columns)."""
-    with _conn().cursor(row_factory=dict_row) as cur:
-        return cur.execute(sql, params).fetchall()
+    def op(con: psycopg.Connection) -> list[dict]:
+        with con.cursor(row_factory=dict_row) as cur:
+            return cur.execute(sql, params).fetchall()
+    return _run(op)
 
 
 _leader_con: psycopg.Connection | None = None
@@ -417,12 +499,14 @@ def get_run(run_id: str) -> dict | None:
 # --------------------------------------------------------------------------- ledger
 
 def expand_tasks(run_id: str, items: list[tuple[str, str]]) -> None:
-    with _conn().cursor() as cur:
-        cur.executemany(
-            "INSERT INTO sample_tasks(run_id,sample_id,group_key) VALUES(%s,%s,%s) "
-            "ON CONFLICT DO NOTHING",
-            [(run_id, sid, gk) for sid, gk in items],
-        )
+    def op(con: psycopg.Connection) -> None:
+        with con.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO sample_tasks(run_id,sample_id,group_key) VALUES(%s,%s,%s) "
+                "ON CONFLICT DO NOTHING",
+                [(run_id, sid, gk) for sid, gk in items],
+            )
+    _run(op)
 
 
 def claim_batch(run_id: str, worker: str, n: int, lease_seconds: float = 600.0) -> list[str]:

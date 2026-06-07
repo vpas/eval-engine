@@ -20,13 +20,18 @@ metadata:
   namespace: eval-engine
   labels: { app: oauth2-proxy }
 spec:
-  replicas: 1
+  replicas: 2                       # HA: the single auth gate in front of the whole UI+API (RESILIENCE.md §3.4)
   selector: { matchLabels: { app: oauth2-proxy } }
   template:
     metadata:
       labels: { app: oauth2-proxy }
     spec:
       nodeSelector: { eval-engine/role: system }
+      topologySpreadConstraints:    # spread across nodes when >1 (soft; single-zone POC — RESILIENCE §3.1)
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: oauth2-proxy } }
       containers:
         - name: oauth2-proxy
           image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -79,3 +84,14 @@ spec:
   selector: { app: oauth2-proxy }
   ports:
     - { name: http, port: 4180, targetPort: 4180 }
+---
+# Keep ≥1 auth gate up across voluntary disruptions — losing it takes the whole surface down.
+# Sessions are cookie-encrypted (shared cookie secret), so any replica serves any request. (RESILIENCE.md §3.4/§12.)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oauth2-proxy
+  namespace: eval-engine
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: oauth2-proxy } }
