@@ -14,6 +14,27 @@ export type Run = {
   sweep?: string | null;
 };
 
+export type PluginRef = { type: string; version?: number; config?: Record<string, any> };
+export type RunSpec = {
+  eval: string;
+  eval_version?: number;
+  dataset: string;
+  model: string;
+  harness: PluginRef;
+  scorers: PluginRef[];
+  team?: string | null;
+  lane?: string | null;
+  limit?: number | null;
+  batch_size?: number;
+  epochs?: number;
+  temperature?: number | null;
+  seed?: number | null;
+  budget_usd?: number | null;
+  transcript_sample_rate?: number | null;
+  mock_output?: string | null;
+  mock_tool_calls?: Record<string, any>[] | null;
+};
+
 export type RunDetail = {
   id: string;
   eval_id: string;
@@ -38,6 +59,7 @@ export type RunDetail = {
   finished_at?: string | null;
   provider_fingerprint?: string | null;
   progress: Record<string, number>;
+  spec?: RunSpec | null;
 };
 
 export type Results = {

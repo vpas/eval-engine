@@ -9,6 +9,7 @@ Docs: http://localhost:8077/docs
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -170,6 +171,11 @@ def get_run(run_id: str):
     # live progress from the ledger (empty once finalized/pruned). done/failed/accuracy/cost_usd on the
     # row are the orchestrator's live rollup (DESIGN §8) — authoritative live *and* final.
     meta["progress"] = control.counts(run_id)
+    # The full stored RunSpec — the exact, reproducible inputs this run executed with (dataset, harness
+    # + config, scorers, sampling knobs: epochs/limit/temperature/seed/budget/batch_size/retention).
+    # Surfaced read-only on the run page; None for legacy runs without a stored spec.
+    spec_json = control.get_spec(run_id)
+    meta["spec"] = json.loads(spec_json) if spec_json else None
     return meta
 
 

@@ -107,6 +107,8 @@ export default function RunPage() {
         )}
       </div>
 
+      <RunSpecPanel run={run} />
+
       {isActive && live && <LiveSamples live={live} />}
 
       {run.status === "failed" && (
@@ -120,6 +122,64 @@ export default function RunPage() {
       {!isActive && res && <Analysis run={run} res={res} onOpen={setOpenSample} />}
 
       {openSample && <TranscriptDrawer sample={openSample} onClose={() => setOpenSample(null)} />}
+    </div>
+  );
+}
+
+// The exact, reproducible inputs the run executed with (the stored RunSpec). Read-only — "Re-run"
+// clones this verbatim. Shows every knob explicitly (incl. the ones left at their default) so there's
+// no ambiguity about what actually ran; a raw-JSON toggle gives the literal spec.
+function RunSpecPanel({ run }: { run: RunDetail }) {
+  const [open, setOpen] = useState(true);
+  const [asJson, setAsJson] = useState(false);
+  const sp = run.spec;
+  if (!sp) return null;
+  const cfg = (o?: Record<string, any>) => (o && Object.keys(o).length ? JSON.stringify(o) : "");
+  const harness = `${sp.harness?.type ?? "—"}${sp.harness?.version ? ` @${sp.harness.version}` : ""}` +
+    (cfg(sp.harness?.config) ? ` · ${cfg(sp.harness?.config)}` : "");
+  const scorers = (sp.scorers || []).map((s) => s.type + (cfg(s.config) ? ` (${cfg(s.config)})` : "")).join(", ") || "—";
+  const dim = (s: string) => <span className="subtle">{s}</span>;
+  const rows: [string, React.ReactNode][] = [
+    ["eval", `${sp.eval} @${sp.eval_version ?? 1}`],
+    ["dataset", <span className="mono" style={{ wordBreak: "break-all" }}>{sp.dataset}</span>],
+    ["model", sp.model],
+    ["harness", harness],
+    ["scorers", scorers],
+    ["slice", sp.limit != null ? `subset · limit ${fmtN(sp.limit)}` : "full dataset"],
+    ["epochs", `${sp.epochs ?? 1}×`],
+    ["batch size", String(sp.batch_size ?? 50)],
+    ["temperature", sp.temperature != null ? String(sp.temperature) : dim("— provider default")],
+    ["seed", sp.seed != null ? String(sp.seed) : dim("— unset")],
+    ["budget cap", sp.budget_usd != null ? fmtCost(sp.budget_usd) : dim("— uncapped")],
+    ["transcript", sp.transcript_sample_rate != null
+      ? `keep ${pct(sp.transcript_sample_rate)}% of passes + all failures`
+      : dim("— env default (all failures + sampled passes)")],
+    ["lane", sp.lane || <>{run.lane || "—"} {dim("· auto-classified")}</>],
+    ["team", sp.team || dim("—")],
+    ...(sp.mock_output ? ([["mock output", sp.mock_output]] as [string, React.ReactNode][]) : []),
+  ];
+  return (
+    <div className="panel" style={{ marginBottom: 16 }}>
+      <div className="panel-h">
+        <Icon name="settings" className="ic" /><h2>RunSpec</h2>
+        <span className="tag" style={{ marginLeft: 6 }}><Icon name="shield" size={11} />pinned · reproducible</span>
+        <span className="grow" />
+        <button className="btn ghost sm" onClick={() => setAsJson((j) => !j)}><Icon name="doc" size={12} />{asJson ? "fields" : "raw JSON"}</button>
+        <button className="btn ghost sm" onClick={() => setOpen((o) => !o)}><Icon name={open ? "chevdown" : "chevright"} size={12} /></button>
+      </div>
+      {open && (
+        <div className="panel-b">
+          {asJson ? (
+            <pre className="code" style={{ margin: 0 }}>{JSON.stringify(sp, null, 2)}</pre>
+          ) : (
+            <div className="kv">
+              {rows.map(([k, v]) => (
+                <span key={k} style={{ display: "contents" }}><span className="k">{k}</span><span className="v">{v}</span></span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
