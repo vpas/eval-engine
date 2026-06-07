@@ -72,14 +72,30 @@ def test_heartbeat_liveness(monkeypatch):
     assert comp["status"] == "ok" and "orch-0" in comp["detail"]
     assert comp["metrics"]["running_runs"] == 2
 
-    # A live worker with no queued work ⇒ ok; zero live workers with a backlog ⇒ degraded.
+    # A live worker with no queued work ⇒ ok.
     control.heartbeat("worker", "w-1", {"claimed_this_loop": 4})
     hbs = control.list_heartbeats()
     assert ops.probe_workers(hbs, {"ledger": {"queued": 0}})["status"] == "ok"
-    assert ops.probe_workers([], {"ledger": {"queued": 7}})["status"] == "degraded"
+    # Nothing live + nothing queued ⇒ idle (scaled to 0).
     assert ops.probe_workers([], {"ledger": {"queued": 0}})["status"] == "idle"
+
+    # The crux: queued work with no live worker is AMBIGUOUS from Postgres alone — separate a normal
+    # KEDA scale-from-0 (`scaling`) from a real stall/fault (`degraded`).
+    backlog = {"ledger": {"queued": 7}}
+    # fresh backlog, KEDA hasn't created a pod yet ⇒ scaling, NOT degraded (the false-alarm we fixed).
+    assert ops.probe_workers([], backlog, queued_age_s=5)["status"] == "scaling"
+    # a pod is being created (cold start) ⇒ scaling, regardless of queue age.
+    creating = [{"phase": "Pending", "ready": False, "restarts": 0, "reason": "ContainerCreating"}]
+    assert ops.probe_workers([], backlog, creating, queued_age_s=5)["status"] == "scaling"
+    # work has waited past the grace window with nothing scheduled ⇒ a genuine stall ⇒ degraded.
+    stalled = ops.probe_workers([], backlog, queued_age_s=ops.WORKER_SCALEUP_GRACE_S + 60)
+    assert stalled["status"] == "degraded" and "KEDA" in stalled["detail"]
+    # a crash-looping pod ⇒ degraded with the reason named (not mistaken for a slow scale-up).
+    crash = [{"phase": "Running", "ready": False, "restarts": 6, "reason": "CrashLoopBackOff"}]
+    crashed = ops.probe_workers([], backlog, crash, queued_age_s=5)
+    assert crashed["status"] == "degraded" and "CrashLoopBackOff" in crashed["detail"]
     # No fresh heartbeat but K8s shows a ready pod ⇒ busy, not down (the worker-blocked-on-gateway case).
-    busy = ops.probe_workers([], {"ledger": {"queued": 7}}, ready_pods=1)
+    busy = ops.probe_workers([], backlog, [{"phase": "Running", "ready": True, "restarts": 0, "reason": None}])
     assert busy["status"] == "ok" and "busy" in busy["detail"]
 
 

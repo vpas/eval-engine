@@ -44,6 +44,25 @@ INTERACTIVE_RESERVE = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_RESERVE", "12"
 ORCH_STALE_S = max(3 * ORCH_TICK, 10.0)
 WORKER_STALE_S = float(os.environ.get("EVAL_ENGINE_WORKER_STALE_SECONDS", "30"))
 
+# Scale-from-0 is normal, not a fault: KEDA polls (~30s) then a pod must schedule + pull the image
+# before it can heartbeat. Queued work with no ready worker reads as `scaling` (informational) until
+# it has waited past this grace window with nothing coming up — only then is it a genuine stall.
+WORKER_SCALEUP_GRACE_S = float(os.environ.get("EVAL_ENGINE_WORKER_SCALEUP_GRACE_SECONDS", "180"))
+WORKER_CRASH_RESTARTS = int(os.environ.get("EVAL_ENGINE_WORKER_CRASH_RESTARTS", "3"))
+# Container waiting reasons that mean "broken", not "still coming up".
+WORKER_CRASH_REASONS = {"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull",
+                        "InvalidImageName", "CreateContainerError", "CreateContainerConfigError",
+                        "RunContainerError"}
+
+
+def _fmt_dur(s: float) -> str:
+    s = int(s)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
 # component name → the k8s `app` label (for log links + merging in the Kubernetes probe's pod truth).
 COMPONENT_APP = {
     "api": "eval-engine-api", "orchestrator": "eval-engine-orch", "workers": "eval-engine-worker",
@@ -197,24 +216,60 @@ def probe_orchestrator(hbs: list[dict]) -> dict:
                  last_seen=f"{round(age, 1)}s ago")
 
 
-def probe_workers(hbs: list[dict], queues: dict, ready_pods: int | None = None) -> dict:
+def probe_workers(hbs: list[dict], queues: dict, pods: list[dict] | None = None,
+                  queued_age_s: float | None = None) -> dict:
+    """Worker liveness, distinguishing a *normal scale-from-0* from a *real* degradation.
+
+    The hard case is "queued work, no heartbeating worker": that's exactly what both a healthy
+    KEDA spin-up AND a stuck/broken worker pool look like from Postgres alone. We disambiguate with
+    the Kubernetes pod truth + how long work has actually been waiting (``queued_age_s``):
+
+      * a ready pod, just no fresh heartbeat → **ok** (busy, blocked mid-batch in a long model call);
+      * pods being created (ContainerCreating / Pending) → **scaling** (KEDA activated, coming up);
+      * no pods yet but the queue is younger than the grace window → **scaling** (KEDA activating);
+      * pods crash-looping / image-pull-failing → **degraded** (a real fault, named);
+      * nothing coming up and the queue has waited past the grace window → **degraded** (stalled).
+    """
     rows = [h for h in hbs if h["component"] == "worker"]
     live = [h for h in rows if h["age_s"] < WORKER_STALE_S]
     n = len(live)
     claims = sum(int(h["detail"].get("claimed_this_loop", 0) or 0) for h in live)
     queued = (queues.get("ledger") or {}).get("queued", 0)
+    pods = pods or []
+    ready_pods = sum(1 for p in pods if p.get("ready"))
+    crashing = [p for p in pods if p.get("reason") in WORKER_CRASH_REASONS
+                or p.get("phase") == "Failed" or (p.get("restarts") or 0) >= WORKER_CRASH_RESTARTS]
+    starting = [p for p in pods if p not in crashing and not p.get("ready")]
+    stuck = queued_age_s is not None and queued_age_s > WORKER_SCALEUP_GRACE_S
+
     metrics: dict = {"live": n, "claims": claims}
-    if ready_pods is not None:
+    if pods:
         metrics["pods_ready"] = ready_pods
+    if queued_age_s is not None and n == 0 and ready_pods == 0:
+        metrics["queued_age_s"] = round(queued_age_s)
+
+    # Healthy: a heartbeating worker, or a ready pod that's just busy (stale heartbeat mid-batch).
     if n > 0:
         return _comp("workers", "ok", f"{n} live · {claims} in-flight claims", metrics)
-    # No fresh heartbeat. If K8s shows ready worker pods, the worker is up but BUSY (blocked in a long
-    # model call, so it hasn't looped back to heartbeat) — that's healthy, not "scaling up". Only when
-    # there are no pods either is queued-but-no-workers a real "scaling up / stuck" signal.
     if ready_pods:
         return _comp("workers", "ok", f"{ready_pods} pod(s) up · busy (no recent heartbeat)", metrics)
+
+    # Nothing heartbeating and nothing ready — is it coming up, stalled, or broken?
+    if crashing:
+        why = crashing[0].get("reason") or "crash-looping"
+        return _comp("workers", "degraded", f"{len(crashing)} pod(s) unhealthy · {why}", metrics)
+    if starting:
+        if stuck:
+            return _comp("workers", "degraded",
+                         f"{len(starting)} pod(s) stuck starting {_fmt_dur(queued_age_s)} · unschedulable?",
+                         metrics)
+        return _comp("workers", "scaling", f"{len(starting)} pod(s) starting · scaling up from 0", metrics)
     if queued > 0:
-        return _comp("workers", "degraded", "0 workers · work queued (scaling up?)", metrics)
+        if stuck:
+            return _comp("workers", "degraded",
+                         f"0 workers · queued {_fmt_dur(queued_age_s)}, none scheduled — KEDA not scaling?",
+                         metrics)
+        return _comp("workers", "scaling", "0 workers · KEDA activating (scaling from 0)", metrics)
     return _comp("workers", "idle", "0 workers · idle (scaled to 0)", metrics)
 
 
@@ -248,10 +303,15 @@ def probe_kubernetes() -> dict | None:
             except Exception:  # noqa: BLE001
                 plist = []
             for p in plist:
-                restarts = sum((cs.restart_count or 0) for cs in (p.status.container_statuses or []))
-                ready = all(cs.ready for cs in (p.status.container_statuses or [])) and bool(p.status.container_statuses)
+                css = p.status.container_statuses or []
+                restarts = sum((cs.restart_count or 0) for cs in css)
+                ready = all(cs.ready for cs in css) and bool(css)
+                # waiting reason of the first not-ready container: ContainerCreating/PodInitializing
+                # (a normal cold start) vs CrashLoopBackOff/ImagePullBackOff (a real fault).
+                reason = next((cs.state.waiting.reason for cs in css
+                               if cs.state and cs.state.waiting and cs.state.waiting.reason), None)
                 pods.append({"name": p.metadata.name, "phase": p.status.phase, "ready": ready,
-                             "restarts": restarts, "node": p.spec.node_name,
+                             "restarts": restarts, "reason": reason, "node": p.spec.node_name,
                              "logs_url": log_url(pod=p.metadata.name, namespace=ns)})
             workloads.append({"app": app, "namespace": ns,
                               "ready": d.status.ready_replicas or 0,
@@ -325,19 +385,36 @@ def snapshot() -> dict:
     workloads = (k8s or {}).get("workloads", []) if isinstance(k8s, dict) else []
     by_app = {w["app"]: w for w in workloads}
 
-    # heartbeat-derived components (cheap PG reads already in hand). probe_workers reconciles against
-    # the K8s ready-pod count so a busy worker (blocked mid-batch, stale heartbeat) reads as up, not down.
-    worker_ready = by_app["eval-engine-worker"]["ready"] if "eval-engine-worker" in by_app else None
-    results["orchestrator"] = probe_orchestrator(hbs)
-    results["workers"] = probe_workers(hbs, queues, worker_ready)
+    # Active runs (fetched once, reused below). The oldest run still carrying queued samples tells us
+    # how long work has actually been waiting — the signal that separates a normal KEDA scale-from-0
+    # from a genuine stall when no worker is heartbeating yet.
+    active = control.active_runs_detail()
+    now = datetime.now(timezone.utc)
+    waited = []
+    for r in active:
+        if (r.get("queued") or 0) > 0 and r.get("created_at"):
+            try:
+                waited.append((now - datetime.fromisoformat(r["created_at"])).total_seconds())
+            except (TypeError, ValueError):
+                pass
+    queued_age_s = max(waited) if waited else None
 
-    # Enrich app-backed components with the Kubernetes pod truth (ready/desired + restarts).
+    # heartbeat-derived components (cheap PG reads already in hand). probe_workers reconciles against
+    # the K8s pod truth (phases/restarts) + how long work has waited so a busy worker reads as up, a
+    # cold KEDA spin-up reads as `scaling`, and only a real fault/stall reads as `degraded`.
+    worker_pods = by_app.get("eval-engine-worker", {}).get("pods")
+    results["orchestrator"] = probe_orchestrator(hbs)
+    results["workers"] = probe_workers(hbs, queues, worker_pods, queued_age_s)
+
+    # Enrich app-backed components with the Kubernetes pod truth (ready/desired + restarts). Workers
+    # are skipped for the auto-degrade: probe_workers already weighed the pod state holistically (a
+    # ready<desired during scale-up is `scaling`, not a fault), so don't second-guess it here.
     for name, comp in results.items():
         w = by_app.get(COMPONENT_APP.get(name, ""))
         if w:
             comp["metrics"]["pods"] = f"{w['ready']}/{w['desired']}"
             comp["metrics"]["restarts"] = sum(p["restarts"] for p in w["pods"])
-            if w["desired"] and not w["ready"] and comp["status"] == "ok":
+            if name != "workers" and w["desired"] and not w["ready"] and comp["status"] == "ok":
                 comp["status"] = "degraded"
 
     order = ["api", "orchestrator", "workers", "postgres", "clickhouse", "redis", "litellm",
@@ -359,7 +436,7 @@ def snapshot() -> dict:
         "queues": queues,
         "active_runs": [
             {**r, "logs_url": log_url(container="worker", run_id=r["id"])}
-            for r in control.active_runs_detail()
+            for r in active
         ],
         "failures": [
             {**f, "logs_url": log_url(container="worker", run_id=f["run_id"], severity="ERROR")}

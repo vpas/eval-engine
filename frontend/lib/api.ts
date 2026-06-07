@@ -95,13 +95,13 @@ export const launchFromEval = (
 // --- ops dashboard (eval_engine/ops.py) --------------------------------------------------------
 export type OpsComponent = {
   name: string;
-  status: "ok" | "degraded" | "down" | "idle" | "unknown";
+  status: "ok" | "degraded" | "down" | "idle" | "scaling" | "unknown";
   detail: string;
   metrics: Record<string, string | number | null>;
   logs_url: string | null;
   last_seen: string | null;
 };
-export type OpsPod = { name: string; phase: string; ready: boolean; restarts: number; node: string | null; logs_url: string | null };
+export type OpsPod = { name: string; phase: string; ready: boolean; restarts: number; reason: string | null; node: string | null; logs_url: string | null };
 export type OpsWorkload = { app: string; namespace: string; ready: number; desired: number; pods: OpsPod[] };
 export type OpsStatus = {
   cluster: { project: string | null; cluster: string; zone: string; namespace: string };

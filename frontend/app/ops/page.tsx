@@ -11,14 +11,18 @@ const HEALTH: Record<string, { c: string; bg: string; b: string }> = {
   degraded: { c: "var(--attention-fg)", bg: "var(--attention-soft)", b: "rgba(210,153,34,.35)" },
   down: { c: "var(--danger)", bg: "var(--danger-soft)", b: "rgba(248,81,73,.3)" },
   idle: { c: "var(--queue)", bg: "var(--queue-soft)", b: "rgba(88,166,255,.3)" },
+  // scaling = transient, expected (KEDA spin-up) — informational, NOT an alarm (distinct from degraded amber).
+  scaling: { c: "var(--accent-fg, var(--queue))", bg: "var(--queue-soft)", b: "rgba(88,166,255,.4)" },
   unknown: { c: "var(--fg-muted)", bg: "var(--panel-3)", b: "var(--border)" },
 };
+
+const PULSE = new Set(["degraded", "down", "scaling"]);
 
 function HealthPill({ status }: { status: string }) {
   const h = HEALTH[status] || HEALTH.unknown;
   return (
     <span className="pill" style={{ color: h.c, background: h.bg, borderColor: h.b }}>
-      <span className="led" style={status === "degraded" || status === "down" ? { animation: "blink 1.1s ease-in-out infinite" } : undefined} />
+      <span className="led" style={PULSE.has(status) ? { animation: "blink 1.1s ease-in-out infinite" } : undefined} />
       {status}
     </span>
   );
@@ -29,9 +33,12 @@ const COMP_ICON: Record<string, string> = {
   clickhouse: "layers", redis: "bolt", litellm: "bell", gcs: "box", inspect_view: "doc",
 };
 
+const fmtDur = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`);
+
 function fmtMetric(k: string, v: string | number | null): string {
   if (v == null) return "—";
   if (typeof v === "number") {
+    if (k.includes("age_s") || k === "repl_lag_s") return fmtDur(v);
     if (k.includes("ms")) return Math.round(v) + "ms";
     if (k === "samples_per_s") return v.toFixed(1) + "/s";
     return v >= 1000 ? fmtN(v) : String(v);
@@ -44,7 +51,7 @@ const METRIC_LABEL: Record<string, string> = {
   latency_ms: "latency", rows: "rows", replicas: "replicas", repl_lag_s: "repl lag",
   pods: "pods", restarts: "restarts", live: "live", claims: "claims", tick_age_s: "last tick",
   admitted: "admitted", standbys: "standbys", http: "http", role: "role",
-  connected_replicas: "replicas", pod: "pod",
+  connected_replicas: "replicas", pod: "pod", pods_ready: "pods up", queued_age_s: "waiting",
 };
 
 export default function OpsDashboard() {
@@ -175,10 +182,11 @@ export default function OpsDashboard() {
                       {w.pods.length === 0 && <span className="subtle">—</span>}
                       {w.pods.map((p) => (
                         <a key={p.name} className="chip" href={p.logs_url || undefined} target="_blank" rel="noreferrer"
-                          title={`${p.phase}${p.node ? " · " + p.node : ""}`}
+                          title={`${p.phase}${p.reason ? " · " + p.reason : ""}${p.node ? " · " + p.node : ""}`}
                           style={{ borderColor: p.ready ? "rgba(63,185,80,.3)" : "var(--border)" }}>
                           <span className="led" style={{ width: 6, height: 6, borderRadius: "50%", background: p.ready ? "var(--success)" : "var(--fg-muted)" }} />
                           {p.name.split("-").slice(-2).join("-")}
+                          {!p.ready && p.reason && <span className="subtle" style={{ fontSize: 10.5 }}>{p.reason}</span>}
                           {p.restarts > 0 && <span style={{ color: "var(--attention-fg)" }}>↻{p.restarts}</span>}
                         </a>
                       ))}
