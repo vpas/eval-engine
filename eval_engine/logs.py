@@ -39,6 +39,15 @@ def setup(level: str | None = None) -> None:
 
 def get_logger(name: str) -> logging.Logger:
     setup()
-    # `name` is the module's __name__ (e.g. "eval_engine.worker") → a child of the parent logger,
-    # so it inherits the one handler + level configured above.
+    # The worker/orchestrator/training entrypoints run as `python -m eval_engine.<mod>`, so their
+    # module __name__ is "__main__" — NOT a child of the `eval_engine` logger, so it would miss our
+    # handler and fall through to logging.lastResort (unformatted, WARNING-only). Remap it back to its
+    # real dotted name (`python -m` records it on the __main__ module's __spec__) so those processes
+    # log through the same configured handler as every imported module.
+    if name == "__main__":
+        spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+        if spec and spec.name:
+            name = spec.name
+    # `name` is now the module's dotted path (e.g. "eval_engine.worker") → a child of the parent
+    # logger, so it inherits the one handler + level configured above.
     return logging.getLogger(name)
