@@ -450,6 +450,23 @@ def counts(run_id: str) -> dict:
     )
 
 
+def list_sample_tasks(run_id: str, limit: int = 2000) -> list[dict]:
+    """Per-sample ledger rows for a live run — the run page's live sample list. Running samples first
+    (with their claiming worker + remaining lease), then queued, then terminal. Empty once the run
+    finalizes and the ledger is pruned (state then lives in analytics/object store)."""
+    rows = _conn().execute(
+        "SELECT sample_id, status, attempts, claimed_by, group_key, error_type, "
+        "EXTRACT(EPOCH FROM lease_expires_at - now()) "
+        "FROM sample_tasks WHERE run_id=%s "
+        "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, sample_id "
+        "LIMIT %s",
+        (run_id, limit),
+    ).fetchall()
+    return [{"sample_id": r[0], "status": r[1], "attempts": r[2], "claimed_by": r[3],
+             "group_key": r[4], "error_type": r[5],
+             "lease_s": round(float(r[6])) if r[6] is not None else None} for r in rows]
+
+
 def ledger_size(run_id: str | None = None) -> int:
     if run_id:
         return _conn().execute(

@@ -130,6 +130,25 @@ export const getOps = (): Promise<OpsStatus> => fetch("/be/ops/status", opts).th
 export const getRunLogsUrl = (runId: string): Promise<{ url: string | null }> =>
   fetch(`/be/ops/logs?run_id=${encodeURIComponent(runId)}`, opts).then(j);
 
+export type LiveSample = {
+  sample_id: string;
+  status: string;
+  attempts: number;
+  claimed_by: string | null;
+  group_key: string | null;
+  error_type: string | null;
+  lease_s: number | null;
+  worker_logs_url: string | null;
+  sandbox_logs_url: string | null;
+};
+export type RunLive = {
+  agentic: boolean;
+  sandbox: string | null;
+  samples: LiveSample[];
+  counts: Record<string, number>;
+};
+export const getRunLive = (id: string): Promise<RunLive> => fetch(`/be/runs/${id}/live`, opts).then(j);
+
 // --- training monitor (docs/TRAINING_MONITOR.md) -----------------------------------------------
 export type SuiteEntry = { eval: string; version?: number; role?: string; color?: string };
 export type TrainingRun = {

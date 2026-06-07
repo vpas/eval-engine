@@ -10,13 +10,43 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from eval_engine import control, ops
+from eval_engine import control, ops, runner
 from eval_engine.api import app
+from eval_engine.models import RunSpec
 
 
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+SPEC = RunSpec(
+    eval="capitals_qa", dataset="examples/qa.jsonl", model="mockllm/model", mock_output="Paris",
+    harness={"type": "single_turn"}, scorers=[{"type": "includes"}],
+)
+
+
+def test_run_live_per_sample_and_worker_links(client, monkeypatch):
+    run_id = runner.launch(SPEC)            # creates run + expands the ledger (all queued)
+    # claim one sample so it goes 'running' with a claiming worker pod recorded
+    claimed = control.claim_batch(run_id, "eval-engine-worker-abc123-xy", 1)
+    assert claimed
+
+    monkeypatch.setattr(ops, "GCP_PROJECT", "my-proj")
+    live = client.get(f"/runs/{run_id}/live").json()
+    assert live["agentic"] is False
+    by_id = {s["sample_id"]: s for s in live["samples"]}
+    running = [s for s in live["samples"] if s["status"] == "running"]
+    assert len(running) == 1
+    r = running[0]
+    assert r["claimed_by"] == "eval-engine-worker-abc123-xy"
+    assert r["worker_logs_url"] and "abc123" in r["worker_logs_url"]   # links to the claiming pod
+    assert r["sandbox_logs_url"] is None                              # not an agentic run
+    # a still-queued sample has no logs link
+    queued = [s for s in live["samples"] if s["status"] == "queued"]
+    assert queued and queued[0]["worker_logs_url"] is None
+
+    assert client.get("/runs/nope/live").status_code == 404
 
 
 def test_log_url_built_and_gated(monkeypatch):

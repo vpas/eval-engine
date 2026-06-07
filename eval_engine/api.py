@@ -162,6 +162,34 @@ def transcript(uri: str):
     return Response(content=body, media_type="application/json")
 
 
+@app.get("/runs/{run_id}/live")
+def run_live(run_id: str):
+    """Live per-sample ledger view for a running run: each sample's status + attempts, and — for the
+    ones currently *running* — a GCP Log Explorer deep link to the claiming **worker** pod, plus, for
+    an agentic run, a link to the per-sample **sandbox** namespace. Empty once the ledger is pruned at
+    finalize (the analytics sample table then backs the completed view)."""
+    spec_json = control.get_spec(run_id)
+    if not spec_json:
+        raise HTTPException(status_code=404, detail=f"no run {run_id}")
+    spec = RunSpec.model_validate_json(spec_json)
+    agentic = spec.harness.type in ("agentic", "code_generation")
+    sandbox_kind = spec.harness.config.get("sandbox") if agentic else None
+    samples = []
+    for r in control.list_sample_tasks(run_id):
+        running = r["status"] == "running"
+        worker = r["claimed_by"]
+        samples.append({
+            **r,
+            # precise: we know which worker pod claimed it
+            "worker_logs_url": ops.log_url(pod=worker, run_id=run_id) if running and worker else None,
+            # the per-sample sandbox pod isn't name-mapped to the sample, so scope to the sandbox ns
+            # (k8s sandbox) — coarse but the right place to look for the running sample's tool calls
+            "sandbox_logs_url": (ops.log_url(namespace=ops.SANDBOX_NS) if running and sandbox_kind == "k8s" else None),
+        })
+    return {"agentic": agentic, "sandbox": sandbox_kind, "samples": samples,
+            "counts": control.counts(run_id)}
+
+
 @app.get("/runs/{run_id}/results")
 def get_results(run_id: str):
     if not control.get_run(run_id):

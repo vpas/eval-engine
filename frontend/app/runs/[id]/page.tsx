@@ -4,8 +4,8 @@ import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
 import {
-  getRun, getResults, getTranscript, rerunRun, getRunLogsUrl, ago, fmtCost, fmtN, pct,
-  type RunDetail, type Results,
+  getRun, getResults, getTranscript, rerunRun, getRunLogsUrl, getRunLive, ago, fmtCost, fmtN, pct,
+  type RunDetail, type Results, type RunLive, type LiveSample,
 } from "@/lib/api";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
@@ -17,6 +17,7 @@ export default function RunPage() {
   const [res, setRes] = useState<Results | null>(null);
   const [openSample, setOpenSample] = useState<Results["samples"][number] | null>(null);
   const [logsUrl, setLogsUrl] = useState<string | null>(null);
+  const [live, setLive] = useState<RunLive | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { getRunLogsUrl(id).then((r) => setLogsUrl(r.url)).catch(() => {}); }, [id]);
@@ -28,7 +29,9 @@ export default function RunPage() {
         const r = await getRun(id);
         if (stop) return;
         setRun(r);
-        if (!ACTIVE.has(r.status)) {
+        if (ACTIVE.has(r.status)) {
+          getRunLive(id).then((x) => !stop && setLive(x)).catch(() => {});
+        } else {
           getResults(id).then((x) => !stop && setRes(x)).catch(() => {});
         }
       } catch (e: any) {
@@ -104,6 +107,8 @@ export default function RunPage() {
         )}
       </div>
 
+      {isActive && live && <LiveSamples live={live} />}
+
       {run.status === "failed" && (
         <div className="panel" style={{ marginBottom: 16, borderColor: "var(--danger-emph)" }}>
           <div className="panel-b vcenter gap10" style={{ color: "var(--danger)" }}>
@@ -115,6 +120,72 @@ export default function RunPage() {
       {!isActive && res && <Analysis run={run} res={res} onOpen={setOpenSample} />}
 
       {openSample && <TranscriptDrawer sample={openSample} onClose={() => setOpenSample(null)} />}
+    </div>
+  );
+}
+
+const LSTAT: Record<string, string> = {
+  running: "var(--attention)", queued: "var(--queue)", done: "var(--success)",
+  failed: "var(--danger)", budget_skipped: "var(--done)",
+};
+
+function LiveSamples({ live }: { live: RunLive }) {
+  const [filter, setFilter] = useState<string>("all");
+  const c = live.counts || {};
+  const rows = live.samples.filter((s) => filter === "all" || s.status === filter);
+  return (
+    <div className="panel flush" style={{ marginBottom: 16 }}>
+      <div className="panel-h">
+        <Icon name="list" className="ic" />
+        <h2>Live samples</h2>
+        {live.agentic && <span className="badge" style={{ marginLeft: 4 }}>agentic{live.sandbox ? ` · ${live.sandbox}` : ""}</span>}
+        <span className="grow" />
+        <div className="seg">
+          {["all", "running", "queued", "done", "failed"].map((s) => (
+            <button key={s} className={filter === s ? "on" : ""} onClick={() => setFilter(s)}>
+              {s}{s !== "all" && c[s] != null ? ` ${c[s]}` : ""}
+            </button>
+          ))}
+        </div>
+      </div>
+      <table className="grid">
+        <thead><tr>
+          <th>Sample</th><th>Status</th><th className="right">Try</th><th>Worker</th><th>Category</th><th>Logs</th>
+        </tr></thead>
+        <tbody>
+          {rows.slice(0, 500).map((s: LiveSample) => {
+            const dot: React.CSSProperties = {
+              width: 7, height: 7, borderRadius: "50%", display: "inline-block",
+              background: LSTAT[s.status] || "var(--fg-muted)",
+              ...(s.status === "running" ? { animation: "blink 1.1s ease-in-out infinite" } : {}),
+            };
+            return (
+              <tr key={s.sample_id}>
+                <td className="mono" style={{ fontSize: 11.5 }}>{s.sample_id}</td>
+                <td>
+                  <span className="vcenter gap6">
+                    <span style={dot} />
+                    <span className="mono" style={{ fontSize: 11.5 }}>{s.status}</span>
+                    {s.status === "running" && s.lease_s != null && <span className="subtle" style={{ fontSize: 10.5 }}>· lease {s.lease_s}s</span>}
+                    {s.error_type && <span className="subtle" style={{ fontSize: 10.5, color: "var(--danger)" }}>· {s.error_type}</span>}
+                  </span>
+                </td>
+                <td className="right num cellmuted">{s.attempts}</td>
+                <td className="mono cellmuted" style={{ fontSize: 11 }} title={s.claimed_by || ""}>{s.claimed_by ? s.claimed_by.split("-").slice(-2).join("-") : "—"}</td>
+                <td className="cellmuted mono" style={{ fontSize: 11 }}>{s.group_key || "—"}</td>
+                <td>
+                  <span className="vcenter gap6">
+                    {s.worker_logs_url && <a className="btn sm ghost" href={s.worker_logs_url} target="_blank" rel="noreferrer" title="claiming worker logs"><Icon name="external" size={12} />worker</a>}
+                    {s.sandbox_logs_url && <a className="btn sm ghost" href={s.sandbox_logs_url} target="_blank" rel="noreferrer" title="sandbox namespace logs"><Icon name="box" size={12} />sandbox</a>}
+                    {!s.worker_logs_url && !s.sandbox_logs_url && <span className="subtle">—</span>}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {rows.length === 0 && <div className="panel-b"><Empty icon="list">No {filter === "all" ? "" : filter + " "}samples in the ledger.</Empty></div>}
     </div>
   );
 }
