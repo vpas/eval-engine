@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+from .config import GLOBAL_MAX_RUNNING, INTERACTIVE_RESERVE, ORCH_TICK_SECONDS
 from .db import analytics, control
 
 # --- cluster / cloud config (env-driven; absent ⇒ the cloud-specific bits no-op in dev) -----------
@@ -35,13 +36,12 @@ GKE_CLUSTER = os.environ.get("EVAL_ENGINE_GKE_CLUSTER", "eval-engine")
 GKE_ZONE = os.environ.get("EVAL_ENGINE_GKE_ZONE", "")
 NAMESPACE = os.environ.get("EVAL_ENGINE_K8S_NAMESPACE", "eval-engine")
 SANDBOX_NS = os.environ.get("INSPECT_K8S_DEFAULT_NAMESPACE", "eval-sandbox")
-ORCH_TICK = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
-WORKER_POLL = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
-GLOBAL_MAX_RUNNING = int(os.environ.get("EVAL_ENGINE_GLOBAL_MAX_RUNNING", "50"))
-INTERACTIVE_RESERVE = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_RESERVE", "12"))
+# GLOBAL_MAX_RUNNING / INTERACTIVE_RESERVE / ORCH_TICK_SECONDS are imported from config (one
+# definition, shared with the orchestrator that enforces them — so the dashboard never shows a
+# stale default).
 
 # A live heartbeat is fresher than a few of its own loops; past this it's stale (crashed/scaled-down).
-ORCH_STALE_S = max(3 * ORCH_TICK, 10.0)
+ORCH_STALE_S = max(3 * ORCH_TICK_SECONDS, 10.0)
 WORKER_STALE_S = float(os.environ.get("EVAL_ENGINE_WORKER_STALE_SECONDS", "30"))
 
 # Scale-from-0 is normal, not a fault: KEDA polls (~30s) then a pod must schedule + pull the image

@@ -23,20 +23,19 @@ import os
 import time
 
 from . import db, runner
+# Cadence / admission / leader knobs live in config (shared with ops + the monitor) so a default can't
+# diverge between the orchestrator that enforces them and the dashboard that displays them. Two-lane
+# admission (SCHEDULER §2): a global cap on concurrently-running runs + a reserved interactive slice
+# batch can borrow only when there's no interactive demand; per-run progress is then guaranteed by the
+# per-run max_inflight cap at the claim (§3).
+from .config import (GLOBAL_MAX_RUNNING, INTERACTIVE_RESERVE,
+                     ORCH_TICK_SECONDS as TICK_SECONDS, STALE_LEADER_SECONDS)
 from .logs import get_logger
 from .models import RunSpec
 
 log = get_logger(__name__)
 
-TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
 LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
-STALE_LEADER_SECONDS = float(os.environ.get("EVAL_ENGINE_STALE_LEADER_SECONDS", "20"))
-
-# Two-lane admission (SCHEDULER §2): a global cap on concurrently-running runs + a reserved interactive
-# slice that batch can borrow only when there's no interactive demand (and yields by attrition when
-# there is). Per-run progress is then guaranteed by the per-run max_inflight cap at the claim (§3).
-GLOBAL_MAX_RUNNING = int(os.environ.get("EVAL_ENGINE_GLOBAL_MAX_RUNNING", "50"))
-INTERACTIVE_RESERVE = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_RESERVE", "12"))  # ~25% of the global cap
 
 
 def _admit() -> None:

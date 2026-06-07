@@ -25,6 +25,7 @@ import json
 import os
 
 from . import runner, storage, training_analysis as ta
+from .config import STALE_LEADER_SECONDS  # shared with the orchestrator (one definition)
 from .db import analytics, control
 from .logs import get_logger
 from .models import PluginRef, RunSpec, TrainingRunSpec
@@ -32,9 +33,8 @@ from .models import PluginRef, RunSpec, TrainingRunSpec
 log = get_logger(__name__)
 
 INLINE = os.environ.get("EVAL_ENGINE_MONITOR_INLINE", "0") == "1"
-TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_MONITOR_TICK", "3.0"))
+TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_MONITOR_TICK", "3.0"))  # monitor-specific (not shared)
 LEADER_KEY = 0x6576616D  # 'evam' — distinct advisory-lock key from the orchestrator's
-STALE_LEADER_SECONDS = float(os.environ.get("EVAL_ENGINE_STALE_LEADER_SECONDS", "20"))
 # Default alert threshold (fraction): a regression must clear this AND the Wilson noise band (§8). The
 # UI exposes it as a live pp knob; persisted anomalies store their magnitude so the threshold filters.
 DEFAULT_THRESHOLD = float(os.environ.get("EVAL_ENGINE_ANOMALY_THRESHOLD_PP", "1.5")) / 100.0

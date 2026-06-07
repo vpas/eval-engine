@@ -14,13 +14,13 @@ import threading
 import time
 
 from . import db, runner
+from .config import WORKER_POLL_SECONDS as POLL_SECONDS  # shared with ops (one definition)
 from .datasets import load_jsonl
 from .logs import get_logger
 from .models import RunSpec
 
 log = get_logger(__name__)
 
-POLL_SECONDS = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
 WORKER_ID = os.environ.get("HOSTNAME", f"w-{os.getpid()}")  # pod name in K8s → unique claimer id
 # Lease heartbeat: renew our claimed tasks' leases this often while executing, so a long batch
 # (agentic / SWE-bench — image pull + multi-turn agent + test run, easily > the 600s claim lease)
