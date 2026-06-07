@@ -27,19 +27,23 @@ unreferenced top-level functions) were done with a stdlib-AST scan since no lint
 
 ## For review (not auto-fixed)
 
-### 1. Redis probe can never report `degraded` — likely a real bug
-`ops.py` `probe_redis()`:
-```python
-status = "ok" if role == "master" or slaves >= 0 else "degraded"
-```
-`slaves` is `connected_slaves`, which is always `>= 0`, so the whole condition is a tautology — the
-`"degraded"` branch is unreachable and Redis always reports `ok` (even with no master link / a broken
-replica). The intended health rule isn't obvious from the code, hence not auto-fixed. Likely intent:
-```python
-link_ok = info.get("master_link_status", "up") == "up"   # replicas report this; master omits it
-status = "ok" if role == "master" or link_ok else "degraded"
-```
-**Action:** decide what "degraded Redis" should mean here and replace the tautology.
+### 1. Redis probe can never report `degraded` — PARTIALLY ADDRESSED
+`ops.py` `probe_redis()` had a tautology — `role == "master" or slaves >= 0` (always true), so the
+`"degraded"` branch was unreachable and Redis always reported `ok` when reachable.
+
+A naive fix (`slaves >= 1`) would be *worse*: the `redis` Service selects all three StatefulSet pods
+(no master-only Service), so a point-in-time probe round-robins onto the master OR a replica at random
+— `role`/`connected_slaves` reflect whichever node answered, not the cluster, and would flap.
+
+**Done:** removed the tautology and made the probe **reachability-only and honest** — status is `ok`
+when `ping()` succeeds (a dead Redis still surfaces as `down` via the snapshot's exception wrap), and
+`role`/`connected_replicas` are surfaced as informational only, labelled "this node". Low-risk: Redis
+is non-critical here (not in `CRITICAL`; backs only LiteLLM rate-limiting).
+
+**Deferred:** authoritative replication/quorum health needs a **Sentinel** query
+(`SENTINEL master|replicas|ckquorum mymaster` on `:26379`) — independent of which data pod the Service
+picks. That's the right home for a real `degraded` verdict; build it only if Redis health becomes
+operationally important.
 
 ### 2. Dead function: `analytics.compare_models_by_category()`
 Defined (`analytics.py`) but referenced nowhere — not in modules, tests, frontend, or docs. The name

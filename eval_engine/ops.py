@@ -160,11 +160,17 @@ def probe_redis() -> dict:
     except ImportError:
         return _comp("redis", "unknown", "redis client not installed")
     r = redis.Redis(host=host, port=port, socket_timeout=1.5, socket_connect_timeout=1.5)
-    r.ping()
+    r.ping()  # reachability — a failure raises and snapshot() reports the component `down`
     info = r.info("replication")
     role, slaves = info.get("role", "?"), int(info.get("connected_slaves", 0))
-    status = "ok" if role == "master" or slaves >= 0 else "degraded"
-    return _comp("redis", status, f"{role} · {slaves} replicas · Sentinel HA",
+    # Status is reachability-only, by design. The `redis` Service selects all three StatefulSet pods
+    # (there is no master-only Service), so a single point-in-time probe round-robins onto the master
+    # OR a replica at random — `role`/`connected_slaves` describe whichever node answered, not the
+    # cluster, and so can't honestly drive a `degraded` verdict (it would just flap with node choice).
+    # Authoritative replication health needs a Sentinel query (SENTINEL master/replicas/ckquorum on
+    # :26379); deferred — see docs/CODE_REVIEW.md. Until then we surface the node's role + replica
+    # count as informational only.
+    return _comp("redis", "ok", f"reachable · this node: {role} · {slaves} replica(s) · Sentinel HA",
                  {"role": role, "connected_replicas": slaves})
 
 
