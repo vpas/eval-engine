@@ -79,7 +79,7 @@ def tick() -> None:
         # Budget cap (DESIGN §8): once committed cost reaches the cap, stop scheduling — convert
         # still-queued samples to the distinct terminal `budget_skipped` (in-flight ones finish).
         # Workers also enforce this (stop claiming early); the orchestrator is the authoritative sweep.
-        skipped = runner._enforce_budget(run_id, spec)
+        skipped = runner.enforce_budget(run_id, spec)
         if skipped:
             log.warning("%s hit budget $%.6f → skipped %d queued (budget_exceeded)",
                         run_id, spec.budget_usd, skipped)
@@ -90,8 +90,8 @@ def tick() -> None:
                   run_id, terminal, total, c.get("done", 0), c.get("failed", 0),
                   c.get("budget_skipped", 0), c.get("queued", 0), c.get("running", 0))
         if total > 0 and terminal >= total and c.get("queued", 0) == 0 and c.get("running", 0) == 0:
-            runner._batch_load(run_id, spec)  # safety sweep: ensure all done rows are in analytics
-            done, failed, acc = runner._finalize(run_id, spec)
+            runner.batch_load(run_id, spec)  # safety sweep: ensure all done rows are in analytics
+            done, failed, acc = runner.finalize(run_id, spec)
             log.info("finalized %s: done=%d failed=%d acc=%.3f", run_id, done, failed, acc)
 
     # Liveness for the ops dashboard: make the leader-elected singleton observable without the k8s

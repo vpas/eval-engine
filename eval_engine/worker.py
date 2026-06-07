@@ -59,7 +59,7 @@ def _execute_with_heartbeat(spec, run_id: str, samples_by_id: dict, ids: list[st
     t = threading.Thread(target=beat, name=f"lease-{run_id}", daemon=True)
     t.start()
     try:
-        return runner._execute_batch(spec, run_id, samples_by_id, ids)
+        return runner.execute_batch(spec, run_id, samples_by_id, ids)
     finally:
         stop.set()
         t.join(timeout=2)
@@ -84,7 +84,7 @@ def _drain_run(run_id: str) -> int:
         log.info("[%s] run_id=%s claimed %d sample(s)", WORKER_ID, run_id, len(ids))
         results = _execute_with_heartbeat(spec, run_id, samples_by_id, ids)
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
-        runner._commit_batch(spec, run_id, samples_by_id, ids, results)
+        runner.commit_batch(spec, run_id, samples_by_id, ids, results)
         ok = sum(1 for r in results.values() if r and not r.get("error_type"))
         errs = sum(1 for r in results.values() if r and r.get("error_type"))
         missing = len(ids) - len(results)

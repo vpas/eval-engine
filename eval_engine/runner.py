@@ -74,7 +74,7 @@ MODEL_TIMEOUT = int(os.environ.get("EVAL_ENGINE_MODEL_TIMEOUT", "120"))
 SAMPLE_TIME_LIMIT = int(os.environ.get("EVAL_ENGINE_SAMPLE_TIME_LIMIT", "600"))
 
 
-def _enforce_budget(run_id: str, spec: RunSpec) -> int:
+def enforce_budget(run_id: str, spec: RunSpec) -> int:
     """If the run has a budget and committed cost has reached it, skip the still-queued samples
     (terminal ``budget_skipped``, DESIGN §8). Returns # skipped. Idempotent — safe to call from the
     worker (stop claiming early) *and* the orchestrator (authoritative sweep) without double-counting."""
@@ -191,7 +191,7 @@ def _model_for(spec: RunSpec, n: int) -> tuple:
     return _build_model(exec_model, mock_output, spec.mock_tool_calls, n), exec_model
 
 
-def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str],
+def commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str],
                   results: dict[str, dict]) -> None:
     """Ack-before-flip commit (DESIGN §8, ORCHESTRATION §5). For each clean result: durably insert to
     analytics FIRST, **then** flip its ledger row to ``done`` (+``loaded``). Invariant: ``done`` ⟹ the
@@ -226,7 +226,7 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     for sid in ids:
         if sid not in good:
             _settle_result(run_id, sid, results.get(sid))  # missing/errored → retry-with-backoff
-    _enforce_budget(run_id, spec)
+    enforce_budget(run_id, spec)
 
 
 # Transcript retention (DESIGN §8/§13). Default sampling rate when a RunSpec doesn't set one — unset
@@ -271,7 +271,7 @@ def get_transcript(uri: str) -> str | None:
     return raw.decode()
 
 
-def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:
+def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict[str, dict]:
     """Run Inspect on the claimed shard; return {sample_id: result dict}."""
     sub = MemoryDataset([samples_by_id[i] for i in ids])
     built, _ = plugins.build("harness", spec.harness.model_dump())
@@ -344,7 +344,7 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     return out
 
 
-def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> None:
+def batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> None:
     """Flatten done-but-unloaded ledger rows → analytics (one batched insert).
 
     ``ids`` scopes the load to a specific shard: each distributed worker loads only the rows
@@ -408,7 +408,7 @@ def launch(spec: RunSpec, created_by: str | None = None, provenance: dict | None
     return run_id
 
 
-def _finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
+def finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
     """Aggregate the run, archive failures, prune the ledger, mark completed. Run ONCE per run
     (by the single-process runner, or by the distributed coordinator after all workers join)."""
     cnt = control.counts(run_id)
@@ -435,9 +435,9 @@ def execute(run_id: str, spec: RunSpec) -> None:
     while True:
         ids = control.claim_batch(run_id, worker, spec.batch_size)
         if ids:
-            results = _execute_batch(spec, run_id, samples_by_id, ids)
+            results = execute_batch(spec, run_id, samples_by_id, ids)
             # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
-            _commit_batch(spec, run_id, samples_by_id, ids, results)
+            commit_batch(spec, run_id, samples_by_id, ids, results)
             continue
         # Nothing claimable right now. If tasks remain (queued behind a not_before backoff, or
         # running), wait out the backoff and re-claim — don't finalize early. (The distributed path
@@ -447,7 +447,7 @@ def execute(run_id: str, spec: RunSpec) -> None:
             break
         time.sleep(0.5)
 
-    _finalize(run_id, spec)
+    finalize(run_id, spec)
 
 
 def run(spec: RunSpec) -> str:
@@ -457,4 +457,8 @@ def run(spec: RunSpec) -> str:
     return run_id
 
 
-__all__ = ["run", "launch", "execute", "RunSpec"]
+# Public surface. The first group is the high-level lifecycle (CLI / API); the second is the
+# distributed-execution API the worker + orchestrator drive directly (claim→execute→commit→load→
+# finalize) — public because they ARE the contract those processes call, not runner internals.
+__all__ = ["run", "launch", "execute", "RunSpec",
+           "execute_batch", "commit_batch", "enforce_budget", "batch_load", "finalize"]
