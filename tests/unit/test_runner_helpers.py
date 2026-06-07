@@ -35,13 +35,13 @@ def _spec(**over) -> RunSpec:
 
 def test_model_for_mock_output_builds_offline():
     # mockllm + mock_output → a scripted model, no provider key / no network.
-    m = _model_for(_spec(mock_output="Paris"), n=3)
-    assert isinstance(m, Model)
+    m, exec_model = _model_for(_spec(mock_output="Paris"), n=3)
+    assert isinstance(m, Model) and exec_model == "mockllm/model"
 
 
 def test_model_for_mock_tool_calls_builds_offline():
     # the scripted-agentic branch: a tool-call sequence becomes the mock's outputs.
     spec = _spec(mock_tool_calls=[{"tool": "bash", "args": {"command": "ls"}},
                                   {"tool": "submit", "args": {"answer": "x"}}])
-    m = _model_for(spec, n=1)
+    m, _ = _model_for(spec, n=1)
     assert isinstance(m, Model)

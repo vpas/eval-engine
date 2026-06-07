@@ -182,9 +182,13 @@ def _build_model(model: str, mock_output: str | None, mock_tool_calls, n: int):
     return get_model(model)
 
 
-def _model_for(spec: RunSpec, n: int):
+def _model_for(spec: RunSpec, n: int) -> tuple:
+    """Resolve + build the Inspect model to call, sized for ``n`` generations. Returns
+    ``(model, exec_model)``: the built model object plus the resolved model id (a ``checkpoint:`` ref →
+    its real model, §4), the latter used for pricing + logging so cost reflects the real provider, not
+    the opaque ref."""
     exec_model, mock_output = _resolve_model(spec)
-    return _build_model(exec_model, mock_output, spec.mock_tool_calls, n)
+    return _build_model(exec_model, mock_output, spec.mock_tool_calls, n), exec_model
 
 
 def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str],
@@ -285,10 +289,9 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
         gen["temperature"] = spec.temperature
     if spec.seed is not None:
         gen["seed"] = spec.seed
-    # Resolve the model actually called (a checkpoint ref → real model; §4) — used for both the
-    # Inspect model object and for pricing (so cost reflects the real provider, not the opaque ref).
-    exec_model, mock_output = _resolve_model(spec)
-    model = _build_model(exec_model, mock_output, spec.mock_tool_calls, len(ids) * max(1, spec.epochs))
+    # Resolve + build the model actually called (a checkpoint ref → real model; §4). exec_model is
+    # kept for pricing + logging (so cost reflects the real provider, not the opaque ref).
+    model, exec_model = _model_for(spec, len(ids) * max(1, spec.epochs))
     if exec_model != spec.model:
         log.debug("run_id=%s resolved model %s → %s", run_id, spec.model, exec_model)
     log.debug("run_id=%s executing batch of %d via %s (harness=%s)",
