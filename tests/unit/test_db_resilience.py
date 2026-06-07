@@ -68,6 +68,31 @@ def test_control_run_does_not_retry_unrelated_errors(monkeypatch):
     assert n["calls"] == 1
 
 
+# --------------------------------------------------------------------------- leader DSN (session mode)
+
+def test_leader_dsn_strips_neon_pooler_suffix(monkeypatch):
+    # The leader's advisory lock needs a session-mode endpoint; Neon's direct host is the pooled host
+    # without `-pooler`. (A transaction pooler would hand the "lock" to every replica → split-brain.)
+    monkeypatch.delenv("EVAL_ENGINE_PG_LEADER_DSN", raising=False)
+    monkeypatch.setattr(control, "DSN",
+                        "postgresql://u:p@ep-ancient-pine-a6roa0ut-pooler.us-west-2.aws.neon.tech/db")
+    assert control._leader_dsn() == \
+        "postgresql://u:p@ep-ancient-pine-a6roa0ut.us-west-2.aws.neon.tech/db"
+
+
+def test_leader_dsn_explicit_override_wins(monkeypatch):
+    monkeypatch.setenv("EVAL_ENGINE_PG_LEADER_DSN", "host=direct.example port=5432")
+    monkeypatch.setattr(control, "DSN", "host=whatever-pooler.example port=5432")
+    assert control._leader_dsn() == "host=direct.example port=5432"
+
+
+def test_leader_dsn_noop_for_non_pooled(monkeypatch):
+    # Local / non-pooled DSN is returned unchanged.
+    monkeypatch.delenv("EVAL_ENGINE_PG_LEADER_DSN", raising=False)
+    monkeypatch.setattr(control, "DSN", "host=localhost port=5433 dbname=evalengine")
+    assert control._leader_dsn() == "host=localhost port=5433 dbname=evalengine"
+
+
 # --------------------------------------------------------------------------- analytics (ClickHouse)
 
 def test_analytics_run_drops_client_and_retries(monkeypatch):

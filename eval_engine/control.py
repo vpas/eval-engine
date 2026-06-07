@@ -263,12 +263,25 @@ def _dict_rows(sql: str, params=()) -> list[dict]:
 _leader_con: psycopg.Connection | None = None
 
 
+def _leader_dsn() -> str:
+    """DSN for the dedicated leader connection. Session-scoped advisory locks (``pg_try_advisory_lock``)
+    require a STABLE backend session, which a TRANSACTION-pooling endpoint (PgBouncer / Neon's
+    ``-pooler`` host) does not provide: through the pooler two orchestrators can each "acquire" the same
+    lock → split-brain (both tick admit/finalize). So the leader connection must use a SESSION-mode
+    endpoint. Prefer an explicit ``EVAL_ENGINE_PG_LEADER_DSN``; otherwise derive Neon's direct endpoint
+    by dropping the ``-pooler`` suffix from the host (a no-op for a non-pooled / local DSN). (RESILIENCE
+    item D: the rest of the app keeps the pooled endpoint; only this one connection needs session mode.)"""
+    return os.environ.get("EVAL_ENGINE_PG_LEADER_DSN") or DSN.replace("-pooler.", ".")
+
+
 def acquire_leader(key: int) -> bool:
-    """Try to grab a session-scoped advisory lock on a DEDICATED connection (held for the process
-    lifetime → released automatically if this process/connection dies). Returns True if we're leader."""
+    """Try to grab a session-scoped advisory lock on a DEDICATED, SESSION-mode connection (held for the
+    process lifetime → released automatically if this process/connection dies). Returns True if we're
+    leader. The connection uses ``_leader_dsn()`` (NOT the pooled app DSN), so the lock is a real
+    cross-replica mutex rather than something a transaction pooler hands to everyone."""
     global _leader_con
     if _leader_con is None or _leader_con.closed:
-        _leader_con = psycopg.connect(DSN, autocommit=True)
+        _leader_con = psycopg.connect(_leader_dsn(), autocommit=True)
     return bool(_leader_con.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()[0])
 
 

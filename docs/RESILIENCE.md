@@ -174,6 +174,17 @@ a full pod reschedule (minutes) instead of a ~1s handover.
 **Fix:** bump `eval-engine-orch` to `replicas: 2` and add a PDB. The second pod sits as a standby
 (it heartbeats `leader:false`) and takes over near-instantly. Near-zero extra cost (tiny pod, idle).
 
+> **Gotcha found while rolling this out (2026-06-07):** at 2 replicas BOTH pods logged `up, leader` —
+> split-brain. Root cause: `EVAL_ENGINE_PG_DSN` points at Neon's **pooled (`-pooler`) endpoint**, and a
+> TRANSACTION pooler doesn't preserve the backend session that `pg_try_advisory_lock` (session-scoped)
+> relies on, so every replica "acquires" the lock. The leader-election code was correct; the pooled DSN
+> silently defeated it (never exercised at `replicas: 1`). **Fix shipped:** the dedicated leader
+> connection now uses a SESSION-mode endpoint via `control._leader_dsn()` — an explicit
+> `EVAL_ENGINE_PG_LEADER_DSN`, else Neon's direct host derived by dropping `-pooler`. Only that one
+> connection changes; the rest of the app keeps the pooled endpoint. This is the orchestrator-lock slice
+> of item D, promoted from deferred because at `replicas: 2` it's a correctness requirement, not a
+> tuning nicety.
+
 ### 4.3 — ClickHouse sits on the worker's critical write path
 The ack-before-flip commit (`runner._commit_batch`) does `analytics.insert(...)` **before**
 `control.commit_result(...)` flips the ledger row to `done`. The invariant ("`done` ⟹ durable in
@@ -303,7 +314,7 @@ Decisions taken in a walkthrough of every item. These drive the backlog in §9.
 | A. Connection retry/reconnect wrapper (§3.3) | **Do now** | PG + ClickHouse; also delivers the CH-hot-path crash fix (§4.3.1). |
 | B. Control/edge replicas:2 + PDBs (§3.4, 4.1, 4.2, 5, 12) | **Do all now** | orchestrator + api + frontend + oauth2-proxy → 2 each, PDBs `minAvailable:1`, hostname topology spread. |
 | C. ClickHouse hot-path decoupling (§4.3) | **Retry now (via A); decouple deferred** | Async-load restructure parked as a future DESIGN decision. |
-| D. Neon pooled endpoint + conn alert (§3.2) | **Deferred** | Fine at POC scale; revisit if `pg_connections()` climbs. |
+| D. Neon pooled endpoint + conn alert (§3.2) | **Partly done / deferred** | Leader-lock slice DONE (session-mode `_leader_dsn`, forced by the §4.2 split-brain). App-wide pooled DSN + `pg_connections` alert still deferred — fine at POC scale. |
 | E. KEDA operator replicaCount:2 (§5) | **Do now** | Promoted from "soon" — bundle with Phase 1. |
 | F. LiteLLM `allowed_fails` tuning (§5/§10) | **Do now** | Promoted from "soon"; keep the digest pin; tune carefully (preserve fail-fast intent). |
 | G. On-demand worker fallback pool (§5/§11) | **Skip (permanent)** | Spot-only is acceptable indefinitely — eviction is a throughput dip, not data loss. |
@@ -320,6 +331,9 @@ CH-decouple, regional. Dropped: on-demand worker pool.
       (drops + rebuilds the CH client on failure). Covers C's cheap fix too. (§3.3, §4.3.1)
 - [x] **[B]** `eval-engine-orch` → `replicas: 2` (leader-elected; warm standby) + stale comment removed.
       (§4.2)
+- [x] **[B/D]** Fix the split-brain this exposed: the leader advisory-lock connection now uses a
+      session-mode endpoint (`control._leader_dsn`), since the app's pooled `-pooler` DSN defeats
+      `pg_try_advisory_lock`. Required for `replicas: 2` to be safe. (§4.2 gotcha)
 - [x] **[B]** `eval-engine-api`, `eval-engine-frontend`, `oauth2-proxy` → `replicas: 2`. (§3.4, §4.1, §5)
 - [x] **[B]** `PodDisruptionBudget` (`minAvailable: 1`) for api, orch, frontend, oauth2-proxy, litellm;
       `minAvailable: 2` for the ClickHouse/Redis 3× StatefulSets (preserve quorum). (§5, §12)
@@ -330,9 +344,10 @@ CH-decouple, regional. Dropped: on-demand worker pool.
       deployment; `num_retries: 0` (fail-fast) and the pinned digest kept. (§5/§10)
 
 **Deferred (on the backlog, not now — decision log §8a):**
-- [ ] **[D]** Point `EVAL_ENGINE_PG_DSN` at Neon's pooled endpoint; keep the leader connection on a
-      session-mode endpoint; add a `pg_connections()` alert. **Deferred** — fine at POC scale; trigger
-      to revisit: connection count climbs toward Neon's limit. (§3.2)
+- [~] **[D]** Pooled endpoint work. DONE: the leader connection is pinned to a session-mode endpoint
+      (`_leader_dsn`) — forced by the §4.2 split-brain. STILL DEFERRED: the app already runs on the
+      pooled `-pooler` DSN, but a `pg_connections()` alert below Neon's limit is not yet wired —
+      fine at POC scale; trigger to revisit: connection count climbs toward Neon's limit. (§3.2)
 - [ ] **[C]** Decouple the ClickHouse load from the worker hot path: flip ledger→`done` on PG commit,
       load CH asynchronously via the `loaded` flag + `_batch_load` sweep. **Deferred** — needs a DESIGN
       note on the relaxed invariant; A's retry covers the immediate risk. (§4.3.2)
