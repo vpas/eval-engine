@@ -196,6 +196,16 @@ def agentic(cfg: AgenticConfig) -> tuple[Solver, SandboxEnvironmentSpec]:
 # --------------------------------------------------------------------------- scorers
 
 
+def _simple_scorer(name: str, score_fn) -> Scorer:
+    """Wrap an ``async score(state, target) -> Score`` in the accuracy()+stderr() metrics factory our
+    custom scorers all share — so each scorer is just its scoring body, not the repeated
+    inspect_scorer/_factory shell."""
+    @inspect_scorer(metrics=[accuracy(), stderr()], name=name)
+    def _factory() -> Scorer:
+        return score_fn
+    return _factory()
+
+
 class IncludesConfig(BaseModel):
     ignore_case: bool = True
 
@@ -310,22 +320,19 @@ def _extract_number(text: str) -> str | None:
                 "compare numerically to the target within a tolerance. For GSM8K-style numeric evals.",
 )
 def numeric_answer(cfg: NumericAnswerConfig) -> Scorer:
-    @inspect_scorer(metrics=[accuracy(), stderr()], name="numeric_answer")
-    def _factory() -> Scorer:
-        async def score(state: TaskState, target: Target) -> Score:
-            out = state.output.completion if state.output else ""
-            got = _extract_number(out)
-            want = _extract_number(target.text)
-            ok = False
-            if got is not None and want is not None:
-                try:
-                    ok = abs(float(got) - float(want)) <= cfg.tolerance
-                except ValueError:
-                    ok = got == want
-            return Score(value=CORRECT if ok else INCORRECT, answer=got or "",
-                         explanation=f"extracted={got!r} target={want!r}")
-        return score
-    return _factory()
+    async def score(state: TaskState, target: Target) -> Score:
+        out = state.output.completion if state.output else ""
+        got = _extract_number(out)
+        want = _extract_number(target.text)
+        ok = False
+        if got is not None and want is not None:
+            try:
+                ok = abs(float(got) - float(want)) <= cfg.tolerance
+            except ValueError:
+                ok = got == want
+        return Score(value=CORRECT if ok else INCORRECT, answer=got or "",
+                     explanation=f"extracted={got!r} target={want!r}")
+    return _simple_scorer("numeric_answer", score)
 
 
 # ---- code_exec (HumanEval/MBPP): run the model's code against the sample's unit tests IN THE SANDBOX.
@@ -365,24 +372,21 @@ def _assemble_program(completion: str, stub: str, entry: str, test: str) -> str:
                 "(+ optional `prompt` stub and `entry_point`); pass iff the test program exits 0.",
 )
 def code_exec(cfg: CodeExecConfig) -> Scorer:
-    @inspect_scorer(metrics=[accuracy(), stderr()], name="code_exec")
-    def _factory() -> Scorer:
-        async def score(state: TaskState, target: Target) -> Score:
-            md = state.metadata or {}
-            completion = state.output.completion if state.output else ""
-            test = md.get("test", "") or target.text
-            program = _assemble_program(completion, md.get("prompt", ""),
-                                        md.get("entry_point", ""), test)
-            code = _extract_code(completion)
-            try:
-                result = await sandbox().exec(["python3", "-c", program], timeout=cfg.timeout)
-                ok = result.success
-                detail = (result.stderr or result.stdout or "")[-800:]
-            except Exception as e:  # sandbox/timeout error → not correct (and surfaced for debugging)
-                ok, detail = False, f"exec error: {e}"[:800]
-            return Score(value=CORRECT if ok else INCORRECT, answer=code[:1000], explanation=detail)
-        return score
-    return _factory()
+    async def score(state: TaskState, target: Target) -> Score:
+        md = state.metadata or {}
+        completion = state.output.completion if state.output else ""
+        test = md.get("test", "") or target.text
+        program = _assemble_program(completion, md.get("prompt", ""),
+                                    md.get("entry_point", ""), test)
+        code = _extract_code(completion)
+        try:
+            result = await sandbox().exec(["python3", "-c", program], timeout=cfg.timeout)
+            ok = result.success
+            detail = (result.stderr or result.stdout or "")[-800:]
+        except Exception as e:  # sandbox/timeout error → not correct (and surfaced for debugging)
+            ok, detail = False, f"exec error: {e}"[:800]
+        return Score(value=CORRECT if ok else INCORRECT, answer=code[:1000], explanation=detail)
+    return _simple_scorer("code_exec", score)
 
 
 # ---- ifeval (IFEval): programmatic instruction-following verifiers (see eval_engine/ifeval.py).
@@ -401,18 +405,15 @@ class IFEvalConfig(BaseModel):
                 "— passes iff ALL instructions are satisfied.",
 )
 def ifeval(cfg: IFEvalConfig) -> Scorer:
-    @inspect_scorer(metrics=[accuracy(), stderr()], name="ifeval")
-    def _factory() -> Scorer:
-        async def score(state: TaskState, target: Target) -> Score:
-            md = state.metadata or {}
-            resp = state.output.completion if state.output else ""
-            ids = md.get("instruction_id_list", []) or []
-            satisfied, total = _ifeval.evaluate(resp, ids, md.get("kwargs"))
-            ok = total > 0 and satisfied == total
-            return Score(value=CORRECT if ok else INCORRECT, answer="",
-                         explanation=f"{satisfied}/{total} instructions satisfied")
-        return score
-    return _factory()
+    async def score(state: TaskState, target: Target) -> Score:
+        md = state.metadata or {}
+        resp = state.output.completion if state.output else ""
+        ids = md.get("instruction_id_list", []) or []
+        satisfied, total = _ifeval.evaluate(resp, ids, md.get("kwargs"))
+        ok = total > 0 and satisfied == total
+        return Score(value=CORRECT if ok else INCORRECT, answer="",
+                     explanation=f"{satisfied}/{total} instructions satisfied")
+    return _simple_scorer("ifeval", score)
 
 
 # ---- swe_bench (SWE-bench): apply the held-out test patch + run the repo's tests IN THE SANDBOX.
@@ -431,33 +432,30 @@ class SWEBenchScorerConfig(BaseModel):
                 "FAIL_TO_PASS tests pass and PASS_TO_PASS tests still pass. Pair with 'swe_bench' harness.",
 )
 def swe_bench_scorer(cfg: SWEBenchScorerConfig) -> Scorer:
-    @inspect_scorer(metrics=[accuracy(), stderr()], name="swe_bench")
-    def _factory() -> Scorer:
-        async def score(state: TaskState, target: Target) -> Score:
-            md = state.metadata or {}
-            eval_script = md.get("eval_script", "")
-            if not eval_script:
-                return Score(value=INCORRECT, explanation="no eval_script in sample metadata")
-            try:
-                # The agent has edited /testbed; the eval script applies the test patch + runs tests.
-                # `exec 2>&1` merges stderr into stdout IN EXECUTION ORDER. The eval script prints its
-                # `>>>>> Start/End Test Output` markers via `set -x` (→ stderr) while pytest's
-                # PASSED/FAILED lines go to stdout; capturing the streams separately and concatenating
-                # them would place the markers AFTER all results, so the slice between them would hold
-                # no test outcomes (n_parsed=0 → every instance unresolved). Merging keeps them
-                # interleaved, matching how the official SWE-bench harness captures combined output.
-                result = await sandbox().exec(["bash", "-c", "exec 2>&1\n" + eval_script], timeout=cfg.timeout)
-                log = result.stdout or result.stderr or ""
-            except Exception as e:  # sandbox/timeout → unresolved (surfaced for debugging)
-                return Score(value=INCORRECT, explanation=f"eval-script error: {e}"[:500])
-            report = _swebench.grade(log, md.get("repo", ""),
-                                     md.get("FAIL_TO_PASS", []), md.get("PASS_TO_PASS", []))
-            f2p, p2p = report["fail_to_pass"], report["pass_to_pass"]
-            return Score(
-                value=CORRECT if report["resolved"] else INCORRECT,
-                answer="resolved" if report["resolved"] else "unresolved",
-                explanation=f"FAIL_TO_PASS {f2p[0]}/{f2p[1]}, PASS_TO_PASS {p2p[0]}/{p2p[1]} "
-                            f"(parsed {report['n_parsed']} tests)",
-            )
-        return score
-    return _factory()
+    async def score(state: TaskState, target: Target) -> Score:
+        md = state.metadata or {}
+        eval_script = md.get("eval_script", "")
+        if not eval_script:
+            return Score(value=INCORRECT, explanation="no eval_script in sample metadata")
+        try:
+            # The agent has edited /testbed; the eval script applies the test patch + runs tests.
+            # `exec 2>&1` merges stderr into stdout IN EXECUTION ORDER. The eval script prints its
+            # `>>>>> Start/End Test Output` markers via `set -x` (→ stderr) while pytest's
+            # PASSED/FAILED lines go to stdout; capturing the streams separately and concatenating
+            # them would place the markers AFTER all results, so the slice between them would hold
+            # no test outcomes (n_parsed=0 → every instance unresolved). Merging keeps them
+            # interleaved, matching how the official SWE-bench harness captures combined output.
+            result = await sandbox().exec(["bash", "-c", "exec 2>&1\n" + eval_script], timeout=cfg.timeout)
+            log = result.stdout or result.stderr or ""
+        except Exception as e:  # sandbox/timeout → unresolved (surfaced for debugging)
+            return Score(value=INCORRECT, explanation=f"eval-script error: {e}"[:500])
+        report = _swebench.grade(log, md.get("repo", ""),
+                                 md.get("FAIL_TO_PASS", []), md.get("PASS_TO_PASS", []))
+        f2p, p2p = report["fail_to_pass"], report["pass_to_pass"]
+        return Score(
+            value=CORRECT if report["resolved"] else INCORRECT,
+            answer="resolved" if report["resolved"] else "unresolved",
+            explanation=f"FAIL_TO_PASS {f2p[0]}/{f2p[1]}, PASS_TO_PASS {p2p[0]}/{p2p[1]} "
+                        f"(parsed {report['n_parsed']} tests)",
+        )
+    return _simple_scorer("swe_bench", score)
