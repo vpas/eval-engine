@@ -116,6 +116,15 @@ spec:
             - { name: GF_SERVER_ROOT_URL, value: "https://${EE_HOST}/grafana" }
             - { name: GF_SERVER_SERVE_FROM_SUB_PATH, value: "true" }
             - { name: GF_INSTALL_PLUGINS, value: "grafana-clickhouse-datasource" }
+            # SQLite WAL mode. The backing store is the emptyDir below, so the DB is rebuilt from
+            # scratch on every pod start and ALL provisioning (datasources + dashboards) re-runs then.
+            # With the default rollback journal, Grafana's many concurrent startup writers (ngalert,
+            # provisioning, auth cleanup, plugin detectors) collide as "database is locked" — and the
+            # dashboard-folder create lost that race, so provisioning aborted with NO dashboards showing
+            # (the "Eval Engine" folder was never created). WAL lets a writer + readers proceed
+            # concurrently, so startup provisioning succeeds deterministically. (Grafana's documented
+            # remedy for the "database is locked" provisioning failure.)
+            - { name: GF_DATABASE_WAL, value: "true" }
             # Auth: trust oauth2-proxy's forwarded identity; no Grafana login screen. We read
             # X-Forwarded-Email — the header oauth2-proxy injects into the UPSTREAM request in proxy
             # mode (via --pass-user-headers=true). NB: --set-xauthrequest sets X-Auth-Request-* only on
