@@ -18,11 +18,14 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState("mockllm/model");
   const [multi, setMulti] = useState<string[]>(["mockllm/model"]);
   const [slice, setSlice] = useState<"full" | "subset">("full");
-  const [subsetN, setSubsetN] = useState(200);
-  const [epochs, setEpochs] = useState(1);
-  const [temp, setTemp] = useState(0);
+  // Numeric fields are kept as STRINGS so the input can be fully cleared while typing (coercing with
+  // `+value` turns "" into 0, which snaps the field back to a stuck leading 0). Coerced at submit, the
+  // same way `seed` already is.
+  const [subsetN, setSubsetN] = useState("200");
+  const [epochs, setEpochs] = useState("1");
+  const [temp, setTemp] = useState("0");
   const [seed, setSeed] = useState<string>("");
-  const [budget, setBudget] = useState(60);
+  const [budget, setBudget] = useState("60");
   const [keepAll, setKeepAll] = useState(false);
   const [mock, setMock] = useState("Paris");
   const [busy, setBusy] = useState(false);
@@ -36,7 +39,11 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
   const ev = useMemo(() => evals.find((e) => e.id === evalId), [evals, evalId]);
   const chosen = mode === "single" ? (model ? [model] : []) : multi;
   const isMock = chosen.every((m) => m.startsWith("mockllm"));
-  const limit = slice === "subset" ? subsetN : undefined;
+  // Coerced numerics (empty/invalid → sensible fallback); used at submit + for the estimate panel.
+  const epochsN = Math.max(1, Number(epochs) || 1);
+  const subsetNum = subsetN === "" ? undefined : Number(subsetN);
+  const budgetN = Number(budget) || 0;
+  const limit = slice === "subset" ? subsetNum : undefined;
   const modelOpts = Array.from(new Set([...MODEL_SUGGESTIONS, ...models.map((m) => `${m.body.provider}/${m.body.model_id}`)]));
 
   const toggle = (id: string) => setMulti((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
@@ -49,8 +56,8 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
       const ids: string[] = [];
       for (const m of chosen) {
         const r = await launchFromEval(evalId, {
-          model: m, limit, epochs, budget_usd: budget || undefined,
-          temperature: temp || undefined, seed: seed === "" ? undefined : Number(seed),
+          model: m, limit, epochs: epochsN, budget_usd: budgetN || undefined,
+          temperature: Number(temp) || undefined, seed: seed === "" ? undefined : Number(seed),
           transcript_sample_rate: keepAll ? 1.0 : undefined,
           mock_output: m.startsWith("mockllm") ? mock : undefined,
         });
@@ -111,7 +118,7 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
                   <div className={`chip ${slice === "subset" ? "on" : ""}`} onClick={() => setSlice("subset")}>subset</div>
                   {slice === "subset" && (
                     <div className="vcenter gap8">
-                      <input className="input" type="number" style={{ width: 110 }} value={subsetN} onChange={(e) => setSubsetN(+e.target.value)} />
+                      <input className="input" type="number" style={{ width: 110 }} value={subsetN} onChange={(e) => setSubsetN(e.target.value)} />
                       <span className="subtle mono" style={{ fontSize: 11 }}>samples</span>
                     </div>
                   )}
@@ -149,16 +156,16 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
               <Section n="4" title="Sampling & budget" hint="Epochs repeat each sample for CIs; the budget cap is a terminal BudgetExceeded signal.">
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 420 }}>
                   <div className="field"><label>Epochs <span className="subtle">(repeat for CIs)</span></label>
-                    <input className="input" type="number" min="1" value={epochs} onChange={(e) => setEpochs(Math.max(1, +e.target.value))} />
+                    <input className="input" type="number" min="1" value={epochs} onChange={(e) => setEpochs(e.target.value)} />
                   </div>
                   <div className="field"><label>Temperature</label>
-                    <input className="input" type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(+e.target.value)} />
+                    <input className="input" type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(e.target.value)} />
                   </div>
                   <div className="field"><label>Seed <span className="subtle">(optional)</span></label>
                     <input className="input" type="number" placeholder="—" value={seed} onChange={(e) => setSeed(e.target.value)} />
                   </div>
                   <div className="field"><label>Budget cap ($)</label>
-                    <input className="input" type="number" value={budget} onChange={(e) => setBudget(+e.target.value)} />
+                    <input className="input" type="number" value={budget} onChange={(e) => setBudget(e.target.value)} />
                   </div>
                 </div>
                 <div className="vcenter gap8" style={{ marginTop: 12 }}>
@@ -178,7 +185,7 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
                     <span className="k">dataset</span><span className="v">{ev?.body.dataset || "—"}</span>
                     <span className="k">harness</span><span className="v">{ev?.body.default_harness?.type || "—"}</span>
                     <span className="k">scorers</span><span className="v">{(ev?.body.default_scorers || []).map((s: any) => s.type).join(", ") || "—"}</span>
-                    <span className="k">slice</span><span className="v">{slice === "full" ? "full" : `subset n=${subsetN}`}{epochs > 1 ? ` · ${epochs}×` : ""}</span>
+                    <span className="k">slice</span><span className="v">{slice === "full" ? "full" : `subset n=${subsetN}`}{epochsN > 1 ? ` · ${epochsN}×` : ""}</span>
                     <span className="k">{mode === "single" ? "target" : "targets"}</span><span className="v">{mode === "single" ? model : `${multi.length} models`}</span>
                   </div>
                 </div>
@@ -189,9 +196,9 @@ export function LaunchDialog({ onClose }: { onClose: () => void }) {
                 <div className="panel-h"><Icon name="gauge" className="ic" /><h2>Estimate</h2></div>
                 <div className="panel-b" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <Est k="runs" v={String(chosen.length)} />
-                  <Est k="slice" v={slice === "full" ? "full" : fmtN(subsetN)} />
-                  <Est k="epochs" v={`${epochs}×`} />
-                  <Est k="budget" v={fmtCost(budget)} />
+                  <Est k="slice" v={slice === "full" ? "full" : fmtN(subsetNum ?? 0)} />
+                  <Est k="epochs" v={`${epochsN}×`} />
+                  <Est k="budget" v={fmtCost(budgetN)} />
                 </div>
               </div>
               {err && <div className="panel" style={{ borderColor: "var(--danger-emph)" }}><div className="panel-b vcenter gap8" style={{ color: "var(--danger)", fontSize: 12 }}><Icon name="warn" size={13} />{err}</div></div>}
