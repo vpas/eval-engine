@@ -47,7 +47,10 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install package + test deps
-        run: pip install -e '.[test]'
+        # `benchmarks` (sympy) is required: the benchmark-suite tests build the `math` scorer, which is
+        # Inspect core's math() — it raises a PrerequisiteError ("pip install sympy") at build time
+        # without it (tests/unit/test_benchmark_*). The other benchmark scorers are dependency-free.
+        run: pip install -e '.[test,benchmarks]'
 
       - name: Wait for ClickHouse
         run: for i in $(seq 1 30); do curl -sf http://localhost:8123/ping && exit 0; sleep 2; done; exit 1
