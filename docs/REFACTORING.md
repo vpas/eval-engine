@@ -169,8 +169,8 @@ imported where needed. Doesn't need to be heavy (a module of module-level consta
 
 ## 8. Two different lazy-init patterns for the two DB clients
 
-- `control.py` uses `_conn()` (thread-local) + a module `init()` guarded by `_init_done`
-  (`control.py:142–210`).
+- `control.py` uses `_conn()` (a `_ConnProxy` over a shared `psycopg_pool` pool) + a module `init()`
+  (applies yoyo migrations) guarded by `_init_done`.
 - `analytics.py` uses `_c()` → `_c_inited()`, a two-function dance where `_c` opens the client and
   `_c_inited` runs the DDL (`analytics.py:48–69`).
 

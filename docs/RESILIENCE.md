@@ -112,10 +112,12 @@ Neon (managed, external — the `eval-pg` secret) gives us storage durability an
 - **Neon autosuspend.** On the free/scale-to-zero tier the compute suspends when idle; the first query
   after idle pays a cold-start (seconds) and can time out. With no retry (§3.3) that surfaces as a
   crash-loop on a freshly-woken cluster.
-- **Connection ceiling.** Every worker *thread* (the lease-renew daemon opens its own thread-local
-  connection — `worker._execute_with_heartbeat`), the orchestrator's dedicated leader connection, the
-  API, and KEDA all open backends. `control.pg_connections()` exists as a gauge but nothing caps usage.
-  Under fan-out this can exhaust Neon's connection limit → new connections refused = partial outage.
+- **Connection ceiling.** ~~Every worker *thread* opens its own thread-local connection~~ — *now bounded:*
+  the storage tier shares one `psycopg_pool.ConnectionPool` per process (`EVAL_ENGINE_PG_POOL_MAX`,
+  default 10), so the worker, its lease-renew daemon, and the API draw from a capped set rather than one
+  backend per thread. The orchestrator's dedicated leader connection still sits outside the pool (a
+  session-scoped advisory lock must own a stable connection). `control.pg_connections()` remains the
+  gauge; per-process usage is now capped, so fan-out can no longer exhaust Neon's limit by thread count.
 
 **Fix:**
 - Point `EVAL_ENGINE_PG_DSN` at Neon's **pooled (PgBouncer) endpoint**, not the direct one — absorbs
@@ -334,10 +336,10 @@ CH-decouple, regional. Dropped: on-demand worker pool.
 ## 9. Remediation backlog (actionable)
 
 **Phase 1 — APPROVED + IMPLEMENTED (decision log §8a: A + B + E + F):**
-- [x] **[A]** Connection-resilience helper in the storage tier: `control._run` (auto-reconnect +
-      bounded-backoff retry on `OperationalError`/`InterfaceError`, idle-ping before reusing a stale
-      connection, via a `_ConnProxy` so call sites are unchanged) and the mirror `analytics._run`
-      (drops + rebuilds the CH client on failure). Covers C's cheap fix too. (§3.3, §4.3.1)
+- [x] **[A]** Connection-resilience helper in the storage tier: `control._run` (bounded-backoff retry
+      on `OperationalError`/`InterfaceError` over a bounded `psycopg_pool` pool that liveness-checks a
+      connection on checkout, behind a `_ConnProxy` so call sites are unchanged) and the mirror
+      `analytics._run` (drops + rebuilds the CH client on failure). Covers C's cheap fix too. (§3.3, §4.3.1)
 - [x] **[B]** `eval-engine-orch` → `replicas: 2` (leader-elected; warm standby) + stale comment removed.
       (§4.2)
 - [x] **[B/D]** Fix the split-brain this exposed: the leader advisory-lock connection now uses a

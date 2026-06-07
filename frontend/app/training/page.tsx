@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { Empty, StatusPill } from "@/components/ui";
@@ -7,15 +7,9 @@ import { getTrainingRuns, ago, fmtN, pct, type TrainingRun } from "@/lib/api";
 
 export default function TrainingList() {
   const router = useRouter();
-  const [runs, setRuns] = useState<TrainingRun[]>([]);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    const load = () => getTrainingRuns().then((r) => { setRuns(r); setLoaded(true); }).catch(() => setLoaded(true));
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
+  const runsQuery = useQuery({ queryKey: ["trainingRuns"], queryFn: getTrainingRuns, refetchInterval: 5000 });
+  const runs: TrainingRun[] = runsQuery.data ?? [];
+  const loaded = !runsQuery.isPending;
 
   return (
     <div className="page wide">

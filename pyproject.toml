@@ -14,8 +14,18 @@ dependencies = [
   "inspect-ai>=0.3.235",
   # storage tier: Postgres control plane + ClickHouse analytics (local: infra/up.sh). Required —
   # there is no in-memory/sqlite stand-in; the package talks to these two backends directly.
-  "psycopg[binary]",
+  # [pool] = psycopg_pool: one bounded connection pool per process (control.py), not a hand-rolled
+  # thread-local connection-per-thread.
+  "psycopg[binary,pool]",
   "clickhouse-connect",
+  # Postgres schema migrations (eval_engine/migrations/*.sql, applied at control.init()) — replaces the
+  # hand-rolled CREATE + idempotent-ALTER string. yoyo's postgres backend speaks psycopg2, hence the
+  # extra binary driver (used only at startup to apply migrations, never on a query path).
+  "yoyo-migrations",
+  "psycopg2-binary",
+  # structured (JSON) logging for GCP Cloud Logging: a `severity` field + jsonPayload instead of a text
+  # line (logs.py; on when EVAL_ENGINE_LOG_JSON or EVAL_ENGINE_GCP_PROJECT is set, text otherwise).
+  "python-json-logger",
   "pydantic>=2",
   "pyyaml",
   "fastapi",
@@ -64,3 +74,8 @@ markers = [
 
 [tool.setuptools]
 packages = ["eval_engine"]
+
+# Ship the SQL migration files inside the wheel/sdist (they're data, not a Python package) so
+# control.init() can find them in a built image, not just an editable source checkout.
+[tool.setuptools.package-data]
+eval_engine = ["migrations/*.sql"]

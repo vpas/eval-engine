@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
@@ -10,22 +11,16 @@ const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
 
 export default function Dashboard() {
   const router = useRouter();
-  const [runs, setRuns] = useState<Run[]>([]);
-  const [me, setMe] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
   const [mine, setMine] = useState(false);
   const [evalF, setEvalF] = useState("all");
   const [sel, setSel] = useState<string[]>([]);
 
-  useEffect(() => {
-    getMe().then((m) => setMe(m.email)).catch(() => {});
-    const load = () => getRuns().then((r) => { setRuns(r); setLoaded(true); }).catch(() => setLoaded(true));
-    load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
-  }, []);
+  const { data: me = null } = useQuery({ queryKey: ["me"], queryFn: () => getMe().then((m) => m.email) });
+  const runsQuery = useQuery({ queryKey: ["runs"], queryFn: getRuns, refetchInterval: 4000 });
+  const runs: Run[] = runsQuery.data ?? [];
+  const loaded = !runsQuery.isPending;
 
   const evalOpts = useMemo(() => ["all", ...Array.from(new Set(runs.map((r) => r.eval)))], [runs]);
 

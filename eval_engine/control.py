@@ -4,11 +4,15 @@ registry and audit log (SCHEMA §1, ORCHESTRATION §4–§10).
 The ledger claim is a real ``FOR UPDATE SKIP LOCKED`` over row locks, so concurrent workers claim
 disjoint shards with no global write lock — the production scheduling primitive (ORCHESTRATION §6).
 
-Connection via ``EVAL_ENGINE_PG_DSN`` (defaults to the local docker Postgres). One autocommit
-connection per thread, so concurrent workers get independent sessions / real row contention.
+Connection via ``EVAL_ENGINE_PG_DSN`` (defaults to the local docker Postgres). The whole process shares
+one bounded ``psycopg_pool.ConnectionPool`` (autocommit) — the library liveness-checks a connection on
+checkout and reconnects a dropped one, so concurrent workers get real, independent, *bounded* sessions
+instead of a hand-rolled thread-local connection-per-thread. The leader-election advisory lock is the
+one exception (a dedicated session-mode connection — see ``acquire_leader``).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -22,7 +26,9 @@ from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
+from . import db_migrate
 from .logs import get_logger
 
 log = get_logger(__name__)
@@ -48,173 +54,70 @@ def _dsn_host() -> str:
     except Exception:  # noqa: BLE001
         return "?"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs(
-  id TEXT PRIMARY KEY, eval_id TEXT, eval_version INT, model TEXT, provider TEXT,
-  model_id TEXT, harness TEXT, scorers JSONB, status TEXT, total INT, done INT, failed INT,
-  accuracy DOUBLE PRECISION, cost_usd DOUBLE PRECISION DEFAULT 0, dataset_hash TEXT, spec_json TEXT,
-  created_by TEXT, team TEXT, image_digest TEXT, lane TEXT, max_inflight INT, provider_fingerprint TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
--- idempotent migrations for tables created before these columns existed
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS team TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS image_digest TEXT;  -- repro pin: worker code/image (DESIGN §14)
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS lane TEXT;          -- interactive | batch (SCHEDULER §2)
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS max_inflight INT;   -- per-run concurrency cap (SCHEDULER §3)
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS provider_fingerprint TEXT;  -- repro pin: resolved model[@system_fingerprint] (DESIGN §14)
--- Training-monitor provenance (docs/TRAINING_MONITOR.md §2): a checkpoint-eval run is an ordinary run
--- TAGGED with the training run / checkpoint / step + a `sweep` group. NULL for every ad-hoc run.
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS training_run_id TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint_id TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS step INT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS sweep TEXT;
-CREATE INDEX IF NOT EXISTS ix_runs_ckpt ON runs(checkpoint_id);
-CREATE INDEX IF NOT EXISTS ix_runs_train ON runs(training_run_id);
 
-CREATE TABLE IF NOT EXISTS sample_tasks(
-  run_id TEXT, sample_id TEXT, status TEXT DEFAULT 'queued', attempts INT DEFAULT 0,
-  claimed_by TEXT, lease_expires_at TIMESTAMPTZ, not_before TIMESTAMPTZ, group_key TEXT,
-  passed INT, primary_score DOUBLE PRECISION, scores JSONB, tokens_in INT, tokens_out INT,
-  cost_usd DOUBLE PRECISION, latency_ms INT, error_type TEXT, transcript_uri TEXT,
-  loaded BOOLEAN DEFAULT false,
-  PRIMARY KEY(run_id, sample_id));
-CREATE INDEX IF NOT EXISTS ix_tasks_claim ON sample_tasks(run_id, status);
-CREATE INDEX IF NOT EXISTS ix_tasks_load ON sample_tasks(run_id) WHERE status='done' AND NOT loaded;
-
-CREATE TABLE IF NOT EXISTS failed_task_archive(
-  run_id TEXT, sample_id TEXT, error_type TEXT, attempts INT,
-  PRIMARY KEY(run_id, sample_id));
-
--- Registered, versioned entities (datasets / evals / models — DESIGN §7, FR1–3). Versions are
--- immutable; re-registering an id mints a new version. One generic table; the shape lives in the body.
-CREATE TABLE IF NOT EXISTS entities(
-  kind TEXT, id TEXT, version INT, body JSONB, created_by TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(kind, id, version));
-
--- Append-only audit log (DESIGN §8/§13): who did what, when. Mutations record an entry.
-CREATE TABLE IF NOT EXISTS audit_log(
-  id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(),
-  actor TEXT, action TEXT, target TEXT, detail JSONB);
-
--- Liveness heartbeats (ops dashboard): the orchestrator + each worker upsert their row every
--- loop, so the otherwise-invisible singleton orchestrator + KEDA-scaled workers become observable
--- WITHOUT coupling to the Kubernetes API (portable by interface — works on EKS/AKS/local too). The
--- ops snapshot derives liveness from the row's age; `detail` carries per-tick metrics (leader id,
--- claims/loop, admit/finalize counts). One row per (component, instance).
-CREATE TABLE IF NOT EXISTS heartbeats(
-  component TEXT, instance TEXT, ts TIMESTAMPTZ DEFAULT now(), detail JSONB,
-  PRIMARY KEY(component, instance));
-
--- ===== Training monitor (docs/TRAINING_MONITOR.md) ========================================
--- A monitored (mocked) training run; MUTABLE (status/current_step advance), so a dedicated table
--- rather than the immutable entity registry. `body` holds the full TrainingRunSpec (suite/config/…).
-CREATE TABLE IF NOT EXISTS training_runs(
-  id TEXT PRIMARY KEY, model TEXT, base TEXT, status TEXT DEFAULT 'watching',
-  current_step INT DEFAULT 0, planned_steps INT, source TEXT, owner TEXT, body JSONB,
-  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), finished_at TIMESTAMPTZ);
-
--- One discovered checkpoint. `model_ref` is the opaque handle we eval; `train_metrics` is the optional
--- trainer telemetry that powers the §8 cross-check. UNIQUE(run,step) makes discovery idempotent.
-CREATE TABLE IF NOT EXISTS checkpoints(
-  id TEXT PRIMARY KEY, training_run_id TEXT, step INT, model_ref TEXT, tokens BIGINT,
-  wall_time TIMESTAMPTZ, status TEXT DEFAULT 'discovered', train_metrics JSONB,
-  discovered_at TIMESTAMPTZ DEFAULT now(), UNIQUE(training_run_id, step));
-CREATE INDEX IF NOT EXISTS ix_ckpt_run ON checkpoints(training_run_id, step);
-
--- Per-(training_run, eval, step) score rollup — the time series the chart + detectors read. Computed
--- at reconcile from the per-checkpoint run's analytics summary (kept in PG so we don't re-query CH).
-CREATE TABLE IF NOT EXISTS checkpoint_scores(
-  training_run_id TEXT, eval_id TEXT, step INT, run_id TEXT, n INT, passed INT,
-  accuracy DOUBLE PRECISION, ci_lo DOUBLE PRECISION, ci_hi DOUBLE PRECISION,
-  sample_errors INT, expected DOUBLE PRECISION,
-  PRIMARY KEY(training_run_id, eval_id, step));
-
--- A detected anomaly + its diagnosis (one per (run,eval,step); a sustained dip collapses to one row).
-CREATE TABLE IF NOT EXISTS anomalies(
-  id TEXT PRIMARY KEY, training_run_id TEXT, eval_id TEXT, step INT, kind TEXT, severity TEXT,
-  delta DOUBLE PRECISION, from_step INT, diagnosis TEXT, cause TEXT, signals JSONB,
-  categories JSONB, samples JSONB, created_at TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(training_run_id, eval_id, step));
-
--- MOCK-ONLY: the checkpoint-ref → real-model resolver (§4). In production the gateway resolves a
--- `checkpoint:…` alias natively; here a small table maps it to an OpenRouter/mock model so the rest of
--- the engine treats the checkpoint as "served by trainer infra" without knowing it's faked.
-CREATE TABLE IF NOT EXISTS checkpoint_models(
-  model_ref TEXT PRIMARY KEY, real_model TEXT, mock_output TEXT, params JSONB);
-"""
-
-_local = threading.local()
-# Process-global, NOT per-connection: the schema is server-side and uses CREATE … IF NOT EXISTS, so it
-# only needs ensuring once per process — a later reconnect (or another thread's connection) skips it,
-# which is correct because the schema already exists server-side. (Same rationale in analytics.py.)
+# Process-global guard: the yoyo migration ledger is server-side, so the schema only needs applying
+# once per process — and concurrent pods are made safe by yoyo's own advisory lock during apply.
 _init_done = False
 
-# Connection resilience (docs/RESILIENCE.md item A). A cached psycopg connection only reports `.closed`
-# on an ORDERLY close; a connection dropped underneath us (Neon failover/cold-start, idle reap, NAT
-# timeout) is NOT `.closed` and raises OperationalError/InterfaceError on the next execute — which, with
-# no try/except in the worker/orchestrator loops, crashes the process. So every query runs through
-# `_run`, which transparently reconnects + retries with bounded backoff; a long-idle connection is also
-# pinged before reuse so a dead socket is detected up front, not as a mid-loop crash.
+# Connection resilience (docs/RESILIENCE.md item A). A connection dropped underneath us (Neon
+# failover/cold-start, idle reap, NAT timeout) raises OperationalError/InterfaceError on the next
+# statement — which, with no try/except in the worker/orchestrator loops, would crash the process. The
+# pool liveness-checks a connection on checkout (so a dead socket is replaced up front, not mid-loop),
+# and `_run` retries the statement with bounded backoff on the rarer mid-statement drop.
 _RETRYABLE = (psycopg.OperationalError, psycopg.InterfaceError)
 _RETRY_TRIES = 3
 _RETRY_BASE_S = 0.2
 _RETRY_CAP_S = 2.0
-_IDLE_PING_S = 30.0
 _T = TypeVar("_T")
 
+# Bounded shared pool (psycopg_pool) — replaces the hand-rolled thread-local connection-per-thread.
+# Size caps total backends per process (important against Neon / PgBouncer connection limits); a
+# worker-per-thread model would otherwise open one connection per thread with no ceiling.
+POOL_MIN = int(os.environ.get("EVAL_ENGINE_PG_POOL_MIN", "1"))
+POOL_MAX = int(os.environ.get("EVAL_ENGINE_PG_POOL_MAX", "10"))
 
-def _new_conn() -> psycopg.Connection:
-    log.debug("opening Postgres connection to host=%s (thread=%s)",
-              _dsn_host(), threading.current_thread().name)
-    con = psycopg.connect(DSN, autocommit=True)
-    _local.con = con
-    _local.last = time.monotonic()
-    _ensure_schema(con)  # ensure once per process on the first connection (idempotent)
-    return con
-
-
-def _drop() -> None:
-    con = getattr(_local, "con", None)
-    if con is not None:
-        try:
-            con.close()
-        except Exception:  # noqa: BLE001
-            pass
-    _local.con = None
+_pool: ConnectionPool | None = None
+_pool_lock = threading.Lock()
 
 
-def _raw() -> psycopg.Connection:
-    """The thread-local connection, (re)opened as needed. A connection idle past `_IDLE_PING_S` is
-    validated with `SELECT 1` and replaced if its socket has gone away, so a stale connection surfaces
-    here rather than as a crash in the caller."""
-    con = getattr(_local, "con", None)
-    if con is not None and not con.closed:
-        if time.monotonic() - getattr(_local, "last", 0.0) > _IDLE_PING_S:
-            try:
-                con.execute("SELECT 1")
-            except Exception:  # noqa: BLE001  stale socket — drop + reconnect below
-                _drop()
-                con = None
-        if con is not None:
-            _local.last = time.monotonic()
-            return con
-    return _new_conn()
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:  # double-checked: first thread to win the lock opens the pool
+                log.debug("opening Postgres pool to host=%s (min=%d max=%d)",
+                          _dsn_host(), POOL_MIN, POOL_MAX)
+                _pool = ConnectionPool(
+                    DSN, min_size=POOL_MIN, max_size=POOL_MAX, name="eval-engine",
+                    kwargs={"autocommit": True}, open=True,
+                    check=ConnectionPool.check_connection,  # liveness-check on checkout
+                )
+    return _pool
+
+
+@contextlib.contextmanager
+def connection():
+    """Check an autocommit connection out of the shared pool for the duration of the block, returning it
+    on exit. The public seam for a multi-statement block (and for tests that need raw SQL)."""
+    with _get_pool().connection() as con:
+        yield con
 
 
 def _run(op: Callable[[psycopg.Connection], _T]) -> _T:
-    """Run ``op(conn)`` with reconnect-on-broken-connection + bounded-backoff retry. Statements are
-    autocommit singletons, so on a dropped connection the in-flight statement never committed and a
-    retry is safe (the realistic trigger — Neon failover/cold-start — refuses/resets the connection
-    before execution). A lost-ack double-apply is possible but benign: ledger writes are idempotent
-    (`commit_result` sets fixed values; `ON CONFLICT` inserts no-op; a re-claim is lease-bounded)."""
+    """Run ``op(conn)`` on a pooled connection with bounded-backoff retry on a dropped backend. Each
+    attempt checks a (liveness-checked) connection out of the pool; on a retryable connection error the
+    pool discards the broken connection on block exit and the next attempt gets a fresh one. Statements
+    are autocommit singletons, so retrying is safe — the in-flight statement never committed (the
+    realistic trigger, Neon failover/cold-start, refuses/resets before execution); a lost-ack
+    double-apply is benign (ledger writes are idempotent: `commit_result` sets fixed values, `ON
+    CONFLICT` inserts no-op, a re-claim is lease-bounded)."""
     last: Exception | None = None
     for i in range(_RETRY_TRIES):
         try:
-            return op(_raw())
+            with _get_pool().connection() as con:
+                return op(con)
         except _RETRYABLE as e:
             last = e
-            _drop()
             if i == _RETRY_TRIES - 1:
                 break
             log.warning("Postgres connection lost (%s) — reconnecting, retry %d/%d",
@@ -224,15 +127,11 @@ def _run(op: Callable[[psycopg.Connection], _T]) -> _T:
 
 
 class _ConnProxy:
-    """What ``_conn()`` returns: routes ``.execute()`` / ``.cursor()`` through ``_run`` so every call
-    site gets transparent reconnect + retry without touching the (many) call sites. ``.execute`` is the
-    hot path; ``.cursor`` opens on a live connection (its sole user, ``_dict_rows`` / ``expand_tasks``,
-    wraps the whole cursor block in ``_run`` itself for retry coverage)."""
+    """What ``_conn()`` returns: routes ``.execute()`` through ``_run`` so every call site gets a pooled
+    connection + transparent reconnect/retry without touching the (many) call sites. Multi-statement
+    blocks use ``connection()`` / ``_dict_rows`` directly (each wraps its block in ``_run``)."""
     def execute(self, query, params=None):
         return _run(lambda c: c.execute(query, params))
-
-    def cursor(self, **kw):
-        return _raw().cursor(**kw)
 
 
 _proxy = _ConnProxy()
@@ -240,14 +139,6 @@ _proxy = _ConnProxy()
 
 def _conn() -> psycopg.Connection:
     return _proxy  # type: ignore[return-value]  # proxy quacks like a Connection for our call sites
-
-
-def _ensure_schema(con: psycopg.Connection) -> None:
-    global _init_done
-    if not _init_done:
-        con.execute(SCHEMA)
-        _init_done = True
-        log.info("Postgres schema ensured (host=%s)", _dsn_host())
 
 
 def _dict_rows(sql: str, params=()) -> list[dict]:
@@ -365,9 +256,14 @@ def run_as_leader(key: int, tick: Callable[[], None], *, tick_seconds: float, st
 
 
 def init() -> None:
-    """Ensure the schema early (process startup) — fail-fast + the API's reachability retry loop.
-    Idempotent; ``_conn()`` also ensures lazily, so a query before init() still works."""
-    _ensure_schema(_conn())
+    """Apply the Postgres schema migrations (yoyo) at process startup — fail-fast + the API's
+    reachability retry loop. Idempotent: yoyo's migration ledger means each file runs once, and its
+    advisory lock makes concurrent pod startups safe."""
+    global _init_done
+    if not _init_done:
+        db_migrate.apply(DSN)
+        _init_done = True
+        log.info("Postgres schema migrated (host=%s)", _dsn_host())
 
 
 def new_run_id() -> str:

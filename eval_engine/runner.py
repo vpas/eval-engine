@@ -32,6 +32,14 @@ from .models import RunSpec
 
 log = get_logger(__name__)
 
+
+def _utcnow() -> datetime.datetime:
+    """Naive UTC timestamp for the ClickHouse ``DateTime`` column. ``datetime.utcnow()`` is deprecated
+    (3.12+); the recommended replacement is a tz-aware ``now(utc)`` reduced back to naive UTC — same
+    bytes on the wire for the column, no deprecation warning."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 TRANSCRIPTS = control.DATA / "transcripts"  # local object-store stand-in (dev)
 GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → transcripts go to GCS
 # Inspect's rich `.eval` logs go to GCS too (so the Inspect log viewer can read them); local in dev.
@@ -204,7 +212,7 @@ def commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str]
     if good:
         attempts = control.attempts_for(run_id, list(good))  # ledger version for ReplacingMergeTree
         provider, model_id = _split_model(spec.model)
-        fin = datetime.datetime.utcnow()
+        fin = _utcnow()
         tuples = [
             analytics.make_row(
                 run_id=run_id, sample_id=sid, eval_id=spec.eval, eval_version=spec.eval_version,
@@ -352,7 +360,7 @@ def batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> None
     single-process runner passes ``None`` and drains everything unloaded.
     """
     provider, model_id = _split_model(spec.model)
-    fin = datetime.datetime.utcnow()
+    fin = _utcnow()
     rows = control.fetch_unloaded(run_id, ids)
     if not rows:
         return

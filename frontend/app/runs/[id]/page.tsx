@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { AccBar, Empty, Progress, Provider, StatusPill } from "@/components/ui";
@@ -9,45 +10,46 @@ import {
 } from "@/lib/api";
 
 const ACTIVE = new Set(["queued", "expanding", "running", "finalizing"]);
+// Keep polling only while the run is still active; a terminal run's row never changes again.
+const activePoll = (status?: string) => (status && ACTIVE.has(status) ? 2500 : false);
 
 export default function RunPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [run, setRun] = useState<RunDetail | null>(null);
-  const [res, setRes] = useState<Results | null>(null);
+  const qc = useQueryClient();
   const [openSample, setOpenSample] = useState<Results["samples"][number] | null>(null);
-  const [logsUrl, setLogsUrl] = useState<string | null>(null);
-  const [live, setLive] = useState<RunLive | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [actionErr, setActionErr] = useState<string | null>(null);
 
-  useEffect(() => { getRunLogsUrl(id).then((r) => setLogsUrl(r.url)).catch(() => {}); }, [id]);
+  const logsQuery = useQuery({ queryKey: ["runLogsUrl", id], queryFn: () => getRunLogsUrl(id) });
+  const runQuery = useQuery({
+    queryKey: ["run", id],
+    queryFn: () => getRun(id),
+    refetchInterval: (q) => activePoll(q.state.data?.status),
+  });
+  const run = runQuery.data ?? null;
+  const isActive = ACTIVE.has(run?.status ?? "");
 
-  useEffect(() => {
-    let stop = false;
-    const load = async () => {
-      try {
-        const r = await getRun(id);
-        if (stop) return;
-        setRun(r);
-        if (ACTIVE.has(r.status)) {
-          getRunLive(id).then((x) => !stop && setLive(x)).catch(() => {});
-        } else {
-          getResults(id).then((x) => !stop && setRes(x)).catch(() => {});
-        }
-      } catch (e: any) {
-        setErr(String(e?.message || e));
-      }
-    };
-    load();
-    const t = setInterval(load, 2500);
-    return () => { stop = true; clearInterval(t); };
-  }, [id]);
+  // Dependent queries: while active poll the live ledger view; once terminal fetch the analysis once.
+  const liveQuery = useQuery({
+    queryKey: ["runLive", id],
+    queryFn: () => getRunLive(id),
+    enabled: isActive,
+    refetchInterval: () => activePoll(run?.status),
+  });
+  const resQuery = useQuery({
+    queryKey: ["runResults", id],
+    queryFn: () => getResults(id),
+    enabled: !!run && !isActive,
+  });
+  const logsUrl = logsQuery.data?.url ?? null;
+  const live = liveQuery.data ?? null;
+  const res = resQuery.data ?? null;
+  const err = actionErr ?? (runQuery.error ? String((runQuery.error as any)?.message || runQuery.error) : null);
 
   if (err) return <div className="page"><Empty icon="warn">{err}</Empty></div>;
   if (!run) return <div className="page"><Empty icon="pulse"><span className="spin" /> loading run…</Empty></div>;
 
-  const isActive = ACTIVE.has(run.status);
   const p = run.progress || {};
 
   const rerun = async () => {
@@ -58,12 +60,12 @@ export default function RunPage() {
   const cancel = async () => {
     if (!confirm(`Cancel run ${run.id}?\n\nQueued samples are skipped; any in-flight samples finish. This can't be undone.`)) return;
     setCancelling(true);
-    setErr(null);
+    setActionErr(null);
     try {
       await cancelRun(id);
-      setRun(await getRun(id));   // reflect 'cancelled' immediately (the poll loop also catches up)
+      qc.invalidateQueries({ queryKey: ["run", id] });   // reflect 'cancelled' immediately (the poll also catches up)
     } catch (e: any) {
-      setErr(String(e?.message || e));
+      setActionErr(String(e?.message || e));
     } finally {
       setCancelling(false);
     }
@@ -422,14 +424,11 @@ function Histogram({ bins }: { bins: number[] }) {
 }
 
 function TranscriptDrawer({ sample, onClose }: { sample: Results["samples"][number]; onClose: () => void }) {
-  const [body, setBody] = useState<any>(null);
-  const [raw, setRaw] = useState<string>("");
-  useEffect(() => {
-    getTranscript(sample.transcript_uri).then((t) => {
-      setRaw(t);
-      try { setBody(JSON.parse(t)); } catch { setBody(null); }
-    }).catch((e) => setRaw(String(e)));
-  }, [sample.transcript_uri]);
+  const { data: raw = "" } = useQuery({
+    queryKey: ["transcript", sample.transcript_uri],
+    queryFn: () => getTranscript(sample.transcript_uri).catch((e) => String(e)),
+  });
+  const body = useMemo(() => { try { return JSON.parse(raw); } catch { return null; } }, [raw]);
 
   // Deep-link into the embedded Inspect viewer for THIS sample's .eval log. The viewer is launched
   // with `--log-dir gs://…/eval-logs`, and its client expects a RELATIVE basename (no scheme/`//`, so

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { Empty } from "@/components/ui";
@@ -56,19 +56,10 @@ const METRIC_LABEL: Record<string, string> = {
 
 export default function OpsDashboard() {
   const router = useRouter();
-  const [s, setS] = useState<OpsStatus | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [err, setErr] = useState(false);
+  const { data: s, isPending, isError } = useQuery({ queryKey: ["ops"], queryFn: getOps, refetchInterval: 4000 });
 
-  useEffect(() => {
-    const load = () => getOps().then((d) => { setS(d); setLoaded(true); setErr(false); }).catch(() => { setLoaded(true); setErr(true); });
-    load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
-  }, []);
-
-  if (!loaded) return <div className="page wide"><Empty icon="activity"><span className="spin" /> probing systems…</Empty></div>;
-  if (err || !s) return <div className="page wide"><Empty icon="warn">Couldn’t reach the control plane (<span className="mono">/be/ops/status</span>).</Empty></div>;
+  if (isPending) return <div className="page wide"><Empty icon="activity"><span className="spin" /> probing systems…</Empty></div>;
+  if (isError || !s) return <div className="page wide"><Empty icon="warn">Couldn’t reach the control plane (<span className="mono">/be/ops/status</span>).</Empty></div>;
 
   const q = s.queues;
   const inflight = (q.ledger.running || 0);

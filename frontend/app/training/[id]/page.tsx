@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/icons";
 import { Empty, StatusPill } from "@/components/ui";
@@ -18,32 +19,41 @@ type Drill = { type: "anomaly"; anomaly: Anomaly } | { type: "checkpoint"; idx: 
 export default function TrainingDetail() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [run, setRun] = useState<TrainingRun | null>(null);
-  const [series, setSeries] = useState<Record<string, ScorePoint[]>>({});
-  const [ckpts, setCkpts] = useState<Checkpoint[]>([]);
-  const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
+  const qc = useQueryClient();
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [xMode, setXMode] = useState<"steps" | "tokens">("steps");
   const [showLoss, setShowLoss] = useState(true);
   const [showBand, setShowBand] = useState(false);
   const [thrPP, setThrPP] = useState(1.5);
   const [drill, setDrill] = useState<Drill | null>(null);
-  const [scanning, setScanning] = useState(false);
 
+  // The run/series/checkpoints/anomalies all advance together as the monitor evaluates new checkpoints,
+  // so each polls on the same 5s cadence; react-query keeps the last good data on screen between ticks.
+  const poll = { refetchInterval: 5000 };
+  const runQuery = useQuery({ queryKey: ["training", id], queryFn: () => getTrainingRun(id), ...poll });
+  const seriesQuery = useQuery({ queryKey: ["trainingSeries", id], queryFn: () => getSeries(id), ...poll });
+  const ckptsQuery = useQuery({ queryKey: ["trainingCkpts", id], queryFn: () => getCheckpoints(id), ...poll });
+  const anomQuery = useQuery({ queryKey: ["trainingAnomalies", id], queryFn: () => getAnomalies(id), ...poll });
+  const run = runQuery.data ?? null;
+  const series: Record<string, ScorePoint[]> = seriesQuery.data ?? {};
+  const ckpts: Checkpoint[] = ckptsQuery.data ?? [];
+  const anomalies: Anomaly[] = anomQuery.data ?? [];
+
+  // Default every eval in the suite to visible once the run first loads; the user toggles thereafter.
   useEffect(() => {
-    let stop = false;
-    const load = async () => {
-      try {
-        const [r, s, c, a] = await Promise.all([getTrainingRun(id), getSeries(id), getCheckpoints(id), getAnomalies(id)]);
-        if (stop) return;
-        setRun(r); setSeries(s); setCkpts(c); setAnomalies(a);
-        setVisible((prev) => (prev.size ? prev : new Set((r.body?.suite || []).map((e) => e.eval))));
-      } catch { /* ignore */ }
-    };
-    load();
-    const t = setInterval(load, 5000);
-    return () => { stop = true; clearInterval(t); };
-  }, [id]);
+    if (run) setVisible((prev) => (prev.size ? prev : new Set((run.body?.suite || []).map((e) => e.eval))));
+  }, [run]);
+
+  // "Scan now" forces the monitor to poll the checkpoint stream; on settle, re-fetch the four queries.
+  const scan = useMutation({
+    mutationFn: () => scanTraining(id),
+    onSettled: () => {
+      for (const k of ["training", "trainingSeries", "trainingCkpts", "trainingAnomalies"]) {
+        qc.invalidateQueries({ queryKey: [k, id] });
+      }
+    },
+  });
+  const scanning = scan.isPending;
 
   const track: Track[] = useMemo(() => {
     const suite = run?.body?.suite || Object.keys(series).map((eval_) => ({ eval: eval_ }));
@@ -79,8 +89,6 @@ export default function TrainingDetail() {
   const trainPct = run.planned_steps ? run.current_step / run.planned_steps : 0;
   const toggleEval = (e: string) => setVisible((s) => { const n = new Set(s); n.has(e) ? n.delete(e) : n.add(e); return n; });
 
-  const scan = async () => { setScanning(true); try { await scanTraining(id); } finally { setScanning(false); } };
-
   return (
     <div className="page wide">
       <button className="btn ghost sm" onClick={() => router.push("/training")} style={{ marginBottom: 14 }}><Icon name="arrowleft" />all training runs</button>
@@ -101,7 +109,7 @@ export default function TrainingDetail() {
             </div>
             <div className="vcenter gap8">
               <button className="btn sm" disabled={!checkpoints.length} onClick={() => setDrill({ type: "checkpoint", idx: checkpoints.length - 1 })}><Icon name="slice" />Latest checkpoint</button>
-              <button className="btn sm" onClick={scan} disabled={scanning}><Icon name="refresh" />{scanning ? "scanning…" : "Scan now"}</button>
+              <button className="btn sm" onClick={() => scan.mutate()} disabled={scanning}><Icon name="refresh" />{scanning ? "scanning…" : "Scan now"}</button>
             </div>
           </div>
 

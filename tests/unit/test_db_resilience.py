@@ -5,11 +5,21 @@ connection has been dropped underneath us (Neon failover/cold-start, idle reap, 
 letting the OperationalError/InterfaceError propagate and crash the worker/orchestrator loop. They must
 also NOT retry an unrelated error (a real query/programming bug), which retrying would only mask + slow.
 """
+import contextlib
+
 import psycopg
 import pytest
 from clickhouse_connect.driver.exceptions import OperationalError as CHOperationalError
 
 from eval_engine import analytics, control
+
+
+class _FakePool:
+    """Stand-in for the psycopg_pool ConnectionPool: ``.connection()`` hands out a dummy connection per
+    checkout (a fresh one each attempt, mirroring how the real pool replaces a dropped connection)."""
+    @contextlib.contextmanager
+    def connection(self):
+        yield object()
 
 
 @pytest.fixture(autouse=True)
@@ -22,10 +32,9 @@ def _no_backoff_sleep(monkeypatch):
 # --------------------------------------------------------------------------- control (Postgres)
 
 def test_control_run_reconnects_and_retries(monkeypatch):
-    # A dropped connection on the first attempt → drop + reconnect + retry → second attempt succeeds.
-    monkeypatch.setattr(control, "_raw", lambda: object())
-    dropped = []
-    monkeypatch.setattr(control, "_drop", lambda: dropped.append(True))
+    # A dropped connection on the first attempt → the pool hands out a fresh connection on retry → the
+    # second attempt succeeds. (The pool discards the broken connection on block exit; _run just retries.)
+    monkeypatch.setattr(control, "_get_pool", lambda: _FakePool())
     n = {"calls": 0}
 
     def op(_con):
@@ -35,13 +44,12 @@ def test_control_run_reconnects_and_retries(monkeypatch):
         return "ok"
 
     assert control._run(op) == "ok"
-    assert n["calls"] == 2 and dropped == [True]  # reconnected exactly once
+    assert n["calls"] == 2  # retried exactly once on the dropped connection
 
 
 def test_control_run_gives_up_after_max_tries(monkeypatch):
     # A persistently-dead connection still surfaces the error (bounded retries, then re-raise).
-    monkeypatch.setattr(control, "_raw", lambda: object())
-    monkeypatch.setattr(control, "_drop", lambda: None)
+    monkeypatch.setattr(control, "_get_pool", lambda: _FakePool())
     n = {"calls": 0}
 
     def op(_con):
@@ -55,8 +63,7 @@ def test_control_run_gives_up_after_max_tries(monkeypatch):
 
 def test_control_run_does_not_retry_unrelated_errors(monkeypatch):
     # A real query/programming bug is not a connection problem — propagate immediately, don't mask it.
-    monkeypatch.setattr(control, "_raw", lambda: object())
-    monkeypatch.setattr(control, "_drop", lambda: None)
+    monkeypatch.setattr(control, "_get_pool", lambda: _FakePool())
     n = {"calls": 0}
 
     def op(_con):
