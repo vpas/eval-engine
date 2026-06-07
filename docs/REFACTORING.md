@@ -1,5 +1,30 @@
 # Refactoring findings
 
+## Status — addressed
+
+All findings below have been implemented on `worktree-observability`, one commit per item:
+
+| Item | Commit | Note |
+|---|---|---|
+| §1 CLI broken by column drift | `fix(cli): read rows by name…` | + new `tests/unit/test_cli.py` regression |
+| §2 positional column coupling | (same commit as §1) | dict rows in control; NamedTuples in analytics |
+| §4 duplicated insert tuple | `refactor(runner): single canonical builder…` | `analytics.make_row` |
+| §7 `_model_for` redundancy | `refactor(runner): wire _model_for…` | now used in the execute path |
+| §3 private execution API | `refactor(runner): make … API public` | `execute_batch`/`commit_batch`/… |
+| §5 duplicated leader loop | `refactor: extract shared leader-election loop` | `control.run_as_leader` |
+| §9 scorer boilerplate | `refactor(builtins): collapse … boilerplate` | `_simple_scorer` |
+| §9a sandbox config dup | `refactor(builtins): share sandbox config` | `SandboxConfig` base |
+| §10 auth param + nits | `refactor(api): consistent auth identity param…` | + cancel_run via `auth_email`, `get_model_entity`, `_dsn_host` import |
+| §6 duplicated env constants | `refactor: centralize … in config.py` | new `config.py` |
+| §8/§8a DB init shapes | `refactor: align the two DB clients…` | both lazy-ensure; flag documented |
+
+**Intentionally not done:** §10's swebench pytest-parser dedup — left as-is to keep the vendored
+SWE-bench parsers close to their MIT source (the doc rated it low priority for that reason).
+
+The sections below are the original findings, kept as the rationale record.
+
+---
+
 A read-through of `eval_engine/` (≈4.9k LOC of Python) looking for duplication, fragile coupling,
 dead code, and consistency drift. Findings are grouped by theme and ordered roughly by payoff.
 Each item cites `file:line` and proposes a concrete change. Nothing here changes behaviour by
