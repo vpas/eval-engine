@@ -26,7 +26,6 @@ RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
 COPY eval_engine/ ./eval_engine/
-COPY static/ ./static/
 COPY examples/ ./examples/
 COPY deploy/sandbox/ ./deploy/sandbox/
 RUN pip install -e '.[openrouter,gcs,k8s,ops,benchmarks]' --no-deps

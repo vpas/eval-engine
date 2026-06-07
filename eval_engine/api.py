@@ -13,10 +13,9 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import Response
 
 from . import builtins, db, ops, plugins, runner, training  # noqa: F401  populate registry
 from .db import analytics, control
@@ -55,7 +54,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="eval-engine", version="0.1.0-prototype", lifespan=lifespan)
-_UI = Path(__file__).resolve().parent.parent / "static" / "index.html"
 
 
 def auth_email(
@@ -70,11 +68,6 @@ def auth_email(
     deployments). Absent on the internal/port-forward path. (The parameter names ARE the bound header
     names — don't rename them.)"""
     return x_forwarded_email or x_auth_request_email
-
-
-@app.get("/", response_class=HTMLResponse)
-def ui():
-    return _UI.read_text()
 
 
 @app.get("/healthz")
