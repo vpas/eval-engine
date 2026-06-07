@@ -201,15 +201,17 @@ def _commit_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
         attempts = control.attempts_for(run_id, list(good))  # ledger version for ReplacingMergeTree
         provider, model_id = _split_model(spec.model)
         fin = datetime.datetime.utcnow()
-        tuples = []
-        for sid, r in good.items():
-            gk = (samples_by_id[sid].metadata or {}).get("category", "") if sid in samples_by_id else ""
-            tuples.append((
-                run_id, sid, spec.eval, spec.eval_version, provider, model_id, spec.harness.type, gk or "",
-                r["passed"], r["primary_score"], json.dumps(r["scores"]), r["tokens_in"],
-                r["tokens_out"], r["cost_usd"], r["latency_ms"], attempts.get(sid, 1),
-                r["error_type"] or "", r["transcript_uri"] or "", "none", fin,
-            ))
+        tuples = [
+            analytics.make_row(
+                run_id=run_id, sample_id=sid, eval_id=spec.eval, eval_version=spec.eval_version,
+                provider=provider, model_id=model_id, harness_type=spec.harness.type,
+                group_key=(samples_by_id[sid].metadata or {}).get("category", "") if sid in samples_by_id else "",
+                passed=r["passed"], primary_score=r["primary_score"], scores=r["scores"],
+                tokens_in=r["tokens_in"], tokens_out=r["tokens_out"], cost_usd=r["cost_usd"],
+                latency_ms=r["latency_ms"], attempt=attempts.get(sid, 1), error_type=r["error_type"],
+                transcript_uri=r["transcript_uri"], finished_at=fin)
+            for sid, r in good.items()
+        ]
         analytics.insert(tuples)                        # (1) DURABLE insert — happens BEFORE the flip
         for sid, r in good.items():
             control.commit_result(run_id, sid, r)       # (2) now flip the ledger row to 'done'
@@ -354,12 +356,12 @@ def _batch_load(run_id: str, spec: RunSpec, ids: list[str] | None = None) -> Non
     tuples, ids = [], []
     for (sid, gk, passed, prim, scores, tin, tout, cost, lat, err, uri, attempt) in rows:
         ids.append(sid)
-        scores_json = scores if isinstance(scores, str) else json.dumps(scores)  # PG JSONB → dict
-        tuples.append((
-            run_id, sid, spec.eval, spec.eval_version, provider, model_id, spec.harness.type, gk or "",
-            passed, prim, scores_json, tin, tout, cost, lat, attempt, err or "", uri or "",
-            "none", fin,
-        ))
+        tuples.append(analytics.make_row(  # scores may be a dict (PG JSONB) — make_row serializes it
+            run_id=run_id, sample_id=sid, eval_id=spec.eval, eval_version=spec.eval_version,
+            provider=provider, model_id=model_id, harness_type=spec.harness.type, group_key=gk,
+            passed=passed, primary_score=prim, scores=scores, tokens_in=tin, tokens_out=tout,
+            cost_usd=cost, latency_ms=lat, attempt=attempt, error_type=err, transcript_uri=uri,
+            finished_at=fin))
     analytics.insert(tuples)
     control.mark_loaded(run_id, ids)
 

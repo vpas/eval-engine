@@ -6,6 +6,7 @@ via ``EVAL_ENGINE_CH_*`` env (defaults to the local docker ClickHouse).
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 from typing import NamedTuple
@@ -87,6 +88,29 @@ _COLUMNS = [
 # only once the data is durable. This preserves the ack-before-flip invariant (the ledger flips to
 # 'done' only after a durable analytics write); it just changes how the server lands the bytes.
 _INSERT_SETTINGS = {"async_insert": 1, "wait_for_async_insert": 1}
+
+
+def make_row(*, run_id, sample_id, eval_id, eval_version, provider, model_id, harness_type,
+             group_key, passed, primary_score, scores, tokens_in, tokens_out, cost_usd,
+             latency_ms, attempt, error_type, transcript_uri, finished_at,
+             review_status="none") -> tuple:
+    """Build one ``sample_results`` row in canonical ``_COLUMNS`` order. Both the commit path and the
+    batch-loader insert the same projection from different sources (a result dict vs. a ledger row);
+    this is the single place that knows the field→column layout, so a schema change touches one
+    builder, not two hand-aligned 20-tuples. Ordering by ``_COLUMNS`` (not literal position) means
+    adding a column can't silently shift a value. ``scores`` accepts a dict or an already-serialized
+    string (PG JSONB comes back as a dict)."""
+    vals = {
+        "run_id": run_id, "sample_id": sample_id, "eval_id": eval_id, "eval_version": eval_version,
+        "provider": provider, "model_id": model_id, "harness_type": harness_type,
+        "group_key": group_key or "", "passed": passed, "primary_score": primary_score,
+        "scores": scores if isinstance(scores, str) else json.dumps(scores),
+        "tokens_in": tokens_in, "tokens_out": tokens_out, "cost_usd": cost_usd,
+        "latency_ms": latency_ms, "attempt": attempt, "error_type": error_type or "",
+        "transcript_uri": transcript_uri or "", "review_status": review_status,
+        "finished_at": finished_at,
+    }
+    return tuple(vals[c] for c in _COLUMNS)
 
 
 def insert(rows: list[tuple]) -> None:
