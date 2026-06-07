@@ -25,7 +25,10 @@ import sys
 import time
 
 from . import db, runner
+from .logs import get_logger
 from .models import RunSpec
+
+log = get_logger(__name__)
 
 TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
 LEADER_KEY = 0x6576616C  # 'eval' — the advisory-lock key so only one orchestrator ticks at a time
@@ -56,7 +59,7 @@ def _admit() -> None:
         if lane == "interactive" or n_running < batch_ceiling:
             db.control.set_status(run_id, "running")
             n_running += 1
-            print(f"[orch] admitted {run_id} (lane={lane})", flush=True)
+            log.info("admitted %s (lane=%s) — now %d/%d running", run_id, lane, n_running, GLOBAL_MAX_RUNNING)
 
 
 POD = os.environ.get("HOSTNAME", f"orch-{os.getpid()}")  # pod name in K8s → unique instance id
@@ -78,15 +81,18 @@ def tick() -> None:
         # Workers also enforce this (stop claiming early); the orchestrator is the authoritative sweep.
         skipped = runner._enforce_budget(run_id, spec)
         if skipped:
-            print(f"[orch] {run_id} hit budget ${spec.budget_usd:.6f} → skipped {skipped} queued "
-                  f"(budget_exceeded)", flush=True)
+            log.warning("%s hit budget $%.6f → skipped %d queued (budget_exceeded)",
+                        run_id, spec.budget_usd, skipped)
         total = db.control.run_total(run_id)
         c = db.control.counts(run_id)
         terminal = c.get("done", 0) + c.get("failed", 0) + c.get("budget_skipped", 0)
+        log.debug("reconcile %s: %d/%d terminal (done=%d failed=%d skipped=%d queued=%d running=%d)",
+                  run_id, terminal, total, c.get("done", 0), c.get("failed", 0),
+                  c.get("budget_skipped", 0), c.get("queued", 0), c.get("running", 0))
         if total > 0 and terminal >= total and c.get("queued", 0) == 0 and c.get("running", 0) == 0:
             runner._batch_load(run_id, spec)  # safety sweep: ensure all done rows are in analytics
             done, failed, acc = runner._finalize(run_id, spec)
-            print(f"[orch] finalized {run_id}: done={done} failed={failed} acc={acc:.3f}", flush=True)
+            log.info("finalized %s: done=%d failed=%d acc=%.3f", run_id, done, failed, acc)
 
     # Liveness for the ops dashboard: make the leader-elected singleton observable without the k8s
     # API (the standby reports leader=false from its loop below). detail carries this tick's signals.
@@ -102,7 +108,7 @@ def tick() -> None:
 def _graceful_shutdown(*_) -> None:
     """SIGTERM (k8s pod delete / rollout): release the leader lock so the next pod takes over in ~1s
     instead of stalling until our pooled connection times out (bug B1)."""
-    print("[orch] SIGTERM — releasing leadership", flush=True)
+    log.warning("SIGTERM — releasing leadership")
     db.control.release_leader(LEADER_KEY)
     sys.exit(0)
 
@@ -114,17 +120,18 @@ def main() -> None:
     # replica is safe (only the leader ticks). A standby takes over when the leader's lock releases —
     # either gracefully (SIGTERM handover) or, if the old leader died ungracefully, by reaping its
     # lingering pooled connection once it's been idle past the threshold (bug B1).
+    log.info("starting (pod=%s) — contending for leadership", POD)
     while not db.control.acquire_leader(LEADER_KEY):
         if db.control.reap_stale_leader(LEADER_KEY, STALE_LEADER_SECONDS):
-            print("[orch] reaped a stale leader (lingering lock) — retrying for leadership", flush=True)
+            log.warning("reaped a stale leader (lingering lock) — retrying for leadership")
             continue
-        print("[orch] standby — another orchestrator holds leadership", flush=True)
+        log.info("standby — another orchestrator holds leadership")
         db.control.heartbeat("orchestrator", POD, {"leader": False})  # visible as a standby
         time.sleep(5)
-    print("[orch] up, leader", flush=True)
+    log.info("up, leader (pod=%s) — tick=%.1fs, global_max_running=%d", POD, TICK_SECONDS, GLOBAL_MAX_RUNNING)
     while True:
         if not db.control.leader_alive():
-            print("[orch] lost leadership; exiting to re-contend", flush=True)
+            log.warning("lost leadership; exiting to re-contend")
             return  # k8s restarts the pod → it re-enters as a standby
         tick()
         time.sleep(TICK_SECONDS)

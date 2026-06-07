@@ -17,6 +17,10 @@ from pathlib import Path
 
 import psycopg
 
+from .logs import get_logger
+
+log = get_logger(__name__)
+
 DATA = Path(".data")  # transcripts still land on the object-store stand-in
 DATA.mkdir(exist_ok=True)
 
@@ -24,6 +28,11 @@ DSN = os.environ.get(
     "EVAL_ENGINE_PG_DSN",
     "host=localhost port=5433 dbname=evalengine user=evalengine password=evalengine",
 )
+
+
+def _dsn_host() -> str:
+    """host=… token from the DSN for logs — never the password (DSN carries credentials)."""
+    return next((tok.split("=", 1)[1] for tok in DSN.split() if tok.startswith("host=")), "?")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs(
@@ -128,6 +137,8 @@ _init_done = False
 def _conn() -> psycopg.Connection:
     con = getattr(_local, "con", None)
     if con is None or con.closed:
+        log.debug("opening Postgres connection to host=%s (thread=%s)",
+                  _dsn_host(), threading.current_thread().name)
         con = psycopg.connect(DSN, autocommit=True)
         _local.con = con
     return con
@@ -188,6 +199,7 @@ def init() -> None:
     if not _init_done:
         _conn().execute(SCHEMA)
         _init_done = True
+        log.info("Postgres schema ensured (host=%s)", _dsn_host())
 
 
 def new_run_id() -> str:

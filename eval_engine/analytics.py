@@ -11,6 +11,10 @@ import os
 
 import clickhouse_connect
 
+from .logs import get_logger
+
+log = get_logger(__name__)
+
 # HA (#16): when EVAL_ENGINE_CH_CLUSTER is set the table is created ON CLUSTER with the *Replicated*
 # engine, so every ClickHouse replica holds a copy (Keeper-coordinated) and a replica loss doesn't lose
 # results. Unset (dev/CI single node) ⇒ the plain ReplacingMergeTree — identical DDL to before, so
@@ -44,8 +48,10 @@ _init_done = False
 def _c():
     global _client
     if _client is None:
+        host = os.environ.get("EVAL_ENGINE_CH_HOST", "localhost")
+        log.debug("opening ClickHouse client to host=%s (cluster=%s)", host, CH_CLUSTER or "-")
         _client = clickhouse_connect.get_client(
-            host=os.environ.get("EVAL_ENGINE_CH_HOST", "localhost"),
+            host=host,
             port=int(os.environ.get("EVAL_ENGINE_CH_PORT", "8123")),
             username=os.environ.get("EVAL_ENGINE_CH_USER", "default"),
             password=os.environ.get("EVAL_ENGINE_CH_PASSWORD", ""),
@@ -58,6 +64,8 @@ def _c_inited():
     if not _init_done:
         _client.command(_ddl())
         _init_done = True
+        log.info("ClickHouse schema ensured (host=%s, cluster=%s)",
+                 os.environ.get("EVAL_ENGINE_CH_HOST", "localhost"), CH_CLUSTER or "-")
     return _client
 
 
@@ -85,6 +93,7 @@ def insert(rows: list[tuple]) -> None:
         return
     _c().insert("sample_results", [list(r) for r in rows], column_names=_COLUMNS,
                 settings=_INSERT_SETTINGS)
+    log.debug("inserted %d sample row(s) into ClickHouse (run_id=%s)", len(rows), rows[0][0])
 
 
 def _q(sql, params=None):

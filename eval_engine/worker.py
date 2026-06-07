@@ -15,7 +15,10 @@ import time
 
 from . import db, runner
 from .datasets import load_jsonl
+from .logs import get_logger
 from .models import RunSpec
+
+log = get_logger(__name__)
 
 POLL_SECONDS = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
 WORKER_ID = os.environ.get("HOSTNAME", f"w-{os.getpid()}")  # pod name in K8s → unique claimer id
@@ -35,7 +38,7 @@ _STOP = False
 def _graceful_shutdown(*_) -> None:
     global _STOP
     _STOP = True
-    print(f"[worker {WORKER_ID}] SIGTERM — draining: finishing current batch, no new claims", flush=True)
+    log.warning("[%s] SIGTERM — draining: finishing current batch, no new claims", WORKER_ID)
 
 
 def _execute_with_heartbeat(spec, run_id: str, samples_by_id: dict, ids: list[str]) -> dict:
@@ -49,8 +52,9 @@ def _execute_with_heartbeat(spec, run_id: str, samples_by_id: dict, ids: list[st
         while not stop.wait(LEASE_RENEW_SECONDS):
             try:
                 db.control.renew_lease(run_id, ids, WORKER_ID)
+                log.debug("[%s] run_id=%s renewed lease on %d task(s)", WORKER_ID, run_id, len(ids))
             except Exception:  # noqa: BLE001  a transient renew failure just risks one early reclaim
-                pass
+                log.debug("[%s] run_id=%s lease renew failed (will retry)", WORKER_ID, run_id)
 
     t = threading.Thread(target=beat, name=f"lease-{run_id}", daemon=True)
     t.start()
@@ -77,10 +81,15 @@ def _drain_run(run_id: str) -> int:
         if not ids:
             return processed
         # run_id in the log line so the ops dashboard's per-run "worker logs" deep link matches.
-        print(f"[worker {WORKER_ID}] run_id={run_id} claimed {len(ids)}", flush=True)
+        log.info("[%s] run_id=%s claimed %d sample(s)", WORKER_ID, run_id, len(ids))
         results = _execute_with_heartbeat(spec, run_id, samples_by_id, ids)
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
         runner._commit_batch(spec, run_id, samples_by_id, ids, results)
+        ok = sum(1 for r in results.values() if r and not r.get("error_type"))
+        errs = sum(1 for r in results.values() if r and r.get("error_type"))
+        missing = len(ids) - len(results)
+        log.info("[%s] run_id=%s batch done: %d ok, %d errored, %d missing",
+                 WORKER_ID, run_id, ok, errs, missing)
         processed += len(ids)
         # Refresh liveness between batches so a long multi-batch drain doesn't read as a dead worker.
         db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": len(ids), "run": run_id})
@@ -89,10 +98,10 @@ def _drain_run(run_id: str) -> int:
 def main() -> None:
     db.init()
     signal.signal(signal.SIGTERM, _graceful_shutdown)
-    print(f"[worker {WORKER_ID}] up", flush=True)
+    log.info("[%s] up — poll=%.1fs, lease-renew=%.0fs", WORKER_ID, POLL_SECONDS, LEASE_RENEW_SECONDS)
     while True:
         if _STOP:
-            print(f"[worker {WORKER_ID}] drained — exiting", flush=True)
+            log.info("[%s] drained — exiting", WORKER_ID)
             return
         # Liveness for the ops dashboard (portable, no k8s API). Written at the TOP of the loop too —
         # not just after draining — so a worker registers the moment it's up and refreshes before each

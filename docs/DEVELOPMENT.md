@@ -179,6 +179,23 @@ integration/e2e test, so tests never share state. The ledger test proves exactly
 double-claim, none dropped) + lease reclaim via the real `FOR UPDATE SKIP LOCKED` where all N workers
 claim *in parallel* (2000 samples / 12 workers, ~3.8k samples/s).
 
+## Logs
+
+All backend processes (API, orchestrator, worker, training monitor) log to **stdout** through one
+configured stream (`eval_engine/logs.py`), so the lines land in container stdout → GCP Logging / the
+log viewer. Levels follow a convention so the viewer's severity filter is meaningful:
+
+| Level | What you'll see |
+|---|---|
+| `DEBUG` | per-batch / per-tick mechanics: claims, lease renewals, reconcile timings, ClickHouse inserts, connection opens — noisy, off by default |
+| `INFO` | lifecycle a human watching a run wants: launch, admit, batch result, finalize, checkpoint fan-out / evaluated |
+| `WARNING` | recoverable-but-notable: a sample retry, budget stop, OpenRouter price-fetch miss, leader handover, **a detected training anomaly** |
+| `ERROR` | something failed and was swallowed to keep a loop alive (a monitor tick raised, all DB startup retries lost) |
+
+Set `EVAL_ENGINE_LOG_LEVEL=DEBUG` (default `INFO`) to turn on the per-batch detail when debugging.
+The CLI (`eval_engine/cli.py`) prints its report straight to stdout (not via the logger), so raise the
+level to quiet the lifecycle lines: `EVAL_ENGINE_LOG_LEVEL=WARNING python -m eval_engine.cli run …`.
+
 ## Distributed execution (K8s)
 
 The single-process `runner.run()` loop fans out, in production, to **N worker pods each running the

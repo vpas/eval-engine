@@ -29,7 +29,10 @@ import time
 
 from . import runner, storage, training_analysis as ta
 from .db import analytics, control
+from .logs import get_logger
 from .models import PluginRef, RunSpec, TrainingRunSpec
+
+log = get_logger(__name__)
 
 INLINE = os.environ.get("EVAL_ENGINE_MONITOR_INLINE", "0") == "1"
 TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_MONITOR_TICK", "3.0"))
@@ -78,6 +81,8 @@ SOURCE = StoragePollingSource()
 def register(spec: TrainingRunSpec) -> None:
     """Register a training run to monitor (idempotent on id)."""
     control.create_training_run(spec.model_dump())
+    log.info("registered training run %s (model=%s, suite=%s)",
+             spec.id, spec.model, [e.eval for e in spec.suite])
 
 
 def register_from_source(source: str) -> TrainingRunSpec:
@@ -118,6 +123,9 @@ def discover(tr_id: str) -> list[dict]:
     max_step = max([c["step"] for c in control.list_checkpoints(tr_id)] or [0])
     control.update_training_run(tr_id, current_step=max_step,
                                 status="training" if tr["status"] == "watching" else None)
+    if new:
+        log.info("%s discovered %d new checkpoint(s): steps %s (current_step=%d)",
+                 tr_id, len(new), [c["step"] for c in new], max_step)
     return new
 
 
@@ -173,6 +181,9 @@ def fan_out(tr_id: str, inline: bool = INLINE) -> int:
 
     for c in skip:
         control.set_checkpoint_status(c["id"], "skipped")
+    if skip:
+        log.info("%s skipping %d checkpoint(s) (cadence/skip-stale): steps %s",
+                 tr_id, len(skip), [c["step"] for c in skip])
 
     n = 0
     for c in to_eval:
@@ -188,6 +199,8 @@ def fan_out(tr_id: str, inline: bool = INLINE) -> int:
             launched.append((run_id, spec))
         control.set_checkpoint_status(c["id"], "evaluating")
         n += 1
+        log.info("%s fanned out checkpoint %s (step %d) → %d suite run(s)%s",
+                 tr_id, c["id"], c["step"], len(launched), " [inline]" if inline else "")
         if inline:  # dev/test: run each checkpoint-eval to completion now (cluster: workers do this)
             for run_id, spec in launched:
                 runner.execute(run_id, spec)
@@ -220,6 +233,8 @@ def reconcile(tr_id: str) -> int:
             })
         control.set_checkpoint_status(c["id"], "evaluated")
         evaluated += 1
+        log.info("%s checkpoint %s (step %d) evaluated → rolled %d eval score(s) into the series",
+                 tr_id, c["id"], c["step"], len(runs))
     if evaluated:
         detect(tr_id)
         _maybe_finalize(tr_id)
@@ -263,6 +278,8 @@ def detect(tr_id: str, threshold: float = DEFAULT_THRESHOLD) -> list[dict]:
         a = _build_anomaly(tr_id, ev, anom, by_eval, ckpts, below_at, canaries, expected_fns, threshold)
         control.insert_anomaly(a)
         found.append(a)
+        log.warning("%s ANOMALY eval=%s step=%d kind=%s Δ=%.3f severity=%s → diagnosis=%s (%s)",
+                    tr_id, ev, a["step"], a["kind"], a["delta"], a["severity"], a["diagnosis"], a["cause"])
     return found
 
 
@@ -357,6 +374,8 @@ def _maybe_finalize(tr_id: str) -> None:
     if unsettled:
         return
     control.update_training_run(tr_id, status=trainer_status, finished=True)
+    log.info("%s monitoring finished (trainer status=%s); best checkpoints=%s",
+             tr_id, trainer_status, best_checkpoints(tr_id))
 
 
 def best_checkpoints(tr_id: str) -> dict[str, dict]:
@@ -379,7 +398,7 @@ def tick(inline: bool = INLINE) -> None:
 
 
 def _graceful_shutdown(*_) -> None:
-    print("[monitor] SIGTERM — releasing leadership", flush=True)
+    log.warning("[monitor] SIGTERM — releasing leadership")
     control.release_leader(LEADER_KEY)
     sys.exit(0)
 
@@ -388,20 +407,22 @@ def main() -> None:
     from . import db
     db.init()
     signal.signal(signal.SIGTERM, _graceful_shutdown)
+    log.info("[monitor] starting — contending for leadership")
     while not control.acquire_leader(LEADER_KEY):
         if control.reap_stale_leader(LEADER_KEY, STALE_LEADER_SECONDS):
+            log.warning("[monitor] reaped a stale leader — retrying for leadership")
             continue
-        print("[monitor] standby — another monitor holds leadership", flush=True)
+        log.info("[monitor] standby — another monitor holds leadership")
         time.sleep(5)
-    print("[monitor] up, leader", flush=True)
+    log.info("[monitor] up, leader — tick=%.1fs, inline=%s", TICK_SECONDS, INLINE)
     while True:
         if not control.leader_alive():
-            print("[monitor] lost leadership; exiting to re-contend", flush=True)
+            log.warning("[monitor] lost leadership; exiting to re-contend")
             return
         try:
             tick()
-        except Exception as e:  # noqa: BLE001  one bad run must not kill the loop
-            print(f"[monitor] tick error: {e}", flush=True)
+        except Exception:  # noqa: BLE001  one bad run must not kill the loop
+            log.exception("[monitor] tick error")
         time.sleep(TICK_SECONDS)
 
 

@@ -27,7 +27,10 @@ from inspect_ai.scorer import CORRECT
 from . import builtins, plugins, storage  # noqa: F401  builtins import populates the registry
 from .db import analytics, control
 from .datasets import load_jsonl
+from .logs import get_logger
 from .models import RunSpec
+
+log = get_logger(__name__)
 
 TRANSCRIPTS = control.DATA / "transcripts"  # local object-store stand-in (dev)
 GCS_BUCKET = os.environ.get("EVAL_ENGINE_GCS_BUCKET")  # set in-cluster → transcripts go to GCS
@@ -86,9 +89,12 @@ def _settle_result(run_id: str, sid: str, result: dict | None) -> str:
     error-free) sample is a clean result, not a failure. Returns ``'done'``/``'retry'``/``'failed'``."""
     err = "no_result" if result is None else result.get("error_type")
     if err:
-        return control.retry_or_fail(
+        outcome = control.retry_or_fail(
             run_id, sid, err, MAX_ATTEMPTS, RETRY_BASE_SECONDS, RETRY_CAP_SECONDS
         )
+        lvl = log.warning if outcome == "failed" else log.info
+        lvl("run_id=%s sample=%s %s after error: %s", run_id, sid, outcome, err)
+        return outcome
     control.commit_result(run_id, sid, result)
     return "done"
 
@@ -130,8 +136,11 @@ def _openrouter_prices() -> dict[str, tuple[float, float]]:
                 for m in json.load(r)["data"]:
                     p = m.get("pricing", {})
                     _OR_PRICES[m["id"]] = (float(p.get("prompt") or 0), float(p.get("completion") or 0))
-        except Exception:
-            pass  # API down / no network → prices stay empty → cost 0.0 (graceful, never fatal)
+            log.info("loaded OpenRouter price catalog (%d models)", len(_OR_PRICES))
+        except Exception as e:  # noqa: BLE001
+            # API down / no network → prices stay empty → cost 0.0 (graceful, never fatal), but warn
+            # once so a run reporting $0 cost is explainable rather than silently wrong.
+            log.warning("OpenRouter price catalog unavailable (%s) — cost will be $0 this process", e)
     return _OR_PRICES
 
 
@@ -278,15 +287,19 @@ def _execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[st
     # Inspect model object and for pricing (so cost reflects the real provider, not the opaque ref).
     exec_model, mock_output = _resolve_model(spec)
     model = _build_model(exec_model, mock_output, spec.mock_tool_calls, len(ids) * max(1, spec.epochs))
-    log = inspect_eval(
+    if exec_model != spec.model:
+        log.debug("run_id=%s resolved model %s → %s", run_id, spec.model, exec_model)
+    log.debug("run_id=%s executing batch of %d via %s (harness=%s)",
+              run_id, len(ids), exec_model, spec.harness.type)
+    inspect_log = inspect_eval(
         task, model=model, display="none",
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
         epochs=epochs, time_limit=SAMPLE_TIME_LIMIT, fail_on_error=False, **gen,
     )[0]
 
-    eval_log_uri = getattr(log, "location", "") or ""  # the .eval log holding this shard's samples
+    eval_log_uri = getattr(inspect_log, "location", "") or ""  # the .eval log holding this shard's samples
     out: dict[str, dict] = {}
-    for s in log.samples or []:
+    for s in inspect_log.samples or []:
         sid = str(s.id)
         score_vals = {name: _score_value(sc.value) for name, sc in (s.scores or {}).items()}
         primary = next(iter(score_vals.values()), 0.0)
@@ -383,6 +396,10 @@ def launch(spec: RunSpec, created_by: str | None = None, provenance: dict | None
         run_id,
         [(sid, (s.metadata or {}).get("category", "")) for sid, s in samples_by_id.items()],
     )
+    prov_note = f" checkpoint={prov.get('checkpoint_id')} step={prov.get('step')}" if prov else ""
+    log.info("launched run_id=%s eval=%s@%s model=%s harness=%s samples=%d lane=%s by=%s%s",
+             run_id, spec.eval, spec.eval_version, spec.model, spec.harness.type,
+             len(samples_by_id), lane, created_by or "-", prov_note)
     return run_id
 
 
@@ -397,6 +414,8 @@ def _finalize(run_id: str, spec: RunSpec) -> tuple[int, int, float]:
     status = "budget_exceeded" if budget_skipped else "completed"
     control.archive_and_prune(run_id)
     control.finalize_run(run_id, done, failed, accuracy, cost_usd=cost, status=status)
+    log.info("finalized run_id=%s status=%s done=%d failed=%d skipped=%d acc=%.3f cost=$%.6f",
+             run_id, status, done, failed, budget_skipped, accuracy, cost)
     return done, failed, accuracy
 
 
@@ -405,6 +424,7 @@ def execute(run_id: str, spec: RunSpec) -> None:
     dataset, _ = load_jsonl(spec.dataset, spec.limit)
     samples_by_id = {str(s.id): s for s in dataset}
     control.set_status(run_id, "running")
+    log.info("executing run_id=%s (%d samples, batch_size=%d) inline", run_id, len(samples_by_id), spec.batch_size)
 
     worker = "w0"
     while True:

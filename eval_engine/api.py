@@ -19,8 +19,11 @@ from fastapi.responses import HTMLResponse, Response
 
 from . import builtins, db, ops, plugins, runner, training  # noqa: F401  populate registry
 from .db import analytics, control
+from .logs import get_logger
 from .models import (DatasetSpec, EvalSpec, LaunchFromEval, ModelSpec, PluginRef, RunSpec,
                      TrainingRunSpec)
+
+log = get_logger(__name__)
 
 # In the cluster the API is control-plane only — it launches (creates run + expands ledger) and the
 # orchestrator/worker pods execute. Set EVAL_ENGINE_API_INLINE_EXEC=1 for local single-process dev:
@@ -37,13 +40,17 @@ async def lifespan(app: FastAPI):
     for attempt in range(12):
         try:
             db.init()
+            log.info("startup: databases reachable, schema ensured (attempt %d)", attempt + 1)
             break
         except Exception as e:  # noqa: BLE001
             last = e
+            log.warning("startup: databases not ready (attempt %d/12): %s — backing off", attempt + 1, e)
             time.sleep(min(1.5 ** attempt, 8))
     else:
+        log.error("startup: databases unreachable after 12 attempts: %s", last)
         raise RuntimeError(f"databases not reachable at startup: {last}")
     yield
+    log.info("shutdown")
 
 
 app = FastAPI(title="eval-engine", version="0.1.0-prototype", lifespan=lifespan)
@@ -123,6 +130,7 @@ def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = H
     spec = RunSpec.model_validate_json(spec_json)
     new_id = runner.launch(spec, created_by=x_auth_request_email)
     control.audit(x_auth_request_email, "run.rerun", new_id, {"rerun_of": run_id})
+    log.info("rerun %s → new run_id=%s by=%s", run_id, new_id, x_auth_request_email or "-")
     if INLINE_EXEC:
         bg.add_task(runner.execute, new_id, spec)
     return {"run_id": new_id, "status": "queued", "rerun_of": run_id}
@@ -385,6 +393,7 @@ def scan_training(tr_id: str):
     leader-elected monitor loop does this; exposed for dev/test and on-demand refresh."""
     if not control.get_training_run(tr_id):
         raise HTTPException(status_code=404, detail=f"no training run {tr_id}")
+    log.info("manual scan requested for training run %s", tr_id)
     training.discover(tr_id)
     fanned = training.fan_out(tr_id)
     evaluated = training.reconcile(tr_id)
