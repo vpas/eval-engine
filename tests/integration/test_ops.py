@@ -48,6 +48,9 @@ def test_heartbeat_liveness(monkeypatch):
     assert ops.probe_workers(hbs, {"ledger": {"queued": 0}})["status"] == "ok"
     assert ops.probe_workers([], {"ledger": {"queued": 7}})["status"] == "degraded"
     assert ops.probe_workers([], {"ledger": {"queued": 0}})["status"] == "idle"
+    # No fresh heartbeat but K8s shows a ready pod ⇒ busy, not down (the worker-blocked-on-gateway case).
+    busy = ops.probe_workers([], {"ledger": {"queued": 7}}, ready_pods=1)
+    assert busy["status"] == "ok" and "busy" in busy["detail"]
 
 
 def test_snapshot_shape_and_degrades_gracefully(client):

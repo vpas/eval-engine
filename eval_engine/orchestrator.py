@@ -93,6 +93,10 @@ def tick() -> None:
     db.control.heartbeat("orchestrator", POD,
                          {"leader": True, "running_runs": len(running_runs),
                           "tick_ms": round((time.time() - t0) * 1000)})
+    # Leader housekeeping: drop heartbeat rows from long-gone pods (KEDA churns many worker pod names)
+    # so the table stays small. The cutoff is well above any single batch's wall-clock cap, so a busy
+    # worker is never pruned; the snapshot already age-filters for liveness, this just bounds growth.
+    db.control.prune_heartbeats(3600.0)
 
 
 def _graceful_shutdown(*_) -> None:

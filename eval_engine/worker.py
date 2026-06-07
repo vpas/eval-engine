@@ -54,6 +54,8 @@ def _drain_run(run_id: str) -> int:
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
         runner._commit_batch(spec, run_id, samples_by_id, ids, results)
         processed += len(ids)
+        # Refresh liveness between batches so a long multi-batch drain doesn't read as a dead worker.
+        db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": len(ids), "run": run_id})
 
 
 def main() -> None:
@@ -64,13 +66,16 @@ def main() -> None:
         if _STOP:
             print(f"[worker {WORKER_ID}] drained — exiting", flush=True)
             return
+        # Liveness for the ops dashboard (portable, no k8s API). Written at the TOP of the loop too —
+        # not just after draining — so a worker registers the moment it's up and refreshes before each
+        # drain attempt (a worker blocked in a long model call mid-batch still has this fresh-ish row;
+        # the snapshot also reconciles against K8s pod readiness for the truly-busy case).
+        db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": 0})
         did = 0
         for run_id in db.control.active_runs(("running",)):
             if _STOP:
                 break
             did += _drain_run(run_id)
-        # Liveness for the ops dashboard (portable, no k8s API): claims-this-loop lets it show the
-        # live worker count + in-flight pressure; a stale row = a scaled-down/crashed worker.
         db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": did})
         if did == 0:
             time.sleep(POLL_SECONDS)  # nothing claimable; let KEDA scale us down when idle

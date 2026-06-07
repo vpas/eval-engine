@@ -197,20 +197,25 @@ def probe_orchestrator(hbs: list[dict]) -> dict:
                  last_seen=f"{round(age, 1)}s ago")
 
 
-def probe_workers(hbs: list[dict], queues: dict) -> dict:
+def probe_workers(hbs: list[dict], queues: dict, ready_pods: int | None = None) -> dict:
     rows = [h for h in hbs if h["component"] == "worker"]
     live = [h for h in rows if h["age_s"] < WORKER_STALE_S]
     n = len(live)
     claims = sum(int(h["detail"].get("claimed_this_loop", 0) or 0) for h in live)
     queued = (queues.get("ledger") or {}).get("queued", 0)
-    if n == 0:
-        # No live workers is fine when there's nothing to do (KEDA scaled to 0); a problem otherwise.
-        status = "degraded" if queued > 0 else "idle"
-        detail = "0 live · work queued (scaling up?)" if queued > 0 else "0 live · idle (scaled to 0)"
-    else:
-        status = "ok"
-        detail = f"{n} live · {claims} in-flight claims"
-    return _comp("workers", status, detail, {"live": n, "claims": claims})
+    metrics: dict = {"live": n, "claims": claims}
+    if ready_pods is not None:
+        metrics["pods_ready"] = ready_pods
+    if n > 0:
+        return _comp("workers", "ok", f"{n} live · {claims} in-flight claims", metrics)
+    # No fresh heartbeat. If K8s shows ready worker pods, the worker is up but BUSY (blocked in a long
+    # model call, so it hasn't looped back to heartbeat) — that's healthy, not "scaling up". Only when
+    # there are no pods either is queued-but-no-workers a real "scaling up / stuck" signal.
+    if ready_pods:
+        return _comp("workers", "ok", f"{ready_pods} pod(s) up · busy (no recent heartbeat)", metrics)
+    if queued > 0:
+        return _comp("workers", "degraded", "0 workers · work queued (scaling up?)", metrics)
+    return _comp("workers", "idle", "0 workers · idle (scaled to 0)", metrics)
 
 
 def probe_api() -> dict:
@@ -317,13 +322,16 @@ def snapshot() -> dict:
                 results[name] = _comp(name, "down", str(e)[:160])
 
     k8s = results.pop("kubernetes", None)
-    # heartbeat-derived components (cheap PG reads already in hand)
-    results["orchestrator"] = probe_orchestrator(hbs)
-    results["workers"] = probe_workers(hbs, queues)
-
-    # Enrich app-backed components with the Kubernetes pod truth (ready/desired + restarts).
     workloads = (k8s or {}).get("workloads", []) if isinstance(k8s, dict) else []
     by_app = {w["app"]: w for w in workloads}
+
+    # heartbeat-derived components (cheap PG reads already in hand). probe_workers reconciles against
+    # the K8s ready-pod count so a busy worker (blocked mid-batch, stale heartbeat) reads as up, not down.
+    worker_ready = by_app["eval-engine-worker"]["ready"] if "eval-engine-worker" in by_app else None
+    results["orchestrator"] = probe_orchestrator(hbs)
+    results["workers"] = probe_workers(hbs, queues, worker_ready)
+
+    # Enrich app-backed components with the Kubernetes pod truth (ready/desired + restarts).
     for name, comp in results.items():
         w = by_app.get(COMPONENT_APP.get(name, ""))
         if w:
