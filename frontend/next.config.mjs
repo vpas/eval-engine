@@ -1,6 +1,7 @@
 // Proxy /api/* to the FastAPI backend service (server-side, in-cluster). afterFiles so real route
 // handlers (e.g. /api/me) take precedence; everything else proxies through with headers intact
-// (so oauth2-proxy's X-Auth-Request-Email reaches the backend for created_by attribution).
+// (so oauth2-proxy's X-Forwarded-Email reaches the backend for created_by attribution — the rewrite
+// forwards inbound headers verbatim; the backend reads it via auth_email() in eval_engine/api.py).
 const BACKEND = process.env.BACKEND_URL || "http://eval-engine-api:8077";
 // Inspect log viewer — proxied under /inspect/ (its assets/API are relative, so the prefix is
 // stripped here and resolves under /inspect/). Served behind the same OIDC proxy as this app.

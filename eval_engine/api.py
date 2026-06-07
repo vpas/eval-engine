@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
 from . import builtins, db, ops, plugins, runner, training  # noqa: F401  populate registry
@@ -55,6 +55,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="eval-engine", version="0.1.0-prototype", lifespan=lifespan)
 _UI = Path(__file__).resolve().parent.parent / "static" / "index.html"
+
+
+def auth_email(
+    x_forwarded_email: str | None = Header(default=None),
+    x_auth_request_email: str | None = Header(default=None),
+) -> str | None:
+    """The authenticated user's email, from the OIDC proxy (oauth2-proxy) — recorded as ``created_by``
+    / audit actor. In oauth2-proxy *proxy* mode the identity arrives as ``X-Forwarded-Email``
+    (``--pass-user-headers``); ``X-Auth-Request-Email`` (``--set-xauthrequest``) is only set on the
+    auth_request *response* and never reaches an upstream, so prefer the former and keep the latter as
+    a fallback (e.g. nginx auth_request deployments). Absent on the internal/port-forward path."""
+    return x_forwarded_email or x_auth_request_email
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -100,11 +112,11 @@ def ops_logs(component: str | None = None, pod: str | None = None, run_id: str |
 
 @app.post("/runs", status_code=202)
 def create_run(spec: RunSpec, bg: BackgroundTasks,
-               x_auth_request_email: str | None = Header(default=None)):
+               x_auth_request_email: str | None = Depends(auth_email)):
     """Validate + create the run, expand the ledger, kick off background execution.
 
-    ``X-Auth-Request-Email`` is injected by the OIDC proxy (oauth2-proxy) — the authenticated
-    user, recorded as the run's ``created_by``. Absent on the internal/port-forward path.
+    ``created_by`` is the authenticated user from the OIDC proxy (see ``auth_email``). Absent on the
+    internal/port-forward path.
     """
     try:
         plugins.get("harness", spec.harness.type, spec.harness.version)
@@ -121,7 +133,7 @@ def create_run(spec: RunSpec, bg: BackgroundTasks,
 
 
 @app.post("/runs/{run_id}/rerun", status_code=202)
-def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = Header(default=None)):
+def rerun(run_id: str, bg: BackgroundTasks, x_auth_request_email: str | None = Depends(auth_email)):
     """Reproduce a past run (FR10, §9.9): clone its stored RunSpec → a new Run with identical pinned
     inputs (eval@version, dataset content hash, model + params + seed, epochs, budget, image digest)."""
     spec_json = control.get_spec(run_id)
@@ -240,7 +252,7 @@ def _get(kind: str, ent_id: str):
 
 
 @app.post("/datasets", status_code=201)
-def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Header(default=None)):
+def register_dataset(spec: DatasetSpec, x_auth_request_email: str | None = Depends(auth_email)):
     # Content-address the data (FR1, §13): snapshot the bytes to immutable storage + pin the hash, so
     # the version is reproducible by content. Best-effort — if the uri isn't readable from the API
     # (e.g. a client-side path), register the metadata as-is.
@@ -264,7 +276,7 @@ def get_dataset(ds_id: str):
 
 
 @app.post("/evals", status_code=201)
-def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Header(default=None)):
+def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Depends(auth_email)):
     # Validate referenced plugins exist (an eval bundles a harness + scorers).
     try:
         plugins.get("harness", spec.default_harness.type, spec.default_harness.version)
@@ -277,7 +289,7 @@ def register_eval(spec: EvalSpec, x_auth_request_email: str | None = Header(defa
 
 @app.post("/evals/{eval_id}/launch", status_code=202)
 def launch_from_eval(eval_id: str, body: LaunchFromEval, bg: BackgroundTasks,
-                     x_auth_request_email: str | None = Header(default=None)):
+                     x_auth_request_email: str | None = Depends(auth_email)):
     """Launch a run from a registered eval: resolve its dataset (the pinned content-addressed snapshot)
     + default harness/scorers, apply the caller's model + run knobs, then launch (FR2/FR10)."""
     ev = control.get_entity("eval", eval_id)
@@ -316,7 +328,7 @@ def get_eval(eval_id: str):
 
 
 @app.post("/models", status_code=201)
-def register_model(spec: ModelSpec, x_auth_request_email: str | None = Header(default=None)):
+def register_model(spec: ModelSpec, x_auth_request_email: str | None = Depends(auth_email)):
     return _register("model", spec, x_auth_request_email)
 
 
@@ -336,7 +348,7 @@ def get_model(model_id: str):
 # The frontend for this lands with the full prototype-based dashboard rewrite — API only here.
 
 @app.post("/training", status_code=201)
-def register_training(spec: TrainingRunSpec, x_auth_request_email: str | None = Header(default=None)):
+def register_training(spec: TrainingRunSpec, x_auth_request_email: str | None = Depends(auth_email)):
     """Register a training run to monitor. Its suite evals must already be registered evals."""
     for entry in spec.suite:
         if not control.get_entity("eval", entry.eval, entry.version):
