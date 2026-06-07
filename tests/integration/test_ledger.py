@@ -196,8 +196,9 @@ def test_live_rollup():
         done, failed, passed, cost = control.live_rollup(run_id)
         assert (done, failed, passed) == (2, 0, 1) and abs(cost - 0.30) < 1e-9, (done, failed, passed, cost)
         control.update_live(run_id, done, failed, passed / done, cost)
-        run = control.get_run(run_id)  # RUN_COLS: …done(10) failed(11) accuracy(12) cost_usd(13)
-        assert run[8] == "queued" and run[10] == 2 and run[12] == 0.5 and abs(run[13] - 0.30) < 1e-9, run
+        run = control.get_run(run_id)
+        assert run["status"] == "queued" and run["done"] == 2 and run["accuracy"] == 0.5 \
+            and abs(run["cost_usd"] - 0.30) < 1e-9, run
         print("  [live-rollup] done/passed/cost gauge ✓  written to runs row ✓  get_run cols aligned ✓")
     finally:
         _cleanup(run_id)

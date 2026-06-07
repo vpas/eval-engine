@@ -32,9 +32,10 @@ def cmd_runs(args):
     if not rows:
         print("  (no runs yet)")
         return
-    for rid, ev, model, acc, total, created in rows:
-        acc_s = f"{acc:.2f}" if acc is not None else "  - "
-        print(f"  {rid}  {ev:<16} {model:<18} acc={acc_s} n={total}  {created}")
+    for r in rows:
+        acc_s = f"{r['accuracy']:.2f}" if r["accuracy"] is not None else "  - "
+        print(f"  {r['id']}  {r['eval_id']:<16} {r['model']:<18} "
+              f"acc={acc_s} n={r['total']}  {r['created_at']}")
 
 
 def cmd_catalog(args):
@@ -52,23 +53,26 @@ def _print_report(run_id: str):
     if not run:
         print(f"  no run {run_id}")
         return
-    n, passed, mean, tokens, cost = analytics.run_summary(run_id)
-    print(f"\n  run {run_id} | eval={run[1]} model={run[3]} | dataset_hash={run[13]}")
-    print(f"  samples={n}  passed={passed}  accuracy={(passed or 0) / (n or 1):.0%}  "
-          f"tokens={tokens}  cost=${cost:.6f}\n")
+    s = analytics.run_summary(run_id)
+    print(f"\n  run {run_id} | eval={run['eval_id']} model={run['model']} "
+          f"| dataset_hash={run['dataset_hash']}")
+    print(f"  samples={s.samples}  passed={s.passed}  "
+          f"accuracy={(s.passed or 0) / (s.samples or 1):.0%}  "
+          f"tokens={s.tokens}  cost=${s.cost:.6f}\n")
 
     print(f"  {'sample':<8} {'pass':<5} {'category':<12} {'score':<6} output → target")
     print(f"  {'-'*8} {'-'*4} {'-'*11} {'-'*5} {'-'*24}")
-    for sid, p, gk, score, uri in analytics.samples(run_id):
+    for row in analytics.samples(run_id):
         out = tgt = ""
-        if uri and Path(uri).exists():
-            t = json.loads(Path(uri).read_text())
+        if row.transcript_uri and Path(row.transcript_uri).exists():
+            t = json.loads(Path(row.transcript_uri).read_text())
             out, tgt = str(t.get("output", ""))[:18], str(t.get("target", ""))[:14]
-        print(f"  {sid:<8} {'✓' if p else '✗':<5} {(gk or '-'):<12} {score:<6.2f} {out} → {tgt}")
+        print(f"  {row.sample_id:<8} {'✓' if row.passed else '✗':<5} {(row.group_key or '-'):<12} "
+              f"{row.primary_score:<6.2f} {out} → {tgt}")
 
     print(f"\n  accuracy by category (analytics slice):")
-    for gk, c, pas, acc in analytics.by_category(run_id):
-        print(f"    {gk or '(none)':<14} n={c} passed={pas} acc={acc}")
+    for c in analytics.by_category(run_id):
+        print(f"    {c.group_key or '(none)':<14} n={c.n} passed={c.passed} acc={c.accuracy}")
     print()
 
 

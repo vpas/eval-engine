@@ -13,7 +13,7 @@ from eval_engine import db, orchestrator
 
 
 def _status(run_id: str) -> str:
-    return db.control.get_run(run_id)[8]  # RUN_COLS: …status(8)…
+    return db.control.get_run(run_id)["status"]
 
 
 def _order(run_ids: list[str]) -> None:

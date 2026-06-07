@@ -165,23 +165,22 @@ def cancel_run(run_id: str, x_auth_request_email: str | None = Header(default=No
 
 @app.get("/runs")
 def list_runs():
-    cols = ["id", "eval", "eval_version", "model", "accuracy", "total", "cost", "created_at",
-            "created_by", "status", "sweep"]
-    return [dict(zip(cols, r)) for r in control.list_runs()]
+    # control.list_runs() returns dicts keyed by column name; rename the two whose public JSON key
+    # differs (eval_id→eval, cost_usd→cost — the dashboard runs table reads these).
+    return [
+        {"id": r["id"], "eval": r["eval_id"], "eval_version": r["eval_version"], "model": r["model"],
+         "accuracy": r["accuracy"], "total": r["total"], "cost": r["cost_usd"],
+         "created_at": r["created_at"], "created_by": r["created_by"], "status": r["status"],
+         "sweep": r["sweep"]}
+        for r in control.list_runs()
+    ]
 
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
-    run = control.get_run(run_id)
-    if not run:
+    meta = control.get_run(run_id)  # dict keyed by control.RUN_COLS — forwarded as the run's JSON
+    if not meta:
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
-    # Keep in sync with control.RUN_COLS (explicit select; the table has more columns than we map).
-    cols = [
-        "id", "eval_id", "eval_version", "model", "provider", "model_id", "harness", "scorers",
-        "status", "total", "done", "failed", "accuracy", "cost_usd", "dataset_hash", "created_by",
-        "team", "image_digest", "lane", "created_at", "finished_at", "provider_fingerprint",
-    ]
-    meta = dict(zip(cols, run))
     # live progress from the ledger (empty once finalized/pruned). done/failed/accuracy/cost_usd on the
     # row are the orchestrator's live rollup (DESIGN §8) — authoritative live *and* final.
     meta["progress"] = control.counts(run_id)

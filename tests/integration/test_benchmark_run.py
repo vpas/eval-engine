@@ -20,8 +20,7 @@ def test_mmlu_subset_runs_full_spine_with_category_rollup():
     )
     run_id = runner.run(spec)  # synchronous launch + execute + finalize
 
-    cols = [c.strip() for c in control.RUN_COLS.split(",")]
-    run = dict(zip(cols, control.get_run(run_id)))
+    run = control.get_run(run_id)
     assert run["status"] == "completed", run  # finalized
 
     n, passed, _mean, _tokens, _cost = analytics.run_summary(run_id)

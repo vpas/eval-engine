@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+from psycopg.rows import dict_row
 
 from .logs import get_logger
 
@@ -151,6 +152,14 @@ def _conn() -> psycopg.Connection:
         con = psycopg.connect(DSN, autocommit=True)
         _local.con = con
     return con
+
+
+def _dict_rows(sql: str, params=()) -> list[dict]:
+    """Run a SELECT and return rows as dicts keyed by column name (psycopg ``dict_row``). Callers then
+    read by name instead of by position, so adding/reordering a SELECT column can't silently misalign
+    a downstream consumer (the failure mode that broke the CLI when the runs table grew columns)."""
+    with _conn().cursor(row_factory=dict_row) as cur:
+        return cur.execute(sql, params).fetchall()
 
 
 _leader_con: psycopg.Connection | None = None
@@ -327,24 +336,27 @@ def update_live(run_id: str, done: int, failed: int, accuracy: float, cost_usd: 
     )
 
 
-def list_runs():
-    # Column order must match api.list_runs() cols. sweep/eval_version/cost_usd surface the
-    # checkpoint-sweep badge, eval@version, and cost on the dashboard runs table.
-    return _conn().execute(
+def list_runs() -> list[dict]:
+    # Rows keyed by column name (sweep/eval_version/cost_usd surface the checkpoint-sweep badge,
+    # eval@version, and cost on the dashboard runs table). api.list_runs renames a couple to its
+    # public JSON keys (eval_id→eval, cost_usd→cost).
+    return _dict_rows(
         "SELECT id, eval_id, eval_version, model, accuracy, total, cost_usd, created_at, "
         "created_by, status, sweep FROM runs ORDER BY created_at DESC"
-    ).fetchall()
+    )
 
 
-# Explicit column order for get_run (NOT SELECT * — the table has spec_json/created_by the API doesn't
-# map, so positional SELECT * would misalign created_at/finished_at). Keep in sync with api.get_run.
+# Explicit column list for get_run (NOT SELECT * — the table has spec_json/created_by the API doesn't
+# surface, so a positional SELECT * would misalign created_at/finished_at). These names are the dict
+# keys get_run returns, which api.get_run forwards as the run's JSON fields verbatim.
 RUN_COLS = ("id, eval_id, eval_version, model, provider, model_id, harness, scorers, status, total, "
             "done, failed, accuracy, cost_usd, dataset_hash, created_by, team, image_digest, lane, "
             "created_at, finished_at, provider_fingerprint")
 
 
-def get_run(run_id: str):
-    return _conn().execute(f"SELECT {RUN_COLS} FROM runs WHERE id=%s", (run_id,)).fetchone()
+def get_run(run_id: str) -> dict | None:
+    rows = _dict_rows(f"SELECT {RUN_COLS} FROM runs WHERE id=%s", (run_id,))
+    return rows[0] if rows else None
 
 
 # --------------------------------------------------------------------------- ledger

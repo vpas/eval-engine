@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+from typing import NamedTuple
 
 import clickhouse_connect
 
@@ -107,31 +108,61 @@ def _num(x) -> float | int:
     return 0 if x is None or (isinstance(x, float) and math.isnan(x)) else x
 
 
-def run_summary(run_id: str):
+# Named result rows so callers read fields by name, not by position — adding a SELECT column can't
+# silently shift a downstream unpack (the drift that left the CLI unpacking the wrong arity). These
+# stay tuples, so existing positional unpacking / indexing keeps working unchanged.
+
+class RunSummary(NamedTuple):
+    samples: int
+    passed: float
+    mean_score: float
+    tokens: float
+    cost: float
+
+
+class SampleRow(NamedTuple):
+    sample_id: str
+    passed: int
+    group_key: str
+    primary_score: float
+    transcript_uri: str
+    tokens: int
+    latency_ms: int
+    error_type: str
+
+
+class CategoryRow(NamedTuple):
+    group_key: str
+    n: int
+    passed: int
+    accuracy: float
+
+
+def run_summary(run_id: str) -> RunSummary:
     # FINAL collapses ReplacingMergeTree dupes for an exact count (ORCHESTRATION §11).
     r = _q(
         "SELECT count(), sum(passed), avg(primary_score), sum(tokens_in+tokens_out), sum(cost_usd) "
         "FROM sample_results FINAL WHERE run_id=%(r)s",
         {"r": run_id},
     )[0]
-    return (r[0], _num(r[1]), _num(r[2]), _num(r[3]), _num(r[4]))
+    return RunSummary(r[0], _num(r[1]), _num(r[2]), _num(r[3]), _num(r[4]))
 
 
-def samples(run_id: str):
-    return _q(
+def samples(run_id: str) -> list[SampleRow]:
+    return [SampleRow(*r) for r in _q(
         "SELECT sample_id, passed, group_key, primary_score, transcript_uri, "
         "(tokens_in + tokens_out) AS tokens, latency_ms, error_type "
         "FROM sample_results FINAL WHERE run_id=%(r)s ORDER BY sample_id",
         {"r": run_id},
-    )
+    )]
 
 
-def by_category(run_id: str):
-    return _q(
+def by_category(run_id: str) -> list[CategoryRow]:
+    return [CategoryRow(*r) for r in _q(
         "SELECT group_key, count() n, sum(passed) passed, round(avg(primary_score),3) acc "
         "FROM sample_results FINAL WHERE run_id=%(r)s GROUP BY group_key ORDER BY group_key",
         {"r": run_id},
-    )
+    )]
 
 
 def health() -> dict:

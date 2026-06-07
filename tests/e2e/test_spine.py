@@ -22,7 +22,8 @@ def test_worker_orchestrator_split(mock_spec):
 
     # reproducibility pins recorded on the run (DESIGN §14). RUN_COLS: eval_version(2), image_digest(17)
     rr = db.control.get_run(run_id)
-    assert rr[2] == 1 and rr[17] is not None, f"repro pins not recorded: eval_version={rr[2]} image={rr[17]}"
+    assert rr["eval_version"] == 1 and rr["image_digest"] is not None, \
+        f"repro pins not recorded: eval_version={rr['eval_version']} image={rr['image_digest']}"
 
     # 2) orchestrator admits queued → running
     orchestrator.tick()
@@ -40,7 +41,7 @@ def test_worker_orchestrator_split(mock_spec):
     # 4) orchestrator finalizes: aggregate → archive → prune → completed
     orchestrator.tick()
     run = db.control.get_run(run_id)
-    assert run[8] == "completed", f"status={run[8]}"  # RUN_COLS: …status(8)…
+    assert run["status"] == "completed", f"status={run['status']}"
     assert db.control.ledger_size(run_id) == 0, "ledger not pruned"
 
     # exactly-once result landed in analytics; mock 'Paris' → 1/3 correct
@@ -63,5 +64,5 @@ def test_provider_fingerprint_pinned(mock_spec):
     """A run records the provider's resolved-model version fingerprint (DESIGN §14, backlog #7).
     The mock echoes its model name back as ModelOutput.model → pinned on the run."""
     run_id = runner.run(mock_spec())
-    fp = db.control.get_run(run_id)[21]  # RUN_COLS: …finished_at(20), provider_fingerprint(21)
+    fp = db.control.get_run(run_id)["provider_fingerprint"]
     assert fp == "mockllm/model", fp
