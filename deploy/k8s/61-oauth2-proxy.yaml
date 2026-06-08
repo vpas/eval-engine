@@ -12,6 +12,7 @@ data:
   emails: |
     victor.passichenko@gmail.com
     ravenkklo@gmail.com
+    aslushnikov@gmail.com
 ---
 apiVersion: apps/v1
 kind: Deployment
