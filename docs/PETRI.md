@@ -456,3 +456,103 @@ runner.execute_batch
 scores → analytics + viewer); the three pending items are infra-gated (e2e) or polish (UI label,
 cost fidelity), not architecture. The ledger / orchestrator / worker / ClickHouse schema are
 untouched, exactly as §7 predicted.
+
+---
+
+## 13. Build log (how this was actually done)
+
+A record of the process that produced §11–§12, so a future session can trust *why* the design is
+shaped this way (and not re-derive it).
+
+1. **Read the platform first, not Petri.** Mapped the Inspect-native execution path
+   (`runner.execute_batch` builds `Task(dataset, solver, scorer)` from a `RunSpec`), the plugin
+   registry (`plugins.py` — `(kind,name,version)` → Pydantic-config factory), the analytics row
+   (`analytics.make_row`: `passed`/`primary_score`/`scores`-JSON), and the existing `agentic`
+   harness's `(solver, sandbox)` 2-tuple trick. That 2-tuple is the precedent the whole model-role
+   extension imitates — finding it is what made the runner change one line of new *concept*, not a
+   refactor.
+2. **Went to the real Petri source, not the marketing.** Web search/fetch on the blog + README kept
+   401/403-ing and disagreed on specifics (and Petri had been **donated from `safety-research` to
+   `meridianlabs-ai`**, so package coordinates moved). Resolved it by `git clone`-ing
+   `meridianlabs-ai/inspect_petri` (@ `ec4775d`) into `/tmp` and reading the source directly. This
+   overturned two assumptions from the first-draft design:
+   - the judge is an **`inspect_scout` Scanner**, not a plain Inspect `Scorer` (→ `[petri]` pulls
+     `inspect_scout`; the score arrives **dict-valued** — which *validated* the W2 hypothesis);
+   - the seed is read from the **Sample `input`** by `audit_solver` (→ our JSONL feeds it with zero
+     glue), and the headline dimension is concretely named **`concerning`** (→ the default
+     `primary_dimension`).
+   *Lesson for next time: for any "integrate framework X" task, clone X and read it — the secondary
+   sources were both stale and wrong on the load-bearing details.*
+3. **Chose compose-their-pieces over import-their-Task.** Confirmed Petri's own `audit()` task just
+   wires `audit_solver(...)` + `audit_judge(...)` + `seeds_dataset(...)`; replicating that wiring in
+   *our* `Task` (our dataset/snapshot, our ledger, our analytics) is the same call Petri makes, so
+   it's stable — and it keeps runs flowing through the platform that is the actual product (the same
+   reasoning that rejected a fused `inspect_evals` Task in `ADDING_REAL_EVALS.md` §5).
+4. **Kept the spine touch additive + provable.** Made every runner edit degrade to the *exact*
+   prior behavior for non-Petri runs (bare/2-tuple harness, scalar scorer), then proved it by
+   running the **full unit suite (185/185 green)** — the regression guard for the hot path. Put the
+   genuinely Petri-specific logic (the W1/W2 reducer) in a **pure function** (`summarize_scores`) so
+   it's unit-testable **without** installing Petri or touching a backend.
+5. **Verified each claim against the installed stack, didn't assume.** `pip install -e .`,
+   `inspect.signature(inspect_ai.eval)` to confirm `model_roles` is a real param on **0.3.237**,
+   imported `builtins` to confirm the lazy guard works **without** `inspect_petri`, and validated
+   `examples/petri.yaml` parses to a `RunSpec` whose plugin configs validate. The one thing I could
+   **not** verify locally — a live 3-role audit — is called out as pending #1, not claimed as done.
+
+> **Honesty caveat (repeated from the status):** end-to-end execution against the real `inspect_scout`
+> judge is validated *by construction + unit tests*, **not yet by a live run** (no model keys/backends
+> in this environment). Item 14.1 below is the first thing to do when keys/infra are available.
+
+---
+
+## 14. What's left (the runbook to finish)
+
+Three items, in order. None is architectural; each is a contained change with a clear acceptance test.
+
+### 14.1 e2e: one real audit through the gateway *(do first — it de-risks everything)*
+
+```bash
+pip install -e '.[petri,openrouter]'           # pulls inspect_petri (+ inspect_scout) + the OR provider
+export OPENROUTER_API_KEY=...                   # auditor/target/judge all route via the gateway
+infra/up.sh                                     # Postgres + ClickHouse (local stand-ins)
+# tiny + cheap: 1–2 seeds, a budget backstop, capable auditor/judge, any target
+python -m eval_engine.cli run examples/petri.yaml --limit 1   # (or POST /runs with the spec)
+```
+**Acceptance:** the run finalizes; `sample_results.scores` for the sample contains the ~38 dimension
+keys (incl. `concerning`, `eval_awareness`, `scenario_realism`); `primary_score ∈ [0,1]`; the audit
+transcript opens in the embedded Inspect viewer. **Then add it as a marked `e2e` test** (mirror the
+agentic/`code_exec` sandbox tests in `tests/e2e/`) — likely `test_petri_audit.py`, gated on the key.
+**Watch for:** (a) Petri may expect model roles named exactly `auditor`/`target`/`judge` — confirm
+the target lands on Inspect's default role and the two extras resolve; (b) the scout Scanner's score
+**name** in `EvalLog.samples[].scores` (our reducer is name-agnostic — it flattens any dict-valued
+score — but confirm nothing else collides); (c) `max_turns` vs. our `SAMPLE_TIME_LIMIT` (600s) — a
+deep audit may need a higher per-sample cap (already env-tunable; consider surfacing on `PetriConfig`).
+
+### 14.2 Dashboard: relabel polarity for petri runs *(W1)*
+
+For a run whose harness is `petri`, the run-detail "accuracy" tile and the runs-list score column
+mean **concern rate** (fraction flagged), and the per-`group_key` breakdown is **misalignment by
+behavior** — the *opposite* polarity of a QA run. Smallest change: in the frontend, when
+`run.harness === 'petri'`, swap the label ("Concern rate") and consider inverting the color ramp
+(high = bad). Optionally promote `eval_awareness`/`scenario_realism` means to their own tiles (they
+read straight from the `scores` JSON; see §10 Q3). **Acceptance:** a finished petri run shows
+"concern rate", not "accuracy", and a high-`concerning` sample reads as a *finding*, not a pass.
+*(Cleaner long-term: a per-eval `polarity`/`metric_label` field so the UI isn't harness-sniffing —
+noted in §10 Q1; ship the harness check now.)*
+
+### 14.3 Cost: sum all three model roles *(W3 option b)*
+
+`runner._cost_usd` prices only the **target** (`spec.model`); a Petri audit also spends on auditor +
+judge (often *more*). The `.eval` log carries per-model usage (`EvalLog.stats.model_usage`), which —
+since one shard = one `inspect_eval` call — covers all three roles. Sum it, price each model via the
+existing catalog, and attribute it on the shard (per-sample is approximate for multi-turn anyway, as
+already noted for epochs). **Acceptance:** a petri run's finalized cost is materially higher than
+target-only and `budget_usd` stops it at the right point. *(The canonical end-state is still the
+gateway per-`run_id` tally — `PROJECT_PROGRESS #17` / DEPLOYMENT "A5" — which all three roles already
+flow through; 14.3 is the honest interim.)*
+
+### Not now (deferred, see §10)
+
+Per-eval `polarity` field; custom-seed authoring UI; promoting headline dimensions to first-class
+analytics columns; a mock-auditor/mock-judge fixture for a backend-free integration test (only worth
+it if the pinned Petri version exposes clean seams).
