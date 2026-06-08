@@ -53,6 +53,11 @@ ops = ["redis", "kubernetes"]
 # NB: `datasets` (HF) is NOT here — it's one-shot ingestion tooling (tools/fetch_benchmark.py), never
 # imported by the engine at runtime.
 benchmarks = ["sympy"]
+# Petri alignment-auditing eval shape (docs/PETRI.md): the auditor solver + judge scanner. Heavy +
+# optional (pulls inspect_scout transitively), so it's an extra, not a base dep — eval_engine/petri.py
+# imports it lazily so the engine runs without it. PINNED to a rev: it is the eval's `code_ref`
+# (PLUGINS §6) — reproducing a historical audit = redeploying this pin. NB v3's API differs from v2.
+petri = ["inspect_petri @ git+https://github.com/meridianlabs-ai/inspect_petri@ec4775d10d8563e232b780024007ab2a3ec466a6"]
 # test suite (pytest). Integration/e2e tests also need infra/up.sh (Postgres + ClickHouse).
 test = ["pytest>=8"]
 
