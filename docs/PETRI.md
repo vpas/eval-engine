@@ -448,15 +448,25 @@ runner.execute_batch
 | runner: model-roles + dict-Score + summarize hook | ✅ done | additive; **185/185 unit tests green**, non-Petri path unchanged |
 | seeds JSONL + converter + example yaml | ✅ done | 8 real seeds committed; converter regenerates/subsets |
 | unit tests (`tests/unit/test_petri.py`) | ✅ done | W1/W2 reducer, return-shapes, lazy guard — no Petri dep needed |
-| **e2e audit (real auditor/target/judge)** | 🟡 test scaffolded; live run pending | gated `tests/e2e/test_petri_audit.py` (skips without `[petri]` + `OPENROUTER_API_KEY`); not yet run against a live model |
+| **e2e audit (real auditor/target/judge)** | ✅ done — **validated live** | `tests/e2e/test_petri_audit.py` passed against real models (sonnet-4.5 auditor+judge, 3.5-haiku target): done=1, multi-dimension scores incl. `concerning`, cost **$0.15** (3-role). Surfaced + fixed two real issues (below). |
 | **dashboard concern-rate relabel** (W1 polarity) | ✅ done | run-detail tile + category panel + sample explorer relabel/recolor for `harness==petri`; runs-list shows "⚑ N% concern" (`harness` now on `/runs`) |
-| **multi-role cost sum** (W3 option b) | ✅ done | `runner._model_usage_cost` prices every role from `EvalLog.stats.model_usage`; gated on `model_roles` so single-model runs are byte-for-byte unchanged; unit-tested |
+| **multi-role cost sum** (W3 option b) | ✅ done | `runner._model_usage_cost` prices every role from `EvalLog.stats.model_usage`; gated on `model_roles` so single-model runs are byte-for-byte unchanged; unit-tested + confirmed live ($0.15 vs. a target-only fraction-of-a-cent) |
 
-**Net:** the engine now *has* the Petri eval shape end-to-end in code (compose → run → multi-dimension
-scores → analytics + viewer), the UI reads it with the right polarity, and cost counts all three
-roles. The one remaining item is a **live** 3-role audit — its test exists and is ready; it just needs
-keys + the `[petri]` extra to turn green. The ledger / orchestrator / worker / ClickHouse schema are
-untouched, exactly as §7 predicted.
+**Two fixes the live run surfaced** (neither caught by the build-by-construction path, exactly why §14.1
+said "do first"):
+1. **The `target` model role must be set explicitly.** Petri's `target_agent` resolves
+   `get_model(role="target")`; Inspect's default `model=` is *not* consulted for a named role, so the
+   audit failed at setup with *"Model role 'target' is required"*. Fixed in `runner.execute_batch`: when
+   a harness declares `model_roles`, the runner injects `target = spec.model` (the harness only owns the
+   extra auditor/judge roles, since it doesn't know the run's target).
+2. **Model slug drift.** `anthropic/claude-3.5-sonnet` is now 404 on OpenRouter ("No endpoints found");
+   updated the test **and** `examples/petri.yaml` to `claude-sonnet-4.5`.
+
+**Net:** the Petri eval shape is now proven end-to-end against live models — compose → 3-role audit →
+multi-dimension scores → analytics, with the right UI polarity and full multi-role cost. The ledger /
+orchestrator / worker / ClickHouse schema are untouched, exactly as §7 predicted. (Cluster caveat: the
+deploy image is `python:3.11-slim`, but `inspect_petri` needs **≥3.12** — bump the Dockerfile base to
+run Petri in-cluster. Validated locally in a 3.12 env.)
 
 ---
 
@@ -508,13 +518,14 @@ shaped this way (and not re-derive it).
 
 ## 14. What's left (the runbook to finish)
 
-**Status:** 14.2 (dashboard) and 14.3 (cost) are now **done** (see §12). The only item left is a **live**
-run of 14.1 — its test is written and gated, awaiting keys + the `[petri]` extra.
+**Status:** all three runbook items are now **done** (see §12) — 14.1 was validated live (one real audit,
+$0.15, which surfaced + fixed the `target`-role + model-slug issues). The only remaining gap is
+operational: the deploy image is `python:3.11-slim` but `inspect_petri` needs ≥3.12 (bump the base).
 
-### 14.1 e2e: one real audit through the gateway — 🟡 *test scaffolded; awaiting keys*
+### 14.1 e2e: one real audit through the gateway — ✅ *done (validated live in a 3.12 env)*
 
-The gated test now exists: `tests/e2e/test_petri_audit.py` (skips at collection unless `inspect_petri`
-is installed **and** `OPENROUTER_API_KEY` is set). When keys + infra are available, run it:
+The gated test exists and passes: `tests/e2e/test_petri_audit.py` (skips at collection unless
+`inspect_petri` is installed **and** `OPENROUTER_API_KEY` is set). To re-run it:
 
 ```bash
 pip install -e '.[petri,openrouter]'           # pulls inspect_petri (+ inspect_scout) + the OR provider

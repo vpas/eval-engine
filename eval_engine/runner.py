@@ -316,6 +316,13 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     # `petri`: auditor + judge) declares extra Inspect MODEL ROLES the target run doesn't carry
     # (docs/PETRI.md §4). The target stays `spec.model` (Inspect's default role).
     solver, sandbox, model_roles = _unpack_harness(built)
+    if model_roles is not None:
+        # The TARGET role is the run's own model. A multi-model harness (petri) only declares the EXTRA
+        # roles it owns (auditor/judge) — it doesn't know the run's target — so the runner supplies it
+        # here. Petri's target_agent resolves get_model(role="target") EXPLICITLY (Inspect's default
+        # `model=` is not consulted for a named role), so without this the audit fails at setup with
+        # "Model role 'target' is required" (docs/PETRI.md §14.1 watch-item a). Caller-set roles win.
+        model_roles = {"target": spec.model, **model_roles}
     # A scorer may return just a Scorer, OR (scorer, summarize_fn): a multi-dimension scorer (the
     # `petri_judge`) hands back a reducer that maps its raw per-dimension output → our
     # (primary_score, passed, scores) shape (docs/PETRI.md W1/W2). Default scorers have no reducer.

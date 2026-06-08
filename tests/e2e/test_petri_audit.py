@@ -44,8 +44,8 @@ def _one_seed_spec() -> RunSpec:
         eval="petri_audit_smoke", dataset=str(tmp), model="openrouter/anthropic/claude-3.5-haiku",
         batch_size=1, limit=1, budget_usd=2.0,
         harness=PluginRef(type="petri", config={
-            "auditor_model": "openrouter/anthropic/claude-3.5-sonnet",
-            "judge_model": "openrouter/anthropic/claude-3.5-sonnet",
+            "auditor_model": "openrouter/anthropic/claude-sonnet-4.5",  # capable: designs the audit + judges
+            "judge_model": "openrouter/anthropic/claude-sonnet-4.5",
             "max_turns": 6}),
         scorers=[PluginRef(type="petri_judge", config={"flag_threshold": 5})],
     )
