@@ -3,7 +3,9 @@
 #   - orchestrator      : python -m eval_engine.orchestrator   (admit → expand → reconcile → finalize)
 #   - worker            : python -m eval_engine.worker         (claim → execute → commit → load)
 # Build context = repo root (so the Dockerfile path is deploy/Dockerfile, context is `.`).
-FROM python:3.11-slim
+# Python 3.12: the [petri] extra (inspect_petri) requires >=3.12 (docs/PETRI.md §14); the rest of the
+# stack is 3.12-clean, so the whole image runs on it.
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -21,14 +23,14 @@ WORKDIR /app
 #    drop the stub so only third-party deps remain. This is what makes code edits rebuild fast.
 COPY pyproject.toml ./
 RUN mkdir -p eval_engine && : > eval_engine/__init__.py \
-    && pip install '.[openrouter,gcs,k8s,ops,benchmarks]' \
+    && pip install '.[openrouter,gcs,k8s,ops,benchmarks,petri]' \
     && pip uninstall -y eval-engine
 
 # 2) CODE layer — real source + editable install with --no-deps (seconds, deps already present).
 COPY eval_engine/ ./eval_engine/
 COPY examples/ ./examples/
 COPY deploy/sandbox/ ./deploy/sandbox/
-RUN pip install -e '.[openrouter,gcs,k8s,ops,benchmarks]' --no-deps
+RUN pip install -e '.[openrouter,gcs,k8s,ops,benchmarks,petri]' --no-deps
 
 # Reproducibility pin (DESIGN §14): stamp the build's git SHA so every run records the exact worker
 # code that produced it. Placed late so changing it only rebuilds this tiny layer (deps/code cached).

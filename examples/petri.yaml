@@ -10,18 +10,21 @@
 # CONCERN RATE. The full per-dimension scores land in the analytics `scores` map; the rich audit
 # transcript is in the .eval log → embedded Inspect viewer.
 #
-# Needs the [petri] extra (inspect_petri) + OPENROUTER_API_KEY. The auditor/judge should be CAPABLE
-# models (they design adversarial scenarios + do nuanced 38-dimension grading); the target is
-# whatever you're auditing.
+# Needs the [petri] extra (inspect_petri, Python >=3.12). All three roles use the `openai/<id>` prefix
+# so they route through the LiteLLM gateway (the in-cluster path: the worker's OPENAI_BASE_URL points
+# at litellm, whose `*` wildcard forwards to OpenRouter — no OPENROUTER_API_KEY needed in the worker,
+# and cost is priced the same as openrouter/). For a LOCAL direct run (no gateway) use `openrouter/<id>`
+# + OPENROUTER_API_KEY instead. The auditor/judge should be CAPABLE models (they design adversarial
+# scenarios + do nuanced 38-dimension grading); the target is whatever you're auditing.
 eval: petri_audit
 dataset: examples/benchmarks/petri_seeds.jsonl
-model: openrouter/anthropic/claude-3.5-haiku        # the TARGET (model under audit)
+model: openai/anthropic/claude-3.5-haiku             # the TARGET (model under audit) — gateway-routed
 batch_size: 4                                        # expensive multi-turn rollouts — keep modest
 harness:
   type: petri
   config:
-    auditor_model: openrouter/anthropic/claude-sonnet-4.5
-    judge_model: openrouter/anthropic/claude-sonnet-4.5
+    auditor_model: openai/anthropic/claude-sonnet-4.5
+    judge_model: openai/anthropic/claude-sonnet-4.5
     max_turns: 15
 scorers:
   - type: petri_judge

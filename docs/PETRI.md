@@ -464,9 +464,11 @@ said "do first"):
 
 **Net:** the Petri eval shape is now proven end-to-end against live models — compose → 3-role audit →
 multi-dimension scores → analytics, with the right UI polarity and full multi-role cost. The ledger /
-orchestrator / worker / ClickHouse schema are untouched, exactly as §7 predicted. (Cluster caveat: the
-deploy image is `python:3.11-slim`, but `inspect_petri` needs **≥3.12** — bump the Dockerfile base to
-run Petri in-cluster. Validated locally in a 3.12 env.)
+orchestrator / worker / ClickHouse schema are untouched, exactly as §7 predicted. (Cluster: the deploy
+image is now `python:3.12-slim` with the `[petri]` extra baked in, so workers can run audits in-cluster.
+In-cluster runs must use `openai/<id>` model prefixes — gateway-routed via LiteLLM's `*` wildcard to
+OpenRouter — not `openrouter/<id>`, which would bypass the gateway; `examples/petri.yaml` is set up
+that way.)
 
 ---
 
@@ -518,9 +520,10 @@ shaped this way (and not re-derive it).
 
 ## 14. What's left (the runbook to finish)
 
-**Status:** all three runbook items are now **done** (see §12) — 14.1 was validated live (one real audit,
-$0.15, which surfaced + fixed the `target`-role + model-slug issues). The only remaining gap is
-operational: the deploy image is `python:3.11-slim` but `inspect_petri` needs ≥3.12 (bump the base).
+**Status:** all three runbook items are **done** (see §12) — 14.1 was validated live (one real audit,
+$0.15, which surfaced + fixed the `target`-role + model-slug issues). The deploy image is now
+`python:3.12-slim` with `[petri]` baked in, so workers run audits in-cluster (use `openai/<id>` model
+prefixes there — gateway-routed). Nothing operational left.
 
 ### 14.1 e2e: one real audit through the gateway — ✅ *done (validated live in a 3.12 env)*
 
