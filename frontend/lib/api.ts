@@ -5,6 +5,7 @@ export type Run = {
   eval: string;
   eval_version?: number;
   model: string;
+  harness?: string | null;   // petri runs relabel the score column as a concern rate (PETRI.md W1)
   accuracy: number | null;
   total: number;
   cost?: number | null;

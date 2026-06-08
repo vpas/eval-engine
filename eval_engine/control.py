@@ -387,7 +387,7 @@ def list_runs() -> list[dict]:
     # eval@version, and cost on the dashboard runs table). api.list_runs renames a couple to its
     # public JSON keys (eval_id→eval, cost_usd→cost).
     return _dict_rows(
-        "SELECT id, eval_id, eval_version, model, accuracy, total, cost_usd, created_at, "
+        "SELECT id, eval_id, eval_version, model, harness, accuracy, total, cost_usd, created_at, "
         "created_by, status, sweep FROM runs ORDER BY created_at DESC"
     )
 

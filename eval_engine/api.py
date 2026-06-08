@@ -164,6 +164,7 @@ def list_runs():
     # differs (eval_id→eval, cost_usd→cost — the dashboard runs table reads these).
     return [
         {"id": r["id"], "eval": r["eval_id"], "eval_version": r["eval_version"], "model": r["model"],
+         "harness": r["harness"],  # lets the runs table relabel a petri run's score as a concern rate (W1)
          "accuracy": r["accuracy"], "total": r["total"], "cost": r["cost_usd"],
          "created_at": r["created_at"], "created_by": r["created_by"], "status": r["status"],
          "sweep": r["sweep"]}

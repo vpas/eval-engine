@@ -6,9 +6,11 @@ Covers the two semantic wrinkles from docs/PETRI.md that the runner relies on:
 Also asserts the harness/scorer return-shape contract the runner unpacks (`_unpack_harness`,
 the (scorer, summarize_fn) tuple), and the lazy [petri]-dependency guard.
 """
+from types import SimpleNamespace
+
 import pytest
 
-from eval_engine import petri
+from eval_engine import petri, runner
 from eval_engine.runner import _unpack_harness
 
 
@@ -86,3 +88,27 @@ def test_factories_raise_clear_error_without_inspect_petri():
         petri.build_harness(petri.PetriConfig(auditor_model="x", judge_model="y"))
     with pytest.raises(RuntimeError, match=r"\[petri\] dependency"):
         petri.build_judge(petri.PetriJudgeConfig())
+
+
+# ---------------------------------------------------------------- W3: multi-role cost (auditor+judge+target)
+
+def test_model_usage_cost_sums_every_role(monkeypatch):
+    # A petri audit's true spend spans target + auditor + judge; _model_usage_cost prices every role in
+    # the shard's per-model usage (EvalLog.stats.model_usage), each via the OpenRouter catalog.
+    monkeypatch.setattr(runner, "_openrouter_prices",
+                        lambda: {"anthropic/claude": (1e-6, 2e-6), "openai/gpt": (3e-6, 4e-6)})
+    usage = {
+        "openrouter/anthropic/claude": SimpleNamespace(input_tokens=1000, output_tokens=500),  # target
+        "openrouter/openai/gpt": SimpleNamespace(input_tokens=2000, output_tokens=1000),        # auditor/judge
+    }
+    # claude: 1000·1e-6 + 500·2e-6 = 0.002 ; gpt: 2000·3e-6 + 1000·4e-6 = 0.010
+    assert runner._model_usage_cost(usage) == pytest.approx(0.012)
+
+
+def test_model_usage_cost_is_graceful(monkeypatch):
+    monkeypatch.setattr(runner, "_openrouter_prices", lambda: {})
+    assert runner._model_usage_cost({}) == 0.0
+    assert runner._model_usage_cost(None) == 0.0
+    # an unpriceable provider (e.g. self-hosted vLLM) contributes $0 rather than raising.
+    assert runner._model_usage_cost(
+        {"vllm/local": SimpleNamespace(input_tokens=9, output_tokens=9)}) == 0.0

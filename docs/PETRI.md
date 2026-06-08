@@ -448,13 +448,14 @@ runner.execute_batch
 | runner: model-roles + dict-Score + summarize hook | ✅ done | additive; **185/185 unit tests green**, non-Petri path unchanged |
 | seeds JSONL + converter + example yaml | ✅ done | 8 real seeds committed; converter regenerates/subsets |
 | unit tests (`tests/unit/test_petri.py`) | ✅ done | W1/W2 reducer, return-shapes, lazy guard — no Petri dep needed |
-| **e2e audit (real auditor/target/judge)** | ⏳ pending | needs `[petri]` + `OPENROUTER_API_KEY` + backends (infra/up.sh) |
-| **dashboard concern-rate relabel** (W1 polarity) | ⏳ pending | small frontend change; "accuracy"→"concern rate" for petri runs |
-| **multi-role cost sum** (W3 option b) | ⏳ pending | target-only today (undercounts auditor+judge); sum `.eval` per-model usage |
+| **e2e audit (real auditor/target/judge)** | 🟡 test scaffolded; live run pending | gated `tests/e2e/test_petri_audit.py` (skips without `[petri]` + `OPENROUTER_API_KEY`); not yet run against a live model |
+| **dashboard concern-rate relabel** (W1 polarity) | ✅ done | run-detail tile + category panel + sample explorer relabel/recolor for `harness==petri`; runs-list shows "⚑ N% concern" (`harness` now on `/runs`) |
+| **multi-role cost sum** (W3 option b) | ✅ done | `runner._model_usage_cost` prices every role from `EvalLog.stats.model_usage`; gated on `model_roles` so single-model runs are byte-for-byte unchanged; unit-tested |
 
 **Net:** the engine now *has* the Petri eval shape end-to-end in code (compose → run → multi-dimension
-scores → analytics + viewer); the three pending items are infra-gated (e2e) or polish (UI label,
-cost fidelity), not architecture. The ledger / orchestrator / worker / ClickHouse schema are
+scores → analytics + viewer), the UI reads it with the right polarity, and cost counts all three
+roles. The one remaining item is a **live** 3-role audit — its test exists and is ready; it just needs
+keys + the `[petri]` extra to turn green. The ledger / orchestrator / worker / ClickHouse schema are
 untouched, exactly as §7 predicted.
 
 ---
@@ -507,9 +508,13 @@ shaped this way (and not re-derive it).
 
 ## 14. What's left (the runbook to finish)
 
-Three items, in order. None is architectural; each is a contained change with a clear acceptance test.
+**Status:** 14.2 (dashboard) and 14.3 (cost) are now **done** (see §12). The only item left is a **live**
+run of 14.1 — its test is written and gated, awaiting keys + the `[petri]` extra.
 
-### 14.1 e2e: one real audit through the gateway *(do first — it de-risks everything)*
+### 14.1 e2e: one real audit through the gateway — 🟡 *test scaffolded; awaiting keys*
+
+The gated test now exists: `tests/e2e/test_petri_audit.py` (skips at collection unless `inspect_petri`
+is installed **and** `OPENROUTER_API_KEY` is set). When keys + infra are available, run it:
 
 ```bash
 pip install -e '.[petri,openrouter]'           # pulls inspect_petri (+ inspect_scout) + the OR provider
@@ -528,7 +533,7 @@ the target lands on Inspect's default role and the two extras resolve; (b) the s
 score — but confirm nothing else collides); (c) `max_turns` vs. our `SAMPLE_TIME_LIMIT` (600s) — a
 deep audit may need a higher per-sample cap (already env-tunable; consider surfacing on `PetriConfig`).
 
-### 14.2 Dashboard: relabel polarity for petri runs *(W1)*
+### 14.2 Dashboard: relabel polarity for petri runs *(W1)* — ✅ done
 
 For a run whose harness is `petri`, the run-detail "accuracy" tile and the runs-list score column
 mean **concern rate** (fraction flagged), and the per-`group_key` breakdown is **misalignment by
@@ -540,7 +545,7 @@ read straight from the `scores` JSON; see §10 Q3). **Acceptance:** a finished p
 *(Cleaner long-term: a per-eval `polarity`/`metric_label` field so the UI isn't harness-sniffing —
 noted in §10 Q1; ship the harness check now.)*
 
-### 14.3 Cost: sum all three model roles *(W3 option b)*
+### 14.3 Cost: sum all three model roles *(W3 option b)* — ✅ done
 
 `runner._cost_usd` prices only the **target** (`spec.model`); a Petri audit also spends on auditor +
 judge (often *more*). The `.eval` log carries per-model usage (`EvalLog.stats.model_usage`), which —

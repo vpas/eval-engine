@@ -178,6 +178,20 @@ def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
     return tokens_in * prompt + tokens_out * completion
 
 
+def _model_usage_cost(model_usage: dict) -> float:
+    """Total $ across EVERY model role used in one shard's eval, from Inspect's per-model usage
+    (``EvalLog.stats.model_usage``: ``{model_name: ModelUsage}``). One shard = one ``inspect_eval``
+    call, so this captures all roles it touched — for a Petri audit that's target **+ auditor + judge**
+    (docs/PETRI.md W3), whose spend the target's per-sample usage alone undercounts. Each role is priced
+    by the same OpenRouter catalog as ``_cost_usd`` (unknown providers → $0, graceful)."""
+    total = 0.0
+    for name, u in (model_usage or {}).items():
+        tin = int(getattr(u, "input_tokens", 0) or 0)
+        tout = int(getattr(u, "output_tokens", 0) or 0)
+        total += _cost_usd(name, tin, tout)
+    return total
+
+
 def _resolve_model(spec: RunSpec) -> tuple[str, str | None]:
     """Resolve the model actually CALLED for inference. For a training-checkpoint run the spec's model
     is an opaque ``checkpoint:<tr>:<step>`` handle (docs/TRAINING_MONITOR.md §4); a mock resolver maps
@@ -379,6 +393,22 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
             "transcript_uri": uri,
             "provider_fingerprint": provider_fp,
         }
+    # Multi-role cost (docs/PETRI.md W3): a multi-model harness (petri: auditor + judge) also spends on
+    # roles BEYOND the target, which the per-sample target usage above doesn't see. Price every role in
+    # this shard's eval (its single inspect_eval call covers them all), then spread the EXTRA (non-target)
+    # spend evenly over the shard's samples. Gated on model_roles, so a single-model run is untouched —
+    # there the per-sample target cost already equals the whole bill. Per-sample remains approximate for
+    # a multi-turn audit (one sample per shard anyway, so it's exact for petri's batch_size=1).
+    if model_roles and out:
+        all_roles_cost = _model_usage_cost(getattr(getattr(inspect_log, "stats", None), "model_usage", None) or {})
+        target_cost = sum(r["cost_usd"] for r in out.values())
+        extra = max(0.0, all_roles_cost - target_cost)
+        if extra:
+            share = extra / len(out)
+            for r in out.values():
+                r["cost_usd"] += share
+            log.debug("run_id=%s multi-role cost: target=$%.6f all-roles=$%.6f (+$%.6f over %d sample(s))",
+                      run_id, target_cost, all_roles_cost, extra, len(out))
     return out
 
 

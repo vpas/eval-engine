@@ -275,6 +275,11 @@ function LiveSamples({ live }: { live: RunLive }) {
 function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: (s: Results["samples"][number]) => void }) {
   const s = res.summary;
   const ci = s.accuracy_ci;
+  // Petri inverts polarity (docs/PETRI.md W1): the "accuracy" number is a CONCERN RATE (fraction
+  // flagged), high = bad, and a "passed" sample is a flagged *finding*, not a success. Relabel +
+  // recolor so a concerning audit doesn't read as a pass. (Harness-sniffing for now; a per-eval
+  // `polarity` field is the cleaner long-term home — PETRI.md §10 Q1.)
+  const isPetri = run.harness === "petri";
   const [filter, setFilter] = useState<"all" | "fail" | "pass">("all");
   const [cat, setCat] = useState("all");
   const [q, setQ] = useState("");
@@ -301,9 +306,9 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
     <>
       <div className="stat-row" style={{ marginBottom: 16 }}>
         <div className="stat">
-          <div className="k"><Icon name="target" className="ic" />accuracy</div>
-          <div className="v" style={{ color: "var(--success)" }}>{pct(s.accuracy)}%</div>
-          <div className="d"><span className="subtle mono">{fmtN(s.passed)}/{fmtN(s.samples)} passed</span></div>
+          <div className="k"><Icon name={isPetri ? "warn" : "target"} className="ic" />{isPetri ? "concern rate" : "accuracy"}</div>
+          <div className="v" style={{ color: isPetri ? "var(--danger)" : "var(--success)" }}>{pct(s.accuracy)}%</div>
+          <div className="d"><span className="subtle mono">{fmtN(s.passed)}/{fmtN(s.samples)} {isPetri ? "flagged" : "passed"}</span></div>
           {ci && (
             <div style={{ marginTop: 10 }}>
               <CIBar lo={ci[0]} hi={ci[1]} acc={s.accuracy} />
@@ -318,14 +323,15 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginBottom: 16 }}>
         <div className="panel">
-          <div className="panel-h"><Icon name="chart" className="ic" /><h2>Accuracy by category</h2><span className="grow" /><span className="sub mono">{res.by_category.length} slices</span></div>
+          <div className="panel-h"><Icon name="chart" className="ic" /><h2>{isPetri ? "Concern by behavior" : "Accuracy by category"}</h2><span className="grow" /><span className="sub mono">{res.by_category.length} slices</span></div>
           <div className="panel-b">
             {res.by_category.length === 0 ? <Empty icon="chart">No category breakdown.</Empty> : (
               <div className="bars">
                 {res.by_category.slice().sort((a, b) => b.accuracy - a.accuracy).map((c) => (
                   <div className="bar-row" key={c.category} style={{ cursor: "pointer" }} onClick={() => { setCat(c.category || "—"); setFilter("all"); }}>
                     <span className="lbl">{c.category || "—"}</span>
-                    <div className="bar-track"><div className={"bar-fill" + (c.accuracy >= 0.8 ? " success" : "")} style={{ width: pct(c.accuracy) + "%" }} /></div>
+                    {/* petri: high = concerning, so never the green "success" ramp — paint it danger */}
+                    <div className="bar-track"><div className={"bar-fill" + (!isPetri && c.accuracy >= 0.8 ? " success" : "")} style={{ width: pct(c.accuracy) + "%", ...(isPetri ? { background: "var(--danger)" } : {}) }} /></div>
                     <span className="pct">{pct(c.accuracy)}% <span className="subtle">· {c.n}</span></span>
                   </div>
                 ))}
@@ -352,8 +358,13 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
             <div className="fsearch" style={{ maxWidth: 240 }}><Icon name="search" className="ic" /><input placeholder="sample id / category…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
             <div className="seg">
               <button className={filter === "all" ? "on" : ""} onClick={() => setFilter("all")}>all <span className="subtle">{res.samples.length}</span></button>
-              <button className={filter === "fail" ? "on" : ""} onClick={() => setFilter("fail")} style={filter === "fail" ? { color: "var(--danger)" } : undefined}>failures <span className="subtle">{failCount}</span></button>
-              <button className={filter === "pass" ? "on" : ""} onClick={() => setFilter("pass")}>passes</button>
+              {isPetri ? (<>
+                <button className={filter === "pass" ? "on" : ""} onClick={() => setFilter("pass")} style={filter === "pass" ? { color: "var(--danger)" } : undefined}>flagged <span className="subtle">{res.samples.length - failCount}</span></button>
+                <button className={filter === "fail" ? "on" : ""} onClick={() => setFilter("fail")}>clean <span className="subtle">{failCount}</span></button>
+              </>) : (<>
+                <button className={filter === "fail" ? "on" : ""} onClick={() => setFilter("fail")} style={filter === "fail" ? { color: "var(--danger)" } : undefined}>failures <span className="subtle">{failCount}</span></button>
+                <button className={filter === "pass" ? "on" : ""} onClick={() => setFilter("pass")}>passes</button>
+              </>)}
             </div>
             <select className="input" style={{ width: "auto", fontFamily: "var(--mono)" }} value={cat} onChange={(e) => setCat(e.target.value)}>
               {cats.map((c) => <option key={c} value={c}>{c === "all" ? "all categories" : c}</option>)}
@@ -370,7 +381,13 @@ function Analysis({ run, res, onOpen }: { run: RunDetail; res: Results; onOpen: 
             {rows.map((sm) => (
               <tr key={sm.sample_id} className={sm.transcript_uri ? "click" : ""} onClick={() => sm.transcript_uri && onOpen(sm)}>
                 <td className="mono">{sm.sample_id}</td>
-                <td>{sm.passed ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span> : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>}</td>
+                <td>{isPetri
+                  ? (sm.passed
+                      ? <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>⚑ flagged</span>
+                      : <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>○ clean</span>)
+                  : (sm.passed
+                      ? <span className="mono" style={{ color: "var(--success)", fontSize: 11.5 }}>● pass</span>
+                      : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }}>○ fail</span>)}</td>
                 <td className="cellmuted">{sm.category || "—"}</td>
                 <td className="right num">{sm.score?.toFixed(2)}</td>
                 <td className="right num cellmuted">{sm.tokens ? fmtN(sm.tokens) : "—"}</td>

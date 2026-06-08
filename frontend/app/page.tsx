@@ -111,7 +111,12 @@ export default function Dashboard() {
                   <td><span className="mono">{r.eval}</span>{r.eval_version != null && <span className="hash"> @{r.eval_version}</span>}</td>
                   <td><Provider id={r.model} /></td>
                   <td><StatusPill status={r.status || "queued"} /></td>
-                  <td>{active ? <span className="mono subtle" style={{ fontSize: 11.5 }}><span className="spin" style={{ marginRight: 6 }} />in progress</span> : <AccBar value={r.accuracy} />}</td>
+                  <td>{active
+                    ? <span className="mono subtle" style={{ fontSize: 11.5 }}><span className="spin" style={{ marginRight: 6 }} />in progress</span>
+                    : r.harness === "petri"  // W1: petri's score is a CONCERN rate (flagged fraction), high = worse
+                      ? (r.accuracy == null ? <span className="subtle">—</span>
+                         : <span className="mono" style={{ color: "var(--danger)", fontSize: 11.5 }} title="Petri: concern rate — fraction of audits flagged (high = worse)">⚑ {pct(r.accuracy)}% concern</span>)
+                      : <AccBar value={r.accuracy} />}</td>
                   <td className="right num">{fmtN(r.total)}</td>
                   <td className="right num cellmuted">{fmtCost(r.cost ?? 0)}</td>
                   <td className="cellmuted mono" style={{ fontSize: 11.5 }} title={r.created_by ?? ""}>{(r.created_by ?? "—").split("@")[0]}</td>
