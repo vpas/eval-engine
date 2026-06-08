@@ -54,6 +54,7 @@ export const ICONS: Record<string, string> = {
   bell: '<path d="M8 2a4 4 0 014 4c0 4 1.5 5 1.5 5h-11S4 10 4 6a4 4 0 014-4z"/><path d="M6.5 13a1.6 1.6 0 003 0"/>',
   activity: '<path d="M1.5 8H4l1.5-4.5L8.5 13l2-7 1.3 2H14.5"/>',
   server: '<rect x="2.5" y="2.5" width="11" height="4.5" rx="1"/><rect x="2.5" y="9" width="11" height="4.5" rx="1"/><circle cx="5" cy="4.75" r="0.6" fill="currentColor"/><circle cx="5" cy="11.25" r="0.6" fill="currentColor"/>',
+  topology: '<rect x="6" y="1.5" width="4" height="3.5" rx="1"/><rect x="1.5" y="11" width="4" height="3.5" rx="1"/><rect x="10.5" y="11" width="4" height="3.5" rx="1"/><path d="M8 5v2.5M8 7.5L3.5 11M8 7.5L12.5 11"/>',
 };
 
 export function Icon({ name, className = "ic", size, style }:

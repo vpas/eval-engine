@@ -480,3 +480,47 @@ hr.div { border: none; border-top: 1px solid var(--border); margin: 0; }
 .cellmark.pass { background: var(--success-soft); color: var(--success); }
 .cellmark.fail { background: var(--danger-soft); color: var(--danger); }
 .cellmark.na { background: var(--panel-3); color: var(--fg-subtle); }
+
+/* ============================================================
+   System Diagram (React Flow / @xyflow/react) — dark theme
+   ============================================================ */
+.sysflow { background: var(--canvas-inset); }
+.sysflow .react-flow__background { color: var(--border-muted); }
+.sysflow .react-flow__edge-path { stroke-width: 1.5px; }
+.sysflow .react-flow__edge-text { fill: var(--fg-muted); font-size: 10px; font-family: var(--mono); }
+.sysflow .react-flow__edge-textbg { fill: var(--canvas-inset); }
+.sysflow .react-flow__controls { box-shadow: 0 1px 4px rgba(0,0,0,.4); border-radius: var(--r); overflow: hidden; }
+.sysflow .react-flow__controls-button { background: var(--panel-2); border-bottom: 1px solid var(--border); color: var(--fg); fill: var(--fg); }
+.sysflow .react-flow__controls-button:hover { background: var(--panel-3); }
+.sysflow .react-flow__minimap { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r); }
+.sysflow .react-flow__attribution { background: transparent; }
+.sysflow .react-flow__attribution a { color: var(--fg-subtle); }
+.rf-h { opacity: 0; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; }
+
+.synode {
+  width: 168px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 9px 10px 10px; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: border-color .15s, box-shadow .15s;
+}
+.synode:hover { border-color: var(--fg-muted); }
+.synode.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.synode.ext { border-style: dashed; background: var(--panel-2); }
+.synode .syhead { display: flex; align-items: center; gap: 7px; margin-bottom: 2px; }
+.synode .syhead .ic { width: 14px; height: 14px; color: var(--fg-muted); }
+.synode .syname { font-weight: 600; font-size: 12px; letter-spacing: -.1px; color: var(--fg); }
+.synode .syled { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; flex: none; box-shadow: 0 0 0 3px var(--panel); }
+.synode .sysub { font-size: 10px; color: var(--fg-subtle); font-family: var(--mono); line-height: 1.35; }
+.synode .symetrics { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.synode .symet { font-size: 9.5px; font-family: var(--mono); color: var(--fg-muted); background: var(--panel-3); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.synode .symet b { color: var(--fg); font-weight: 600; }
+
+/* detail side-panel */
+.syside {
+  position: absolute; top: 12px; right: 12px; width: 320px; z-index: 5;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: 0 8px 28px rgba(0,0,0,.5); animation: slidein .18s ease;
+  max-height: calc(100% - 24px); overflow-y: auto;
+}
+.sylegend { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; font-size: 11px; font-family: var(--mono); color: var(--fg-muted); }
+.sylegend span { display: inline-flex; align-items: center; gap: 6px; }
+.sylegend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
