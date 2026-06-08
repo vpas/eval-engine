@@ -11,8 +11,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# curl/ca-certs for wheels; helm for the agentic k8s sandbox (inspect-k8s-sandbox shells out to it).
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+# curl/ca-certs for wheels; git for the [petri] extra (inspect_petri installs from a git+https pin);
+# helm for the agentic k8s sandbox (inspect-k8s-sandbox shells out to it).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz -C /tmp \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm && rm -rf /tmp/linux-amd64
