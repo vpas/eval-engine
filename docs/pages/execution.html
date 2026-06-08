@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Execution & Orchestration — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">How it works</span>
+<h1>Execution &amp; orchestration</h1>
+<p class="lead">
+  This is the custom IP — the part most likely to harbor correctness bugs, so it is the part specified
+  most carefully. Three goals drive every mechanism below:
+  <strong>(1) no completed sample is ever lost</strong>,
+  <strong>(2) no sample's effects are double-counted</strong> (at-least-once execution →
+  effectively-once results), and
+  <strong>(3) every state is crash-recoverable and idempotent on re-entry</strong>.
+</p>
+
+<div class="key">
+  <span class="tag">The design stance</span>
+  The Postgres ledger is the <strong>single source of truth for execution state</strong>. No critical
+  coordination lives in worker memory. Any component can die at any time; recovery is always
+  "re-derive from the ledger." That is the entire reason for choosing a ledger over an in-memory
+  controller — so the system leans on it fully.
+</div>
+
+<h2 class="anchor-h" id="lifecycle">A run, end to end</h2>
+<ol>
+  <li>A user defines an eval + picks a model and config → <code>POST /runs</code> (authenticated via
+      OIDC). The API validates the RunSpec's plugins against the registry.</li>
+  <li>The API <strong>launches</strong>: it loads the dataset, classifies the run into a lane, creates
+      the <code>runs</code> row (<code>queued</code>), and <strong>expands</strong> the dataset slice
+      into <code>sample_tasks</code> ledger rows. It returns <code>202</code> immediately.</li>
+  <li>The orchestrator <strong>admits</strong> the run (<code>queued → running</code>) under the
+      two-lane policy.</li>
+  <li>Workers atomically <strong>claim</strong> a shard, run it as one Inspect Task (model calls via the
+      gateway, then scorers), and <strong>commit</strong> each result.</li>
+  <li>Per sample: transcript → object store; result <strong>inserted to ClickHouse with a durable
+      ack</strong>; <strong>then</strong> the ledger row flips <code>done</code>. Transient failures
+      retry with backoff; permanent ones are recorded.</li>
+  <li>When the ledger is fully terminal, the orchestrator <strong>finalizes</strong>: aggregate metrics
+      into the run, archive failures, prune the ledger.</li>
+  <li>Analyze via the dashboard's ClickHouse-backed views + the Inspect viewer. <strong>Reproduce</strong>
+      by cloning the RunSpec.</li>
+</ol>
+
+<h2 class="anchor-h" id="fsm">Run lifecycle state machine</h2>
+<pre><code>      launch (API)
+          │
+          ▼
+     ┌────────┐  admit (orch)   ┌──────────┐  ledger expanded   ┌─────────┐
+     │ queued │ ──────────────► │ expanding│ ─────────────────► │ running │
+     └────────┘                 └──────────┘                    └────┬────┘
+          │ invalid / denied                  all tasks terminal     │
+          ▼                                    & durable in CH        ▼
+     ┌────────┐                                              ┌────────────┐
+     │ failed │ ◄── fatal orchestration error ───────────────│ finalizing │
+     └────────┘                                              └─────┬──────┘
+                                                                   │ aggregates written,
+     ┌───────────┐  cancel / hard budget breach                    │ ledger pruned
+     │ cancelled │ ◄── (orch, from queued/expanding/running)        ▼
+     └───────────┘                                          ┌───────────┐
+                                                            │ completed │   (or budget_exceeded)
+                                                            └───────────┘</code></pre>
+<p>
+  Every transition is a single guarded SQL <code>UPDATE</code> and idempotent on re-entry. Expansion is
+  <code>INSERT … ON CONFLICT DO NOTHING</code>; the <code>running → finalizing</code> condition is a pure
+  query (safe to re-evaluate); finalize steps all recompute or no-op on a second pass. So a crash in any
+  state is recovered by simply re-running the tick.
+</p>
+
+<h2 class="anchor-h" id="claim">Claim, lease &amp; retry</h2>
+<p>
+  Workers do not talk to each other. The <a href="architecture.html#postgres">ledger claim</a>
+  (<code>FOR UPDATE SKIP LOCKED</code>) is the only scheduler. Three mechanisms keep at-least-once
+  execution safe and progress-making:
+</p>
+<table>
+  <thead><tr><th>Mechanism</th><th>What it does</th><th>Why it's safe</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Lease</strong></td>
+        <td>A claim sets <code>lease_expires_at = now() + 10min</code>. A long agentic/SWE batch renews
+            it from a background heartbeat thread.</td>
+        <td>If a worker dies, renewal stops, the lease lapses, and the claim query reclaims the
+            <code>running</code> row. No lost work.</td></tr>
+    <tr><td><strong>Retry with backoff</strong></td>
+        <td>A <em>transient</em> sample error re-queues with exponential <code>not_before</code> backoff
+            up to <code>MAX_ATTEMPTS</code> (default 3), then goes terminal <code>failed</code>.</td>
+        <td><code>not_before</code> gates re-claim, so a poison sample backs off instead of head-of-line
+            blocking the queue. A merely low score is <em>not</em> a failure.</td></tr>
+    <tr><td><strong>Per-run cap</strong></td>
+        <td>The claim is bounded by <code>headroom = max_inflight − live_running</code>.</td>
+        <td>A big run can't eat the cluster; workers flow to runs with headroom. The
+            <a href="#admission">fairness</a> primitive.</td></tr>
+  </tbody>
+</table>
+<p>
+  Errors are taxonomized: <strong>RetryableError</strong> (429, timeout, transient tool/network) retries;
+  <strong>FatalError</strong> (malformed sample) and the terminal <strong>BudgetExceeded</strong> do not.
+  Because all result writes are keyed by <code>(run_id, sample_id)</code> and dedup in ClickHouse, a
+  <em>wrongful</em> reclaim (e.g. a missed heartbeat) is wasted compute, never corruption.
+</p>
+
+<h2 class="anchor-h" id="commit">The commit protocol — ack-before-flip</h2>
+<p>
+  This is the heart of "no completed sample is ever lost." ClickHouse is bad at many tiny inserts and we
+  need exactly-once analytics despite at-least-once execution. The result path solves both. Per shard,
+  the commit is an <strong>ordered, ack-gated, idempotent</strong> write where the ledger flip is the
+  single commit point:
+</p>
+<pre><code>1.  write each transcript → object store      (idempotent, deterministic key)
+2.  async-insert the shard's results → ClickHouse with wait_for_async_insert=1
+        └─ BLOCK until ClickHouse durably acks the rows (in a part, not just buffered)
+3.  ONLY THEN flip the ledger rows  status = 'done'  (+ loaded)</code></pre>
+<div class="ok">
+  <span class="tag">The invariant</span>
+  <code>status = 'done'</code> ⟹ the result is durable in ClickHouse. A crash <em>before</em> the flip
+  leaves the row <code>running</code> → the lease expires → the shard re-executes → the transcript
+  re-writes to the same key and the ClickHouse re-insert collapses via
+  <code>ReplacingMergeTree((run_id, sample_id))</code>. Atomicity becomes <strong>ordering +
+  idempotency</strong> (write the data durably, then commit the pointer), not a distributed
+  transaction. <code>wait_for_async_insert=1</code> still server-batches across workers, so batching is
+  preserved.
+</div>
+<p>
+  The implementation is <code>runner.commit_batch</code>: it inserts the clean results, then flips each
+  ledger row, then marks <code>loaded</code> — reading the attempt count <em>before</em> the flip so the
+  ClickHouse row carries the correct ReplacingMergeTree version.
+</p>
+
+<h2 class="anchor-h" id="exactly-once">Exactly-once analytics</h2>
+<p>
+  At-least-once execution (lease reclaim, retries) means a sample can be computed more than once. Two
+  things make the <em>results</em> effectively-once:
+</p>
+<ul>
+  <li><strong>ReplacingMergeTree keyed on the sample.</strong> A re-execution writes the same key with a
+      higher <code>attempt</code> (the engine version); the newer result wins and a duplicate re-insert
+      collapses on merge / <code>FINAL</code>.</li>
+  <li><strong>Headline metrics computed once at finalize.</strong> The run summary is computed over the
+      deduped partition with <code>FINAL</code> — <em>not</em> by an insert-time materialized view, which
+      would fire per insert block and never see the later collapse, double-counting a re-loaded batch.
+      In-progress numbers come from the gateway (cost) + ledger counts (progress), which can't
+      double-count.</li>
+</ul>
+
+<h2 class="anchor-h" id="live">Live metrics</h2>
+<p>
+  Rather than incrementing a hot <code>done_samples</code> counter on every sample (100k contended
+  writes/run), the orchestrator <strong>derives</strong> the rollup each tick and writes it once to the
+  <code>runs</code> row: progress from ledger status counts, cost from the committed ledger rows, and a
+  live accuracy. Clients read live <em>and</em> final numbers from one authoritative place (the
+  <code>runs.status</code> distinguishes them). A subtlety: the live ClickHouse score read uses the full
+  <code>(eval_id, target_id, run_id)</code> sort-key prefix — filtering on <code>run_id</code> alone (the
+  3rd key column) can't use the index and would scan the whole month's partition.
+</p>
+
+<h2 class="anchor-h" id="budget">Budget enforcement</h2>
+<p>
+  A run can carry a <code>budget_usd</code> cap. Defense in depth, two layers:
+</p>
+<ul>
+  <li><strong>Soft stop (orchestrator).</strong> Each tick it reads committed cost; once it reaches the
+      cap it converts still-<code>queued</code> tasks to a <em>distinct</em> terminal status
+      <code>budget_skipped</code> (error type <code>budget_exceeded</code>). Workers also enforce this to
+      stop claiming early.</li>
+  <li><strong>Why a distinct class.</strong> <code>budget_skipped</code> is <em>not</em> <code>failed</code>
+      — so it neither inflates the failure count (which would trip spurious fail-fast) nor burns
+      retries. In-flight samples finish naturally; the run finalizes with status
+      <code>budget_exceeded</code>.</li>
+</ul>
+<p>The canonical form (a per-call gateway reject tagged by <code>run_id</code>) enforces the same
+   semantics at the gateway; the control-side sweep is the v1 implementation.</p>
+
+<h2 class="anchor-h" id="cancel">Cancellation</h2>
+<p>
+  <strong>Default = graceful drain.</strong> On cancel, the run flips to <code>cancelled</code> (a guarded
+  atomic update that can't race the orchestrator into a double-finalize), queued tasks are marked
+  terminal, and a worker's already-claimed batch finishes and commits harmlessly against soon-pruned
+  rows. The committed counts are snapshotted and the ledger pruned — the run settles like any other
+  terminal run. Partial results stay queryable. Cancelling from <code>queued</code>/<code>expanding</code>
+  is immediate.
+</p>
+
+<h2 class="anchor-h" id="finalize">Finalization &amp; pruning</h2>
+<ol>
+  <li><strong>Barrier.</strong> All tasks terminal. Because of ack-before-flip, <code>done</code> already
+      implies durable in ClickHouse — there is no separate "loaded" wait.</li>
+  <li><strong>Aggregate.</strong> Compute <code>pass_rate</code>, mean score, CI, tokens from ClickHouse
+      (<code>FINAL</code>, full sort-key prefix) + cost from the gateway tally → write onto the run.</li>
+  <li><strong>Archive &amp; prune.</strong> Copy <em>failed</em> task rows to a durable
+      <code>failed_task_archive</code> (for post-hoc debugging), then
+      <code>DELETE FROM sample_tasks WHERE run_id=$1</code>. Keeps Postgres tiny while preserving the
+      only per-task history anyone wants later.</li>
+</ol>
+<p>Every sub-step is idempotent, so a crash mid-finalize just re-runs the no-ops.</p>
+
+<h2 class="anchor-h" id="admission">Admission &amp; scheduling</h2>
+<p>
+  At ~1,000 runs/day with mostly one team, there is little weighted team contention to arbitrate — so
+  v1 does <strong>not</strong> build a fair-share allocator. The real risk is <strong>head-of-line
+  latency</strong>: a quick 50-sample iteration run stuck behind big full-dataset runs. The fix is
+  constants + an admission comparator, no per-tick allocator:
+</p>
+<ul>
+  <li><strong>Global cap</strong> on concurrently-running runs (default 50) — blast radius + shared
+      provider quota.</li>
+  <li><strong>Two lanes.</strong> A run is classified <code>interactive</code> (a <code>limit</code>, or
+      ≤200 samples) or <code>batch</code> at launch; an explicit <code>lane</code> overrides. Interactive
+      uses a small per-run <code>max_inflight</code> (5 — many iterators progress); batch uses a larger
+      one (50).</li>
+  <li><strong>Reserved, borrowable interactive slice</strong> (default 12 ≈ 25%). Batch can borrow it
+      only when there is no interactive demand, and <strong>yields by attrition</strong> when an
+      interactive run arrives — never mid-run preemption.</li>
+</ul>
+<p>
+  The whole policy lives at the <strong>admission boundary</strong>; the per-run <code>max_inflight</code>
+  is then enforced for free inside the claim's <code>LIMIT</code>. KEDA scales workers on
+  <code>count(queued)</code> with a <code>maxReplicas</code> cap so worker count never outruns what the
+  serving tier can feed.
+</p>
+
+<h2 class="anchor-h" id="failures">Failure-mode walkthrough</h2>
+<table>
+  <thead><tr><th>Failure</th><th>What happens</th><th>Why it's safe</th></tr></thead>
+  <tbody>
+    <tr><td>Worker dies after the ledger flip</td><td>task is <code>done</code></td><td>result already durable in ClickHouse (ack-before-flip)</td></tr>
+    <tr><td>Worker dies after CH insert, before flip</td><td>stays <code>running</code> → lease expires → re-executed</td><td>re-insert collapses via ReplacingMergeTree; same transcript key</td></tr>
+    <tr><td>Two workers grab one task</td><td>impossible</td><td><code>FOR UPDATE SKIP LOCKED</code> + lease</td></tr>
+    <tr><td>Orchestrator dies mid-finalize</td><td>standby re-enters <code>finalizing</code></td><td>all finalize steps idempotent</td></tr>
+    <tr><td>Long agentic sample exceeds lease</td><td>heartbeat extends it</td><td>not wrongly reclaimed</td></tr>
+    <tr><td>Worker leaves an orphaned sandbox pod</td><td>sweeper reaps it (labels carry run/sample)</td><td>teardown guaranteed</td></tr>
+    <tr><td>Whole cluster restart</td><td>all leases expire; runs resume from the ledger</td><td>no run-level memory state to lose</td></tr>
+  </tbody>
+</table>
+
+</body>
+</html>

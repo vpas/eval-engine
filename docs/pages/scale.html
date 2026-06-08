@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handling the Load — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">How it works</span>
+<h1>How it handles the stated load</h1>
+<p class="lead">
+  The <a href="index.html#load">scale envelope</a> isn't decoration — it's the input every decision is
+  tuned to. This page does the arithmetic: where the big numbers come from, which two of them force real
+  infrastructure, and how each component absorbs its share without over-engineering the rest.
+</p>
+
+<div class="stats">
+  <div class="stat"><div class="v">~1B</div><div class="l">sample-evals / month</div></div>
+  <div class="stat"><div class="v">~12B</div><div class="l">rows retained (12 mo)</div></div>
+  <div class="stat"><div class="v">~385/s</div><div class="l">sustained throughput</div></div>
+  <div class="stat"><div class="v">~8/s</div><div class="l">peak claim QPS (batch 50)</div></div>
+</div>
+
+<h2 class="anchor-h" id="reconcile">Where the numbers come from</h2>
+<p>
+  ~1,000 runs/day (~30k/month) sounds enormous, but it reflects a <strong>workload mix</strong>, not a
+  huge sample count. A representative day:
+</p>
+<pre><code>~300 full runs   × ~100k samples  = 30.0M
+~700 subset runs × ~5k   samples  =  3.5M
+                         per day  ≈ 33.5M sample-evals
+                       per month  ≈  1.0B          → ~12B retained over 12 months
+   sustained avg = 33.5M / 86,400s ≈ 385 samples/s   (bursty; higher at peak)</code></pre>
+<p>
+  Many runs are small subsets for fast iteration, which is why the run <em>count</em> is high while the
+  sample <em>volume</em> stays at ~1B/month. The two figures that genuinely force infrastructure survive
+  this reconciliation intact: the <strong>ClickHouse sizing</strong> (~1B/mo, ~12B retained) and the
+  <strong>claim QPS</strong> (~8/s at batch 50, low enough that a plain Postgres claim suffices).
+</p>
+
+<div class="key">
+  <span class="tag">The two forcing numbers</span>
+  Only <strong>(1) the 12B-row analytics store</strong> and <strong>(2) the global cross-worker rate
+  limit</strong> demand heavyweight infrastructure (ClickHouse + Redis-coordinated LiteLLM). Everything
+  else is sized to those two and kept minimal — that restraint is itself a scaling decision, because a
+  simpler system has fewer ways to fall over.
+</div>
+
+<h2 class="anchor-h" id="distribution">Throughput — distribution &amp; autoscaling</h2>
+<p>
+  385 samples/s sustained (bursty above that) is not a single-box workload, so distribution is mandatory.
+  The execution plane absorbs it by <strong>horizontal, stateless fan-out</strong>:
+</p>
+<ul>
+  <li><strong>KEDA-autoscaled workers</strong> scale on <code>count(queued)</code> from zero up to a
+      <code>maxReplicas</code> cap. Below the cap, worker count tracks queued work; at the cap, extra
+      demand waits cheaply in the ledger rather than in over-provisioned pods. Workers run on a spot pool
+      and scale to zero between runs.</li>
+  <li><strong>No coordination overhead.</strong> Workers never talk to each other — the ledger claim is
+      the only synchronization, so adding workers adds throughput linearly with no chatter.</li>
+  <li><strong>Shard granularity.</strong> A worker claims a batch and runs it as one Inspect Task; the
+      batch size defaults large for fast uniform QA and drops to 1 for high-variance agentic, matching
+      the work to the harness.</li>
+</ul>
+
+<h2 class="anchor-h" id="claim">Why a plain claim is enough</h2>
+<p>
+  A common worry at fan-out scale is a thundering herd on the queue head. The arithmetic says it's a
+  non-issue here:
+</p>
+<pre><code>claim QPS = throughput / batch_size ≈ 385 / 50 ≈ 8 claims/s   (cluster-wide, at peak)</code></pre>
+<p>
+  ~8 claims/s — with typically &lt;1 concurrent claim per run — is something a single Postgres laughs at,
+  so the plain ordered <code>FOR UPDATE SKIP LOCKED</code> claim needs no hash-sharding.
+  <code>not_before</code> already removes the poison-sample head-of-line problem. Hash-bucketing the
+  claim is a deferred, <em>purely additive</em> optimization reserved for a different workload shape
+  (batch≈1, sub-second samples, thousands of single-run claimers) — adding it later is a column + an
+  index + a predicate, no migration.
+</p>
+
+<h2 class="anchor-h" id="analytics">Analytics — surviving 12B rows</h2>
+<p>
+  The store is sized directly to the forcing number. The design choices that make 12B rows tractable:
+</p>
+<table>
+  <thead><tr><th>Pressure</th><th>How it's absorbed</th></tr></thead>
+  <tbody>
+    <tr><td>~1B inserts/month, bursty</td><td>Async-insert with server-side batching → one part per shard, no write-amplification under many concurrent workers.</td></tr>
+    <tr><td>12B rows to scan/slice</td><td>Columnar storage + <code>LowCardinality</code> dimensions + an <code>ORDER BY</code> keyed on the actual filter columns (eval, model, run).</td></tr>
+    <tr><td>12-month retention</td><td>Monthly partitions aligned to the TTL → expiry is a partition drop, not a delete.</td></tr>
+    <tr><td>Exact headline metrics</td><td>Computed once at finalize with <code>FINAL</code> over the deduped <em>run</em> partition (~100k rows) — cheap, never a full-table merge.</td></tr>
+    <tr><td>Live progress on ~50 runs</td><td>Read without <code>FINAL</code>, throttled to ~once/minute, on the full sort-key prefix so it hits a tight index range, not a billion-row scan.</td></tr>
+  </tbody>
+</table>
+<p>
+  The control plane never grows with this: the <strong>ledger is ephemeral</strong>, so Postgres only
+  ever holds the in-flight slice (tens of runs × up to 100k tasks), pruned on finalize. The 12B rows
+  live exclusively in ClickHouse.
+</p>
+
+<h2 class="anchor-h" id="ratelimit">The global rate limit</h2>
+<p>
+  The second forcing requirement. With a mix of API providers (hard quota) and self-hosted vLLM (finite
+  capacity), the cap on calls-in-flight must be <strong>global across all workers and gateway
+  replicas</strong> — a per-pod limit would let N replicas collectively blow a provider quota. The
+  solution:
+</p>
+<ul>
+  <li><strong>All traffic through LiteLLM</strong> (≥2 replicas), with per-model <code>rpm</code>/
+      <code>tpm</code> caps enforced <em>pre-call</em> against <strong>Redis-shared counters</strong>
+      (<code>usage-based-routing-v2</code>). The cap is a counter under a hashed key that every replica
+      reads — so it protects provider quota cluster-wide.</li>
+  <li><strong>Fail-fast, retry at the worker.</strong> <code>num_retries: 0</code> means an over-cap call
+      gets an immediate 429, which the worker's retry-with-backoff handles — pushing the wait into the
+      ledger (cheap) rather than holding a gateway connection.</li>
+  <li><strong>Load-tested.</strong> Filling a bucket on one gateway replica caused a different replica to
+      return 429 for the same model, proving the cap is shared via Redis, not per-replica. (Fully
+      synchronized bursts can briefly overshoot via a read-then-increment race, then converge — acceptable
+      for quota protection.)</li>
+</ul>
+
+<h2 class="anchor-h" id="admission-scale">Admission keeps small runs fast under load</h2>
+<p>
+  At peak (~50 concurrent runs) the scaling risk shifts from throughput to <strong>latency
+  fairness</strong>: a quick iteration run mustn't starve behind big batch runs. The
+  <a href="execution.html#admission">two-lane admission</a> + per-run <code>max_inflight</code> cap solve
+  exactly that with constants — a big run can't consume the whole cluster, so any newly-admitted run
+  always makes progress, and a reserved interactive slice guarantees quick runs get slots now. No
+  per-tick allocator is built, because at this scale (mostly one team) there is almost no weighted team
+  contention to arbitrate.
+</p>
+
+<h2 class="anchor-h" id="sandbox">The one acknowledged ceiling — agentic churn</h2>
+<p>
+  The honest scaling limit is agentic sandboxing. Pod create/destroy <em>throughput</em> (not boot
+  latency) tops out at low-hundreds/s due to Kubernetes control-plane limits
+  (scheduler/kubelet/IPAM/gVisor-boot). v1 ships per-sample pods, which is within budget
+  <strong>while agentic is a minority of the 385/s aggregate</strong> — the common early case. Cold-start
+  is hidden by pre-pulled images and expand-time pre-warm.
+</p>
+<div class="warn"><span class="tag">Gated on a measured trigger</span>
+  When agentic volume approaches the per-sample-pod ceiling, the mitigation is a <strong>pooled microVM
+  snapshot-restore sandbox service</strong> that keeps the kube-scheduler out of the per-sample path —
+  a trigger-gated future build, not a v1 cost. Warm pools of pre-<em>booted</em> pods were considered and
+  dropped: they hide cold-start latency but don't move the create/destroy throughput ceiling. This is the
+  system's top-tier scaling risk and is explicitly gated on a churn spike.</div>
+
+<h2 class="anchor-h" id="headroom">Designed headroom vs. deferred work</h2>
+<p>
+  Several scaling levers are intentionally <em>not</em> built yet, each because the current load doesn't
+  require it and each additive when it does — so they're triggers, not gaps:
+</p>
+<table>
+  <thead><tr><th>Lever</th><th>Re-introduce when…</th></tr></thead>
+  <tbody>
+    <tr><td>Weighted fair-share scheduler</td><td>multiple teams with different weights measurably starve each other under shared capacity.</td></tr>
+    <tr><td>Direct (gateway-bypass) vLLM path</td><td>in-cluster inference carries load <em>and</em> the gateway proxy is the measured bottleneck (thousands of calls/s).</td></tr>
+    <tr><td>Pooled microVM sandbox</td><td>agentic create/destroy throughput exceeds the per-sample-pod ceiling.</td></tr>
+    <tr><td>Hash-bucketed claim</td><td>the batch≈1 / sub-second / thousands-of-claimers regime appears.</td></tr>
+  </tbody>
+</table>
+<p>
+  The net: the system is built to the load it actually has, with a documented, additive path to the next
+  order of magnitude on each axis — and no speculative complexity on the critical path before the
+  workload proves the need.
+</p>
+
+</body>
+</html>

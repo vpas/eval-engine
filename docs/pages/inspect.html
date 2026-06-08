@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Integration with Inspect AI — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">Foundations</span>
+<h1>Integration with Inspect&nbsp;AI</h1>
+<p class="lead">
+  Building an eval <em>execution kernel</em> — dataset → solver → scorer, with tool use, sandboxing,
+  model-graded scoring, and transcript logging — is a large, solved problem. Eval Engine
+  <strong>adopts <a href="https://inspect.aisi.org.uk/">Inspect&nbsp;AI</a> directly</strong> as that
+  kernel and spends its effort on the differentiated platform around it: distributed orchestration, the
+  ClickHouse analytics projection, and the dashboard. We call this stance <strong>Inspect-native</strong>.
+</p>
+
+<h2 class="anchor-h" id="meaning">What "Inspect-native" means</h2>
+<p>
+  It is a stronger claim than "we use Inspect." There is no wrapper layer re-abstracting Inspect's types:
+</p>
+<ul>
+  <li>Harnesses <strong>are</strong> Inspect <code>Solver</code>s.</li>
+  <li>Scorers <strong>are</strong> Inspect <code>Scorer</code>s.</li>
+  <li>Workers call <code>inspect_ai.eval(...)</code> directly.</li>
+  <li>The Inspect <code>.eval</code> log is our <strong>source-of-truth artifact</strong> in object
+      storage.</li>
+</ul>
+<p>
+  Inspect's <code>Dataset → Solver → Scorer</code> abstractions match the domain model 1:1, which is the
+  whole reason the composability guarantee (<em>any model × harness × dataset × scorer</em>) is cheap to
+  uphold. We accept the coupling deliberately and would only extract an interface if a genuinely
+  non-Inspect backend were ever needed.
+</p>
+
+<div class="key"><span class="tag">The consistency rule</span>
+  Being Inspect-native does <strong>not</strong> make Inspect's log format the analytics store. Every
+  completed sample is flattened (ETL'd) into ClickHouse for querying. The <code>.eval</code> log is the
+  immutable artifact; ClickHouse holds the queryable projection. That projection is <em>indexing</em>,
+  not an abstraction layer — so it stays consistent with the Inspect-native stance.</div>
+
+<h2 class="anchor-h" id="why">Why Inspect (and not the alternatives)</h2>
+<table>
+  <thead><tr><th>What we needed</th><th>Inspect provides it</th></tr></thead>
+  <tbody>
+    <tr><td>Modular dataset/solver/scorer matching our domain</td><td>First-class, 1:1.</td></tr>
+    <tr><td>Agentic / tool-use with sandboxing</td><td>Built-in agent loops + a Kubernetes sandbox provider.</td></tr>
+    <tr><td>Model-graded scoring</td><td><code>model_graded_qa</code> and arbitrary Python scorers.</td></tr>
+    <tr><td>Provider-agnostic model layer</td><td>One interface over every provider (we point it at the gateway).</td></tr>
+    <tr><td>Structured logs + a viewer</td><td><code>.eval</code> logs + an official viewer we embed.</td></tr>
+  </tbody>
+</table>
+<p>
+  Kernels evaluated and rejected: <strong>lm-evaluation-harness</strong> (benchmark-centric, weak
+  agentic), <strong>OpenAI Evals</strong> (low activity, narrower), <strong>HELM</strong> (heavyweight
+  to embed), <strong>promptfoo</strong> (TypeScript, not 10⁶-scale), <strong>DeepEval/Ragas</strong>
+  (narrower framing), and <strong>build-from-scratch</strong> (largest cost for a solved problem).
+</p>
+
+<h2 class="anchor-h" id="plugins">The plugin layer wraps Inspect's registry, thinly</h2>
+<p>
+  <span class="pill ctrl">eval_engine/plugins.py · builtins.py</span>
+  The platform adds a thin, typed, discoverable layer around Inspect's own registration — it wraps
+  <em>registration + config + metadata</em>, not the Inspect types. A harness/scorer is a factory keyed
+  by <code>(kind, name, version)</code> that returns an Inspect object, plus a Pydantic config model whose
+  JSON Schema drives RunSpec validation and the launch-wizard form.
+</p>
+<pre><code>@harness("agentic", "1.0.0", AgenticConfig, description="Tool-using agent loop, K8s-sandboxed.")
+def agentic(cfg) -> tuple[Solver, SandboxEnvironmentSpec]:
+    return basic_agent(tools=[...], max_attempts=cfg.max_steps), sandbox_spec
+
+@scorer("llm_judge", "1.0.0", JudgeConfig, primary_metric="score")
+def llm_judge(cfg) -> Scorer:
+    return model_graded_qa(model=cfg.judge_model, template=cfg.rubric)</code></pre>
+<p>The built-in catalog already spans the major eval shapes:</p>
+<p>
+  <strong>Harnesses:</strong>
+  <span class="pill exec">single_turn</span>
+  <span class="pill exec">multiple_choice</span>
+  <span class="pill exec">agentic</span>
+  <span class="pill exec">code_generation</span>
+  <span class="pill exec">swe_bench</span>
+</p>
+<p>
+  <strong>Scorers:</strong>
+  <span class="pill ana">includes</span>
+  <span class="pill ana">match</span>
+  <span class="pill ana">choice</span>
+  <span class="pill ana">llm_judge</span>
+  <span class="pill ana">math</span>
+  <span class="pill ana">numeric_answer</span>
+  <span class="pill ana">code_exec</span>
+  <span class="pill ana">ifeval</span>
+  <span class="pill ana">swe_bench</span>
+</p>
+<p>
+  A RunSpec references plugins by <code>{type, version, config}</code>; the control plane validates them
+  against the registry at launch, and the worker resolves them at execution time into the Inspect
+  <code>Solver</code>/<code>Scorer</code> objects. Multiple scorers compose as an Inspect scorer list.
+  See <a href="extensibility.html">Extensibility</a> for the full plugin contract.
+</p>
+
+<h2 class="anchor-h" id="execution">Where the kernel plugs in — the worker call</h2>
+<p>
+  <span class="pill exec">eval_engine/runner.py</span>
+  A worker that has claimed a shard builds one Inspect <code>Task</code> and runs it. This is the exact
+  seam between the platform and the kernel:
+</p>
+<pre><code>sub      = MemoryDataset([samples_by_id[i] for i in claimed_ids])
+solver, sandbox = plugins.build("harness", spec.harness)     # → an Inspect Solver (+ sandbox spec)
+scorers  = [plugins.build("scorer", s) for s in spec.scorers] # → Inspect Scorers
+task     = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)
+
+inspect_log = inspect_ai.eval(
+    task, model=model, log_dir="gs://…/eval-logs",   # the .eval artifact
+    epochs=epochs, time_limit=SAMPLE_TIME_LIMIT,      # sampling + hung-call cap
+    temperature=…, seed=…, timeout=MODEL_TIMEOUT,     # GenerateConfig
+    fail_on_error=False)[0]                           # one bad sample doesn't sink the shard</code></pre>
+<p>Three integration details worth calling out:</p>
+<ul>
+  <li><strong>Models route through the gateway.</strong> Inspect's provider-agnostic model layer is
+      pointed at LiteLLM (<code>OPENAI_BASE_URL=http://litellm:4000/v1</code>), so all the platform's
+      rate-limiting and cost accounting apply to every Inspect model call with no kernel change.</li>
+  <li><strong>Epochs for statistical comparability.</strong> Inspect's <code>epochs</code> repeats each
+      sample N times and reduces to one per-sample score — the basis for the Wilson confidence interval
+      the dashboard shows. Outputs are <em>comparable, not bitwise</em> (hosted models are
+      non-deterministic even at <code>temperature=0</code>).</li>
+  <li><strong>Per-sample errors are first-class.</strong> The platform reads Inspect's per-sample
+      <code>.error</code> (a model/tool/sandbox exception, distinct from a low score) and routes it into
+      retry-with-backoff; <code>fail_on_error=False</code> keeps the rest of the batch moving.</li>
+</ul>
+
+<h2 class="anchor-h" id="sandbox">Sandboxing via Inspect's K8s provider</h2>
+<p>
+  Agentic harnesses return a sandbox spec alongside the solver; Inspect's <strong>Kubernetes sandbox
+  provider</strong> provisions an ephemeral pod per sample and runs tool/command execution inside it.
+  The platform hardens those pods (gVisor, air-gap, resource caps) and guarantees teardown with a
+  sweeper. Crucially, the agent loop runs in the <em>worker</em> and only tool execution is in the
+  sandbox — an Inspect architectural fact that lets most sandboxes be fully air-gapped. Inspect's default
+  Docker sandbox was rejected on Kubernetes (it needs Docker-in-Docker or a host socket — privileged
+  anti-patterns); the K8s provider avoids that. See <a href="extensibility.html#sandbox">the sandbox
+  tiers</a>.
+</p>
+
+<h2 class="anchor-h" id="viewer">The embedded viewer &amp; the ETL projection</h2>
+<p>
+  Two outputs flow from each Inspect eval:
+</p>
+<ul>
+  <li><strong>The <code>.eval</code> log → object storage</strong>, served by the embedded
+      <a href="architecture.html#viewer">Inspect viewer</a> for rich per-sample traces (the dashboard
+      deep-links to the exact sample).</li>
+  <li><strong>A flattened row → ClickHouse</strong>, extracted from the Inspect log: scores, the primary
+      score/pass, token usage, the provider's resolved model + system fingerprint, and the transcript
+      URI. This is the ETL projection that keeps analytics fast and insulated from the log format.</li>
+</ul>
+
+<h2 class="anchor-h" id="coupling">The coupling, and how it's managed</h2>
+<p>
+  The Inspect-native bet is an accepted risk: the platform is genuinely coupled to Inspect's types and
+  log format. Two things keep that safe. First, the <strong>ClickHouse projection insulates analytics</strong>
+  — queries never touch the <code>.eval</code> format, so an Inspect change can't ripple into the
+  dashboard's analytics. Second, the coupling buys so much (the entire kernel) that re-implementing it
+  would be the larger risk. Inspect is actively developed by the UK&nbsp;AISI and trending toward a
+  de-facto standard, which is why adopting it directly — rather than hedging behind an abstraction with
+  no second implementation to justify it — is the deliberate choice.
+</p>
+
+</body>
+</html>

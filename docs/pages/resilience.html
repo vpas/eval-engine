@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Resilience & High Availability — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">How it works</span>
+<h1>Resilience &amp; high availability</h1>
+<p class="lead">
+  Resilience is split into two layers that are engineered separately. The <strong>data-correctness
+  layer</strong> (does a crash ever lose or double-count a result?) is the strongest part of the system —
+  built into the execution protocol itself. The <strong>availability layer</strong> (does a pod or
+  connection blip cause an outage?) is handled by replicas, HA stores, and connection robustness, with
+  one deliberately-accepted ceiling.
+</p>
+
+<h2 class="anchor-h" id="correctness">Layer 1 — correctness under failure</h2>
+<p>
+  The execution plane is resilient <em>by construction</em>, because the ledger is the single source of
+  truth and every step is idempotent on re-entry (full detail on the
+  <a href="execution.html">Execution</a> page). The guarantees:
+</p>
+<table>
+  <thead><tr><th>Guarantee</th><th>Mechanism</th></tr></thead>
+  <tbody>
+    <tr><td><strong>No completed sample is lost</strong></td>
+        <td><a href="execution.html#commit">Ack-before-flip</a>: a ledger row flips <code>done</code> only after ClickHouse durably acks the result.</td></tr>
+    <tr><td><strong>No result double-counted</strong></td>
+        <td>ReplacingMergeTree dedups re-executions; headline metrics computed once at finalize.</td></tr>
+    <tr><td><strong>Dead workers self-heal</strong></td>
+        <td>Lease expiry reclaims a crashed worker's <code>running</code> tasks; long batches renew via a heartbeat thread.</td></tr>
+    <tr><td><strong>Poison samples don't block</strong></td>
+        <td>Retry-with-backoff + <code>not_before</code> gating; bounded attempts then terminal <code>failed</code>.</td></tr>
+    <tr><td><strong>Idempotent finalize</strong></td>
+        <td>Keyed on the run's authoritative <code>total</code>; a crash mid-finalize re-runs no-ops.</td></tr>
+    <tr><td><strong>Runaway runs are capped</strong></td>
+        <td>Per-request model timeout, per-sample wall-clock limit, and a budget sweep.</td></tr>
+    <tr><td><strong>Clean rollouts</strong></td>
+        <td>Workers graceful-drain on <code>SIGTERM</code>; the orchestrator hands over leadership in ~1s.</td></tr>
+  </tbody>
+</table>
+<div class="ok"><span class="tag">The key property</span>
+  A wrongful reclaim, a spot eviction, a worker OOM, or a whole-cluster restart is <strong>wasted
+  compute, never corruption</strong> — because idempotent ClickHouse writes + the ephemeral ledger mean
+  recovery is always "re-derive from the ledger." There is no run-level memory state to lose.</div>
+
+<h2 class="anchor-h" id="connection">Layer 2a — connection robustness</h2>
+<p>
+  The highest-value, cheapest availability fix. A database connection dropped <em>underneath</em> the
+  process (a Neon failover or cold-start, an idle reaper, a NAT timeout) is not flagged <code>closed</code>
+  — it raises on the next statement. Without a retry, that crashes a worker or orchestrator loop. So the
+  storage tier wraps every call:
+</p>
+<ul>
+  <li><strong>Postgres</strong> — a bounded shared <code>psycopg_pool</code> liveness-checks a connection
+      on checkout (a dead socket is replaced <em>before</em> the query), and a <code>_run()</code> helper
+      retries the rarer mid-statement drop with bounded backoff. Autocommit singletons make retry safe;
+      idempotent ledger writes make a lost-ack double-apply benign.</li>
+  <li><strong>ClickHouse</strong> — a mirror <code>_run()</code> drops and rebuilds the client on a
+      connection error and retries. This matters doubly because the ack-before-flip commit inserts to
+      ClickHouse <em>before</em> flipping the ledger, so a CH blip would otherwise stall execution, not
+      just reads. The retried insert is safe: ReplacingMergeTree collapses an identical re-insert.</li>
+</ul>
+<p>The effect: transient infra hiccups become silent recoveries instead of crash-loops.</p>
+
+<h2 class="anchor-h" id="leader">Layer 2b — leader election &amp; the split-brain it exposed</h2>
+<p>
+  The orchestrator (and training monitor) run ≥2 replicas for a warm standby but only the leader ticks.
+  Leadership is a Postgres <strong>session-scoped advisory lock</strong>:
+</p>
+<ul>
+  <li><strong>Acquire</strong> via <code>pg_try_advisory_lock</code> on a dedicated connection held for
+      the process lifetime (released automatically if the process dies).</li>
+  <li><strong>Graceful handover</strong> — a <code>SIGTERM</code> handler explicitly
+      <code>pg_advisory_unlock</code>s, so a rollout hands leadership over in ~1s rather than waiting out
+      a lock TTL.</li>
+  <li><strong>Ungraceful death</strong> (SIGKILL/OOM/node loss) — the standby loop reaps a <em>stale</em>
+      lock: a live leader refreshes its lock connection every tick, so an idle-past-threshold holder is a
+      safe "crashed" signal to terminate. Worst-case admit/finalize pause ≈ the 20s reap window + a 5s
+      standby poll — and in-flight workers keep going without the orchestrator, so it's a brief scheduling
+      pause, not an outage.</li>
+</ul>
+<div class="warn"><span class="tag">The pooled-endpoint gotcha</span>
+  At 2 replicas, both pods initially logged as leader — split-brain. Root cause: the app's
+  <em>transaction-pooling</em> (PgBouncer / Neon <code>-pooler</code>) endpoint doesn't preserve the
+  backend session that a session-scoped advisory lock relies on, so every replica "acquired" it. The
+  fix: the leader connection alone uses a <strong>session-mode</strong> endpoint
+  (<code>_leader_dsn()</code>), while the rest of the app keeps the pooled endpoint. A correctness
+  requirement the moment you run more than one replica.</div>
+
+<h2 class="anchor-h" id="ha-stores">Layer 2c — HA for the stateful backends</h2>
+<table>
+  <thead><tr><th>Store</th><th>HA topology</th><th>Behavior on a node/pod loss</th></tr></thead>
+  <tbody>
+    <tr><td>ClickHouse</td>
+        <td>3-replica StatefulSet, <code>ReplicatedReplacingMergeTree ON CLUSTER</code>, embedded
+            ClickHouse Keeper (3-node raft quorum), pod anti-affinity.</td>
+        <td>Every replica holds a copy; reads survive deleting a replica via the load-balanced Service.
+            Verified in-cluster (<code>active_replicas=3</code>, failover read survived).</td></tr>
+    <tr><td>Redis</td>
+        <td>3-pod StatefulSet (1 master + 2 replicas) + a Sentinel sidecar each (quorum 2),
+            anti-affinity.</td>
+        <td>Sentinel promotes a replica on master loss; the old master rejoins as a replica. Verified
+            automatic failover.</td></tr>
+    <tr><td>Object store</td>
+        <td>One regional bucket (GCS is itself regionally redundant + highly available).</td>
+        <td>Acceptable as-is; transcript writes are sampled and off the correctness path.</td></tr>
+    <tr><td>Postgres</td>
+        <td>Managed Neon (its own storage durability + failover), reached resiliently (above).</td>
+        <td>A failover/cold-start is ridden out by the retry wrapper.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="anchor-h" id="edge">Layer 2d — control/edge replicas &amp; disruption budgets</h2>
+<p>
+  The control and edge tier is stateless, so HA there costs only a second small pod. All singletons were
+  bumped and protected:
+</p>
+<ul>
+  <li><strong><code>replicas: 2</code></strong> for the API, orchestrator, frontend, and
+      <strong>oauth2-proxy</strong> (the front gate whose loss would make the whole surface unreachable).</li>
+  <li><strong>PodDisruptionBudgets</strong> (<code>minAvailable: 1</code>) so a node drain/upgrade can't
+      evict the sole replica of a singleton; <code>minAvailable: 2</code> for the 3× ClickHouse/Redis
+      StatefulSets to preserve quorum.</li>
+  <li><strong>Topology spread</strong> across hostnames for the stateless pods.</li>
+  <li><strong>KEDA operator <code>replicaCount: 2</code></strong> (it leader-elects internally) so the
+      autoscaler isn't a single point of freeze.</li>
+  <li><strong>Gateway resilience</strong> — <code>allowed_fails: 3</code> + a cooldown so one bad upstream
+      doesn't down the whole model deployment; workers' per-request timeout means a hung call can't wedge
+      a worker.</li>
+</ul>
+
+<h2 class="anchor-h" id="spof">SPOF inventory &amp; the accepted ceiling</h2>
+<p>
+  Everything funnels through Postgres — it is the ledger, the run metadata, the leader lock, the KEDA
+  scale signal, and the heartbeat table, so it's the one component whose loss touches all four roles at
+  once. That's why connection robustness (above) is the headline fix. The remaining posture:
+</p>
+<table>
+  <thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>GCP zone</td><td><strong>Accepted ceiling (POC)</strong></td><td>Single zone — a zonal outage is a total outage. A deliberate cost trade (free zonal control plane, ~⅓ the always-on node cost).</td></tr>
+    <tr><td>Postgres / Neon</td><td>Mitigated</td><td>Universal coordinator; retry wrapper + Neon's own failover. A <code>pg_connections</code> alert is deferred (fine at POC scale).</td></tr>
+    <tr><td>Control/edge singletons</td><td>Fixed</td><td><code>replicas: 2</code> + PDBs everywhere.</td></tr>
+    <tr><td>ClickHouse on the commit path</td><td>Mitigated</td><td>HA cluster + the insert retry; a full decouple (load CH async off the hot path) is a considered future design change.</td></tr>
+    <tr><td>Worker pool (spot-only)</td><td>Accepted</td><td>Mass eviction is a throughput dip, not data loss (lease reclaim preserves correctness). An on-demand fallback was evaluated and dropped.</td></tr>
+  </tbody>
+</table>
+<div class="note"><span class="tag">Single-zone, deliberately</span>
+  For the proof-of-concept, single-zone is an <strong>accepted, documented ceiling</strong> — not an
+  accident. The lift-it-later path is a named Terraform toggle (<code>regional_ha=true</code>: regional
+  cluster + node pools + zone topology spread), roughly 3× the always-on cost, triggered when the
+  platform takes on an availability SLO. Until then, the work targets failures that happen <em>within</em>
+  a healthy zone — node drains, pod crashes, a Neon blip — which are frequent and cheap to survive.</div>
+
+<h2 class="anchor-h" id="recovery">Recovery-time summary</h2>
+<table>
+  <thead><tr><th>Event</th><th>Recovery</th></tr></thead>
+  <tbody>
+    <tr><td>Worker crash / spot eviction</td><td>Lease lapses (≤10 min, renewed for live work) → tasks reclaimed; in-flight batch redone idempotently.</td></tr>
+    <tr><td>Orchestrator graceful rollout</td><td>~1s leadership handover to the warm standby.</td></tr>
+    <tr><td>Orchestrator ungraceful death</td><td>≈25s (stale-lock reap + standby poll) of paused admit/finalize; execution continues.</td></tr>
+    <tr><td>ClickHouse / Redis pod loss</td><td>Quorum / Sentinel failover; reads &amp; rate-limiting continue.</td></tr>
+    <tr><td>Neon failover or cold-start</td><td>Ridden out by the bounded-backoff retry wrapper.</td></tr>
+    <tr><td>Whole-cluster restart</td><td>All leases expire; runs resume from the durable ledger — no run state lost.</td></tr>
+  </tbody>
+</table>
+
+</body>
+</html>

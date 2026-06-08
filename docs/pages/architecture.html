@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture & Components — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">Architecture</span>
+<h1>Architecture &amp; components</h1>
+<p class="lead">
+  Eval Engine is two cooperating planes that meet only at Postgres. This page walks every component
+  from the diagram on the <a href="index.html#map">overview</a> — its job, the code that implements it,
+  and how it is deployed.
+</p>
+
+<div class="note">
+  <span class="tag">One image, many roles</span>
+  The whole backend ships as <strong>one container image</strong> (<code>deploy/Dockerfile</code>); the
+  <em>role</em> is chosen by the launch command — <code>uvicorn eval_engine.api:app</code> (API),
+  <code>python -m eval_engine.orchestrator</code>, <code>python -m eval_engine.worker</code>, or the
+  training monitor. Shared types and storage code, no per-service duplication.
+</div>
+
+<h2 class="anchor-h" id="planes">The two planes</h2>
+<table>
+  <thead><tr><th>Plane</th><th>Components</th><th>Cardinality</th><th>Owns</th></tr></thead>
+  <tbody>
+    <tr><td><span class="pill ctrl">Control</span></td>
+        <td>Dashboard, FastAPI, Orchestrator, Inspect viewer, Postgres</td>
+        <td>API: N replicas · Orchestrator: 1 active (leader-elected)</td>
+        <td>Humans &amp; durable state: accept launches, expose status/results, admit + finalize runs.</td></tr>
+    <tr><td><span class="pill exec">Execution</span></td>
+        <td>Workers, sandbox pods, LiteLLM gateway, Redis</td>
+        <td>Workers: 0…N (KEDA) · Gateway: ≥2</td>
+        <td>Compute: claim a shard, run the Inspect Task, call models, commit results.</td></tr>
+  </tbody>
+</table>
+<p>
+  Because the planes share nothing but the Postgres ledger, they scale independently: the API can be
+  redeployed without touching in-flight work, and workers can scale to zero between runs while the
+  control plane stays up.
+</p>
+
+<!-- ===================== ACCESS EDGE ===================== -->
+<h2 class="anchor-h" id="edge">Access edge — ingress, TLS, OIDC</h2>
+<p>
+  <span class="pill ctrl">deploy/k8s/61,62</span>
+  There is exactly one public entrypoint. An <strong>nginx Ingress</strong> terminates TLS (a
+  Let's&nbsp;Encrypt certificate auto-issued by <strong>cert-manager</strong>) on a stable
+  <code>nip.io</code> host derived from a reserved external IP. <em>All</em> traffic is routed to
+  <strong>oauth2-proxy</strong>, which authenticates against <strong>Google OIDC</strong> before
+  proxying to anything behind it — so both the dashboard and the raw API are gated by the same login.
+</p>
+<ul>
+  <li>oauth2-proxy injects the authenticated user's email as a header; the API reads it
+      (<code>X-Forwarded-Email</code>, falling back to <code>X-Auth-Request-Email</code>) as
+      <code>created_by</code> on every run and as the audit-log actor.</li>
+  <li>The reserved IP keeps the host — and therefore the registered OAuth redirect URI — stable across
+      cluster rebuilds, so a migration never re-touches OAuth.</li>
+  <li>Grafana sits behind the same gate at <code>/grafana</code>; the Inspect viewer at
+      <code>/inspect/</code>.</li>
+</ul>
+
+<!-- ===================== FRONTEND ===================== -->
+<h2 class="anchor-h" id="frontend">Dashboard (Next.js)</h2>
+<p>
+  <span class="pill ctrl">frontend/</span>
+  A Next.js App-Router app in a dark "lab instrument" theme. It is a pure client of the control API
+  (it proxies <code>/api/*</code> → the FastAPI service) and renders:
+</p>
+<ul>
+  <li><strong>Runs list / detail</strong> — live status pills, accuracy bars with confidence
+      intervals, per-category breakdown, the full reproducible RunSpec, and a per-sample table that
+      drills into transcripts.</li>
+  <li><strong>Launch drawer</strong> — builds a RunSpec from the live <code>/catalog</code> of
+      registered harnesses/scorers; toggles between an ad-hoc launch and launching from a registered
+      eval.</li>
+  <li><strong>Compare</strong> — diff two runs (also reused to diff two training checkpoints).</li>
+  <li><strong>Operations</strong> tab and <strong>Training</strong> tab (see
+      <a href="#observability">Observability</a> and <a href="#training">Training monitor</a>).</li>
+  <li><strong>Embedded Inspect viewer</strong> link for rich per-sample traces.</li>
+</ul>
+
+<!-- ===================== API ===================== -->
+<h2 class="anchor-h" id="api">Control-plane API (FastAPI)</h2>
+<p>
+  <span class="pill ctrl">eval_engine/api.py</span>
+  The stateless HTTP control plane. In the cluster it is <strong>launch-only</strong>: <code>POST
+  /runs</code> validates the RunSpec's plugins, creates the run, and expands the ledger — then returns
+  <code>202</code> immediately. The orchestrator and workers do the actual execution. (A
+  <code>EVAL_ENGINE_API_INLINE_EXEC=1</code> toggle runs the whole pipeline inline for local dev.)
+</p>
+<table>
+  <thead><tr><th>Surface</th><th>Endpoints</th></tr></thead>
+  <tbody>
+    <tr><td>Runs</td><td><code>POST /runs</code>, <code>/runs/{id}</code>, <code>/runs/{id}/results</code>,
+        <code>/runs/{id}/live</code>, <code>/runs/{id}/rerun</code>, <code>/runs/{id}/cancel</code>,
+        <code>/transcript</code></td></tr>
+    <tr><td>Registry (FR1–3)</td><td><code>POST/GET /datasets</code>, <code>/evals</code>,
+        <code>/models</code>; <code>POST /evals/{id}/launch</code></td></tr>
+    <tr><td>Catalog &amp; audit</td><td><code>GET /catalog</code>, <code>GET /audit</code></td></tr>
+    <tr><td>Ops</td><td><code>GET /ops/status</code>, <code>GET /ops/logs</code></td></tr>
+    <tr><td>Training</td><td><code>POST/GET /training…</code> (read surface + manual scan)</td></tr>
+  </tbody>
+</table>
+<p>
+  Reproducibility is built in: <strong>re-run</strong> clones a stored RunSpec into a new run with
+  identical pinned inputs, and registered entities are <strong>immutable versions</strong> (re-register
+  to mint a new version — no PUT/DELETE), matching the content-addressed stance of the data model.
+</p>
+
+<!-- ===================== ORCHESTRATOR ===================== -->
+<h2 class="anchor-h" id="orchestrator">Orchestrator</h2>
+<p>
+  <span class="pill ctrl">eval_engine/orchestrator.py</span>
+  A single <strong>leader-elected singleton</strong> running one "derive state each tick" loop (default
+  every 2s). It runs ≥2 replicas for a warm standby; only the leader ticks, holding a Postgres
+  <em>session-scoped advisory lock</em>. Each tick:
+</p>
+<ol>
+  <li><strong>Admit</strong> (<code>_admit</code>) — two-lane admission moves <code>queued</code> runs
+      to <code>running</code> under a global cap with a reserved interactive slice
+      (<a href="execution.html#admission">details</a>).</li>
+  <li><strong>Reconcile</strong> — for each running run, publish a live rollup (done/failed/accuracy/
+      cost) onto the <code>runs</code> row, and enforce its budget cap.</li>
+  <li><strong>Finalize</strong> — a run whose ledger is fully terminal gets a safety-sweep load, then
+      aggregate → archive failures → prune the ledger → mark <code>completed</code> (or
+      <code>budget_exceeded</code>). The gate keys on the run's authoritative <code>total</code> so a
+      still-expanding run is never finalized early.</li>
+  <li><strong>Housekeeping</strong> — heartbeat, prune old heartbeats, and (throttled) reap orphaned
+      sandbox pods.</li>
+</ol>
+<div class="note"><span class="tag">It governs efficiency, not safety</span>
+  The orchestrator's death just lets live state go stale for a few seconds until the standby takes over
+  — the durable ledger is untouched, and in-flight workers keep going without it. See
+  <a href="resilience.html#leader">leader election</a>.</div>
+
+<!-- ===================== VIEWER ===================== -->
+<h2 class="anchor-h" id="viewer">Inspect log viewer</h2>
+<p>
+  <span class="pill ctrl">eval_engine/view_main.py · deploy/k8s/85</span>
+  The official Inspect viewer, embedded behind the OIDC ingress at <code>/inspect/</code>, serving the
+  <code>.eval</code> logs that workers write to <code>gs://…/eval-logs</code>. Rather than rebuild a
+  transcript UI, the platform embeds Inspect's own. The patched entrypoint injects a
+  <code>FileMappingPolicy</code> so the viewer only ever sends <em>relative</em> log basenames — the fix
+  for a subtle bug where oauth2-proxy's path-normalization collapsed <code>gs://</code> double-slashes
+  and 404'd every read. The dashboard deep-links from a sample straight to its exact trace.
+</p>
+
+<!-- ===================== TRAINING ===================== -->
+<h2 class="anchor-h" id="training">Training monitor (vNext)</h2>
+<p>
+  <span class="pill ctrl">eval_engine/training.py · mock_trainer.py</span>
+  A separate <strong>leader-elected loop</strong> (same pattern as the orchestrator) that watches an
+  external — and, in v1, <strong>mocked</strong> — trainer's checkpoint stream and continuously evaluates
+  each checkpoint. Training itself is an explicit non-goal; this layer only <em>consumes</em>
+  checkpoints. Its key insight: <strong>a checkpoint-eval is just a tagged <code>Run</code></strong>, so
+  the ledger, workers, ClickHouse projection, retries, budgets, transcripts, and the Compare view are
+  all reused unchanged. Per tick it discovers new checkpoints from an object-storage prefix, fans out
+  the eval suite as ordinary runs, reconciles their scores into a per-step trajectory, and runs anomaly
+  detection that distinguishes a <em>training fault</em> from <em>a model simply weak on a hard eval</em>.
+  Covered in depth on the <a href="extensibility.html#training">Extensibility</a> page.
+</p>
+
+<!-- ===================== POSTGRES ===================== -->
+<h2 class="anchor-h" id="postgres">Postgres — metadata + the ephemeral ledger</h2>
+<p>
+  <span class="pill store">eval_engine/control.py · managed Neon</span>
+  Postgres is the <strong>coordinator of the whole system</strong>. It holds run metadata, the entity
+  registry, the audit log, heartbeats, the leader-election lock, <em>and</em> the
+  <strong>ephemeral sample-task ledger</strong> — the table that is the sole scheduler.
+</p>
+<h3>The ephemeral ledger</h3>
+<p>
+  <code>sample_tasks</code> holds <strong>only in-flight runs</strong>. When a run finishes it is
+  archived (failures only) and pruned — so Postgres stays tiny despite ~12B lifetime samples. The
+  ledger is deliberately <strong>skinny</strong>: it carries coordination state
+  (<code>status</code>, <code>attempts</code>, <code>claimed_by</code>, <code>lease_expires_at</code>,
+  <code>not_before</code>) — results never widen it; they go straight to ClickHouse.
+</p>
+<p>The core primitive is an atomic claim — <code>FOR UPDATE SKIP LOCKED</code> over row locks:</p>
+<pre><code>UPDATE sample_tasks t SET status='running', attempts=attempts+1, claimed_by=$worker,
+       lease_expires_at = now() + lease
+FROM ( SELECT run_id, sample_id FROM sample_tasks
+       WHERE run_id=$run
+         AND ( (status='queued' AND (not_before IS NULL OR not_before &lt;= now()))
+            OR (status='running' AND lease_expires_at &lt; now()) )   -- reclaim dead leases
+       ORDER BY sample_id
+       LIMIT LEAST($batch, max_inflight − live_running)             -- per-run concurrency cap
+       FOR UPDATE SKIP LOCKED ) c
+WHERE t.run_id=c.run_id AND t.sample_id=c.sample_id RETURNING t.sample_id;</code></pre>
+<p>
+  <code>FOR UPDATE SKIP LOCKED</code> gives at-least-once execution with no double-claim; the lease
+  reclaims a dead worker's tasks; <code>not_before</code> backs off poison samples; and the
+  <code>max_inflight</code> headroom is the load-bearing fairness primitive. See
+  <a href="execution.html">Execution</a> for the full lifecycle and <a href="storage.html#postgres">
+  Storage</a> for why Postgres is the right home for this.
+</p>
+<h3>Connection handling</h3>
+<p>
+  The whole process shares one bounded <code>psycopg_pool.ConnectionPool</code> (autocommit, default max
+  10) that liveness-checks a connection on checkout; a <code>_run()</code> wrapper retries dropped
+  backends with bounded backoff. This turns a Neon failover/cold-start from a crash-loop into a silent
+  recovery. The one exception is the leader lock's dedicated <em>session-mode</em> connection (a
+  transaction pooler would defeat the advisory lock — see <a href="resilience.html#leader">Resilience</a>).
+</p>
+
+<!-- ===================== WORKERS ===================== -->
+<h2 class="anchor-h" id="workers">Workers (KEDA-scaled)</h2>
+<p>
+  <span class="pill exec">eval_engine/worker.py · runner.py · deploy/k8s/50,70</span>
+  A stateless Kubernetes Deployment, <strong>autoscaled by KEDA</strong> on ledger queue depth (scale to
+  0 when idle, up to a cap). Workers run on a <strong>spot</strong> node pool — eviction is a non-event
+  because the lease reclaims their tasks. There is <strong>no inter-worker coordination</strong>; each
+  worker is just a copy of the loop:
+</p>
+<pre><code>claim a batch  →  run it as ONE Inspect Task  →  commit (ack-before-flip)  →  load</code></pre>
+<ul>
+  <li><strong>Shard = one Inspect Task.</strong> A worker claims a batch of sample-tasks and runs them
+      as a single <code>inspect_ai.eval</code> call (model calls via the gateway, scoring inline).</li>
+  <li><strong>Lease heartbeat.</strong> A background daemon renews the lease while a long batch
+      (agentic / SWE-bench) executes, so it isn't wrongly reclaimed mid-flight; if the worker dies,
+      renewal stops and the lease lapses → reclaim.</li>
+  <li><strong>Graceful drain.</strong> On <code>SIGTERM</code> (rollout/scale-down) the worker stops
+      claiming new batches, finishes the in-flight one, and exits — so a rolling update never strands
+      tasks. <code>terminationGracePeriodSeconds</code> is set above the per-sample timeout.</li>
+  <li><strong>Hung-call protection.</strong> A per-request model timeout and a per-sample wall-clock
+      limit ensure one stuck call can't wedge the worker; a breach surfaces as a retryable error.</li>
+</ul>
+
+<!-- ===================== SANDBOX ===================== -->
+<h2 class="anchor-h" id="sandbox">Agentic sandbox pods</h2>
+<p>
+  <span class="pill exec">deploy/sandbox/ · deploy/k8s/90 · docs SANDBOXING</span>
+  Agentic evals execute <strong>untrusted, model-generated code</strong> — the highest-stakes security
+  surface. The platform uses <strong>Inspect's Kubernetes sandbox provider</strong>: each agentic sample
+  gets a fresh, hardened, <strong>ephemeral pod</strong> that is torn down on exit. A crucial property
+  keeps this safe and cheap: <strong>the sandbox never calls the model</strong> — the agent loop runs in
+  the worker, only tool/command execution happens in the pod — so most sandboxes can be
+  <strong>fully air-gapped</strong> (zero egress).
+</p>
+<p>Isolation is tiered by eval risk (the harness declares its tier):</p>
+<table>
+  <thead><tr><th>Tier</th><th>Eval type</th><th>Runtime</th><th>Network</th></tr></thead>
+  <tbody>
+    <tr><td><strong>T1</strong></td><td>benign tools (search, calculator, RAG)</td><td>hardened container</td><td>deny-all + allowlist via egress proxy</td></tr>
+    <tr><td><strong>T2</strong> (default)</td><td>general code execution</td><td><strong>gVisor</strong> (user-space kernel)</td><td>air-gapped</td></tr>
+    <tr><td><strong>T3</strong></td><td>dangerous capability (cyber, self-propagation)</td><td>Kata / microVM</td><td>fully air-gapped, dedicated nodes</td></tr>
+  </tbody>
+</table>
+<p>
+  Every tier gets baseline hardening (resource + PID caps, no credentials, IMDS blocked, default-deny
+  NetworkPolicy, non-root read-only rootfs, dropped capabilities, dedicated tainted node pool). An
+  orchestrator <strong>sweeper</strong> reaps any pod whose owning task's lease expired, so orphans
+  can't accumulate. v1 ships per-sample pods with gVisor (T2) as default; a pooled microVM
+  snapshot-restore service is the trigger-gated next step if agentic churn ever approaches the
+  pod-create throughput ceiling. Full threat model on the
+  <a href="extensibility.html#sandbox">Extensibility</a> page.
+</p>
+
+<!-- ===================== GATEWAY ===================== -->
+<h2 class="anchor-h" id="gateway">LiteLLM gateway</h2>
+<p>
+  <span class="pill gw">deploy/k8s/30-litellm.yaml</span>
+  <strong>All</strong> model traffic — external API providers and self-hosted vLLM alike — goes through
+  LiteLLM (≥2 replicas). Workers call it OpenAI-compatibly (<code>OPENAI_BASE_URL=http://litellm:4000/v1</code>).
+  One path means one rate limiter, one cost tally, one place for fallback. It provides:
+</p>
+<ul>
+  <li><strong>Global rate limiting</strong> — per-model <code>rpm</code>/<code>tpm</code> caps shared
+      across replicas via Redis (<code>usage-based-routing-v2</code> + <code>enable_pre_call_checks</code>),
+      so the cap protects provider quota cluster-wide, not per-pod. <code>num_retries: 0</code> →
+      fail-fast 429 (the worker's retry-with-backoff handles it). This is one of the
+      <a href="index.html#load">two load-forcing requirements</a>.</li>
+  <li><strong>Cost accounting</strong> — the gateway's per-<code>run_id</code> spend is the canonical
+      cost source by design. (Today the platform prices from the OpenRouter catalog the gateway fronts,
+      which equals the gateway figure in dollars; querying the gateway's own tally is a deferred
+      refinement.)</li>
+  <li><strong>Resilience tuning</strong> — <code>allowed_fails: 3</code> + a short cooldown so one bad
+      upstream doesn't cascade the whole deployment down.</li>
+</ul>
+
+<!-- ===================== REDIS ===================== -->
+<h2 class="anchor-h" id="redis">Redis (HA)</h2>
+<p>
+  <span class="pill gw">deploy/k8s/11-redis-ha.yaml</span>
+  A 3-pod StatefulSet (1 master + 2 replicas) each with a Sentinel sidecar (quorum 2, automatic
+  failover, anti-affinity). It backs two things: the LiteLLM <strong>global rate-limit counters</strong>
+  and the per-run <strong>stop-flags</strong> used for fast cancel/budget signalling. Its state is soft
+  and rebuildable — a failover loses at most a fraction of a rate-limit window. (Caveat: the LiteLLM
+  router doesn't speak Sentinel, so per-model caps fall back to per-replica limiting on a master change;
+  acceptable for soft quota protection.)
+</p>
+
+<!-- ===================== PROVIDERS ===================== -->
+<h2 class="anchor-h" id="providers">Model providers</h2>
+<p>
+  <span class="pill gw">external</span>
+  Behind the gateway sit the actual inference backends. Today that is <strong>OpenRouter</strong>
+  (fronting many hosted models) via a wildcard passthrough; <strong>self-hosted vLLM</strong> is a
+  first-class, gateway-fronted source as well (<code>vllm/&lt;model&gt;</code> routes like anything
+  else). A direct, gateway-bypassing vLLM path exists as a deferred option for the day in-cluster
+  inference carries enough load that the proxy becomes the measured bottleneck.
+</p>
+
+<!-- ===================== CLICKHOUSE ===================== -->
+<h2 class="anchor-h" id="clickhouse">ClickHouse — the analytics projection</h2>
+<p>
+  <span class="pill ana">eval_engine/analytics.py · deploy/k8s/10-clickhouse-ha.yaml</span>
+  The queryable, ~12B-row store. After each sample completes, the worker flattens it into one row in
+  <code>sample_results</code>. The <code>.eval</code> log stays the immutable artifact in object storage;
+  ClickHouse is the <em>index</em> over it. The engine is the key to exactly-once analytics:
+</p>
+<pre><code>ENGINE = ReplacingMergeTree(attempt)            -- newest re-execution (higher attempt) wins; dupes collapse
+PARTITION BY toYYYYMM(finished_at)              -- monthly: 12-mo TTL is a cheap partition drop
+ORDER BY (eval_id, model_id, run_id, sample_id) -- the access-pattern key AND the dedup key
+TTL finished_at + INTERVAL 12 MONTH</code></pre>
+<ul>
+  <li><strong>Exactly-once.</strong> A re-executed sample re-inserts the same key with a higher
+      <code>attempt</code>; ReplacingMergeTree keeps the newest and collapses duplicates. Headline
+      metrics are computed <strong>once at finalize</strong> with <code>FINAL</code> over the deduped run
+      partition (never an insert-time materialized view, which would double-count a re-load).</li>
+  <li><strong>Durable async insert.</strong> Inserts use <code>async_insert=1,
+      wait_for_async_insert=1</code> — the server batches concurrent worker inserts into one part (no
+      write amplification) while the call still blocks until durable, preserving the
+      <a href="execution.html#commit">ack-before-flip</a> invariant.</li>
+  <li><strong>HA.</strong> When clustered, a 3-replica StatefulSet runs
+      <code>ReplicatedReplacingMergeTree ON CLUSTER</code> with an embedded ClickHouse Keeper raft
+      quorum; reads survive a replica loss via the load-balanced Service.</li>
+</ul>
+<p>Why ClickHouse and not Postgres or DuckDB for this: see <a href="storage.html#clickhouse">Storage</a>.</p>
+
+<!-- ===================== OBJECT STORE ===================== -->
+<h2 class="anchor-h" id="objectstore">Object store</h2>
+<p>
+  <span class="pill store">eval_engine/storage.py · datasets.py</span>
+  S3-API object storage (GCS in this deployment, MinIO/S3 elsewhere) holds the immutable artifacts:
+  Inspect <code>.eval</code> logs, per-sample transcripts (zstd-compressed <code>.json.zst</code>), and
+  content-addressed dataset snapshots. All access goes through a single <strong>fsspec</strong> wrapper
+  where the URI scheme selects the driver (<code>gcsfs</code> for <code>gs://</code>, <code>s3fs</code>
+  for <code>s3://</code>, a local path in dev) — so the store is swappable with no app-code change, and
+  no native cloud SDK appears in the codebase.
+</p>
+<ul>
+  <li><strong>Transcript retention</strong> is sample-by-default: always keep failures (what you debug)
+      plus a deterministic fraction of passes, with a per-eval opt-in to keep all.</li>
+  <li><strong>Storage tiering</strong> — a lifecycle policy cools objects to NEARLINE at 30 days and
+      COLDLINE at 90, since transcript storage is the named dominant cost.</li>
+  <li><strong>Datasets</strong> are content-addressed: registration hashes the bytes and writes an
+      immutable snapshot keyed by the hash, pinned on the dataset version for true reproducibility.</li>
+</ul>
+
+<!-- ===================== OBSERVABILITY ===================== -->
+<h2 class="anchor-h" id="observability">Observability — Ops tab &amp; Grafana</h2>
+<p>
+  <span class="pill ana">eval_engine/ops.py · deploy/k8s/95-grafana.yaml</span>
+  Two complementary views, split by the question they answer:
+</p>
+<table>
+  <thead><tr><th></th><th>Ops tab (<code>/ops</code>)</th><th>Grafana (<code>/grafana</code>)</th></tr></thead>
+  <tbody>
+    <tr><td>Question</td><td>Is each subsystem healthy <em>now</em>?</td><td>How did metrics <em>trend</em> over time?</td></tr>
+    <tr><td>Shape</td><td>one live snapshot, polled every 4s</td><td>time-series, range-queried, alertable</td></tr>
+    <tr><td>Source</td><td><code>ops.snapshot()</code> live probes + PG heartbeats + K8s API</td><td>ClickHouse + Postgres + Managed Prometheus</td></tr>
+  </tbody>
+</table>
+<p>
+  The <strong>Ops tab</strong> probes every subsystem concurrently and degrades gracefully (an
+  unreachable backend becomes a <code>down</code> card, never a 500). Its liveness backbone is a
+  <strong>heartbeats table</strong> the orchestrator and each worker upsert every loop — so the
+  leader-elected singleton and the KEDA-churned workers are observable <em>without</em> coupling to the
+  Kubernetes API (portable to any cloud). It enriches with the in-cluster K8s API (pod phase, restarts,
+  KEDA desired-vs-current) and one-click <strong>GCP Log Explorer</strong> deep links per component/run.
+</p>
+<p>
+  <strong>Grafana</strong> provisions everything as code (grafonnet): three datasources (ClickHouse,
+  Postgres, GMP Prometheus) and five dashboards — Quality, Cost &amp; Tokens, Fleet &amp; Orchestration,
+  Model Gateway, and Infra. No Prometheus server to run; it reuses Google Managed Prometheus.
+</p>
+
+<h2 class="anchor-h" id="deploy">Deployment shape</h2>
+<p>
+  The whole stack runs on a cost-minimal <strong>zonal GKE cluster</strong>, provisioned by Terraform
+  (cluster, node pools, GCS bucket, Artifact Registry, reserved IP, IAM, and the KEDA / ingress-nginx /
+  cert-manager Helm releases). Postgres is managed <strong>Neon</strong> (serverless, external); the one
+  app image is pushed to Artifact Registry and run in four roles.
+</p>
+<ul>
+  <li><strong>System pool</strong> (always-on): API, orchestrator, LiteLLM, ClickHouse, Redis, Grafana,
+      KEDA operator, oauth2-proxy, frontend.</li>
+  <li><strong>Workers pool</strong> (spot, 0…N, tainted): the worker Deployment, KEDA-scaled to zero
+      when idle.</li>
+  <li><strong>Sandbox pool</strong> (gVisor, autoscale 0…N): per-sample agentic sandboxes.</li>
+</ul>
+<p>
+  A fresh cluster is three steps: <code>terraform apply</code> → create secrets → <code>install.sh</code>
+  (renders + applies manifests). Pause/resume scripts scale the system pool to zero overnight. For the
+  detailed resilience posture of this topology, see <a href="resilience.html">Resilience &amp; HA</a>.
+</p>
+
+</body>
+</html>

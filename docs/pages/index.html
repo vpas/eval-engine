@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eval Engine — System Documentation</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">Distributed LLM-evaluation platform</span>
+<h1>Eval Engine</h1>
+<p class="lead">
+  A modular, distributed platform for running <strong>any model × harness × dataset × scorer</strong>
+  at scale — with durable, queryable results and a dashboard to author, launch, monitor, and analyze
+  every run. It is built <strong>around <a href="inspect.html">Inspect&nbsp;AI</a> as the evaluation
+  kernel</strong>; the platform's value-add is distributed orchestration, a ClickHouse analytics
+  projection, and the web UI on top.
+</p>
+
+<div class="note">
+  <span class="tag">How to read this</span>
+  Start here for the goal, the load envelope, and the component map. The diagram below is
+  <strong>clickable</strong> — each box jumps to its detailed write-up. The left nav follows the
+  natural reading order: architecture → execution → storage → scale → resilience → foundations.
+</div>
+
+<h2 class="anchor-h" id="goal">The goal</h2>
+<p>
+  Evaluating large language models is a combinatorial problem: a <em>model</em> is judged by driving it
+  through a <em>harness</em> (single-turn QA, multiple-choice, a tool-using agent loop…) over a
+  <em>dataset</em>, then grading each output with one or more <em>scorers</em> (string match, a
+  model-graded judge, programmatic code execution…). Eval Engine keeps those four concerns
+  <strong>orthogonal</strong> — any valid combination composes — and runs the resulting work
+  <strong>distributed, crash-safe, and resumable</strong>, persisting every sample's input, output,
+  transcript, scores, tokens, cost, and timing for later analysis.
+</p>
+
+<div class="cards">
+  <div class="card">
+    <h3>Compose freely</h3>
+    <p>Model, harness, dataset, and scorer are independent blocks. Spans QA, multiple-choice,
+       multi-turn agentic, LLM-as-judge, and programmatic scoring.</p>
+  </div>
+  <div class="card">
+    <h3>Run at scale</h3>
+    <p>Up to 100k samples per run, fanned out over autoscaled workers coordinating through a Postgres
+       ledger — with retries, global rate limiting, and resume.</p>
+  </div>
+  <div class="card">
+    <h3>Reproduce & analyze</h3>
+    <p>A run's inputs are fully pinned by a versioned RunSpec; results land in ClickHouse for fast
+       slicing, with the Inspect transcript viewer for per-sample drill-down.</p>
+  </div>
+</div>
+
+<h3>Design principles</h3>
+<ul>
+  <li><strong>Inspect-native.</strong> Harnesses <em>are</em> Inspect <code>Solver</code>s, scorers
+      <em>are</em> Inspect <code>Scorer</code>s, and the <code>.eval</code> log is the source-of-truth
+      artifact. We adopt a solved kernel and spend effort on the differentiated platform.</li>
+  <li><strong>Two planes.</strong> A lightweight <span class="pill ctrl">control plane</span> (API +
+      Postgres + dashboard) for humans and state; a heavy
+      <span class="pill exec">execution plane</span> (orchestrator + autoscaled workers + gateway) for
+      compute. They communicate only through Postgres + the ledger, so each scales independently.</li>
+  <li><strong>Portable by interface.</strong> Terraform + Helm, the S3 object-storage API, vanilla
+      Postgres, OIDC. No component is cloud-locked; the same topology retargets EKS/GKE/AKS.</li>
+  <li><strong>Defer with a trigger.</strong> Everything not forced by the scale envelope is kept
+      minimal for v1 and deferred behind a measured trigger, so the system stays as simple as the load
+      allows.</li>
+</ul>
+
+<h2 class="anchor-h" id="load">Stated load requirements</h2>
+<p>
+  Every architectural decision is tuned to this envelope. Two figures here <strong>force real
+  infrastructure</strong>; the rest of the machinery is sized to them.
+</p>
+
+<div class="stats">
+  <div class="stat"><div class="v">~1,000</div><div class="l">runs / day</div></div>
+  <div class="stat"><div class="v">100k</div><div class="l">samples / run (full)</div></div>
+  <div class="stat"><div class="v">~50</div><div class="l">concurrent runs (peak)</div></div>
+  <div class="stat"><div class="v">~1B</div><div class="l">sample-evaluations / month</div></div>
+  <div class="stat"><div class="v">~12B</div><div class="l">result rows retained (12&nbsp;mo)</div></div>
+  <div class="stat"><div class="v">~385/s</div><div class="l">sustained samples/s (bursty)</div></div>
+</div>
+
+<table>
+  <thead><tr><th>Dimension</th><th>Value</th><th>Consequence for the design</th></tr></thead>
+  <tbody>
+    <tr><td>Samples per run</td><td>up to 100k (full); much smaller for fast-iteration subsets</td>
+        <td>Distribution is mandatory — not a single box.</td></tr>
+    <tr><td>Runs per day</td><td>~1,000 (a genuine mix of full + subset runs)</td>
+        <td>Claim QPS stays low (~8/s at batch 50) → a plain Postgres claim suffices.</td></tr>
+    <tr><td><strong>Sample-results retained</strong></td><td><strong>~12 billion rows</strong></td>
+        <td><strong>Forces ClickHouse</strong> as the analytics store from v1 (≫ DuckDB's comfort zone).</td></tr>
+    <tr><td>Workload</td><td>mix of API providers + self-hosted (vLLM)</td>
+        <td><strong>Forces a global, cross-worker rate limiter</strong> (provider quota + self-hosted capacity).</td></tr>
+    <tr><td>Retention</td><td>12 months</td>
+        <td>Monthly ClickHouse partitions + TTL; transcript sampling + storage tiering for cost.</td></tr>
+  </tbody>
+</table>
+
+<div class="key">
+  <span class="tag">The two forcing numbers</span>
+  The <strong>12-billion-row analytics store</strong> and the <strong>global cross-worker rate
+  limit</strong> are what demand real infrastructure (ClickHouse + Redis-coordinated LiteLLM).
+  Everything else — the ledger, the orchestrator, admission — is kept deliberately minimal, because at
+  this scale it can be. See <a href="scale.html">Handling the load</a> for the full reconciliation.
+</div>
+
+<h2 class="anchor-h" id="map">Component map</h2>
+<p>
+  The system as deployed on Kubernetes. <strong>Click any box</strong> to read how that component
+  works. Arrows show the primary data/control flow; note that the two planes touch only at Postgres.
+</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1000 772" role="img" aria-label="Eval Engine architecture diagram">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7.5,3 L0,6 Z" fill="#52708c" />
+    </marker>
+    <style>
+      .nlabel { font: 600 14px "Inter", sans-serif; fill: #e8f0fa; }
+      .nsub   { font: 11px ui-monospace, monospace; fill: #9fb3c8; }
+      .band   { font: 700 11px ui-monospace, monospace; fill: #5d748c; letter-spacing: .12em; }
+      .edge   { stroke: #52708c; stroke-width: 1.6; fill: none; }
+      .edge-d { stroke: #52708c; stroke-width: 1.6; fill: none; stroke-dasharray: 4 4; }
+    </style>
+  </defs>
+
+  <!-- plane backdrops -->
+  <rect x="120" y="118" width="860" height="92"  rx="12" fill="rgba(78,161,255,0.05)"  stroke="#22303f"/>
+  <rect x="120" y="232" width="860" height="150" rx="12" fill="rgba(78,161,255,0.05)"  stroke="#22303f"/>
+  <rect x="120" y="404" width="860" height="86"  rx="12" fill="rgba(52,211,153,0.05)"  stroke="#22303f"/>
+  <rect x="120" y="512" width="600" height="86"  rx="12" fill="rgba(251,191,36,0.05)"  stroke="#22303f"/>
+  <rect x="120" y="620" width="600" height="92"  rx="12" fill="rgba(192,132,252,0.05)" stroke="#22303f"/>
+
+  <text class="band" x="26" y="168">ACCESS</text>
+  <text class="band" x="26" y="305">CONTROL</text>
+  <text class="band" x="26" y="312" dy="14">PLANE</text>
+  <text class="band" x="26" y="450">EXECUTION</text>
+  <text class="band" x="26" y="558">GATEWAY</text>
+  <text class="band" x="26" y="668">STORAGE</text>
+
+  <!-- ACCESS EDGE -->
+  <a href="architecture.html#edge">
+    <g class="node"><rect class="node-box" x="140" y="134" width="150" height="60" rx="10" fill="#16202e" stroke="#4ea1ff"/>
+      <text class="nlabel" x="215" y="160" text-anchor="middle">Users</text>
+      <text class="nsub"   x="215" y="178" text-anchor="middle">browser · OIDC</text></g>
+  </a>
+  <a href="architecture.html#edge">
+    <g class="node"><rect class="node-box" x="330" y="134" width="180" height="60" rx="10" fill="#16202e" stroke="#4ea1ff"/>
+      <text class="nlabel" x="420" y="160" text-anchor="middle">nginx Ingress</text>
+      <text class="nsub"   x="420" y="178" text-anchor="middle">TLS · cert-manager</text></g>
+  </a>
+  <a href="architecture.html#edge">
+    <g class="node"><rect class="node-box" x="550" y="134" width="200" height="60" rx="10" fill="#16202e" stroke="#4ea1ff"/>
+      <text class="nlabel" x="650" y="160" text-anchor="middle">oauth2-proxy</text>
+      <text class="nsub"   x="650" y="178" text-anchor="middle">Google OIDC gate</text></g>
+  </a>
+
+  <!-- CONTROL PLANE -->
+  <a href="architecture.html#frontend">
+    <g class="node"><rect class="node-box" x="140" y="248" width="150" height="56" rx="10" fill="#121a26" stroke="#4ea1ff"/>
+      <text class="nlabel" x="215" y="272" text-anchor="middle">Frontend</text>
+      <text class="nsub"   x="215" y="289" text-anchor="middle">Next.js dashboard</text></g>
+  </a>
+  <a href="architecture.html#api">
+    <g class="node"><rect class="node-box" x="310" y="248" width="150" height="56" rx="10" fill="#121a26" stroke="#4ea1ff"/>
+      <text class="nlabel" x="385" y="272" text-anchor="middle">Control API</text>
+      <text class="nsub"   x="385" y="289" text-anchor="middle">FastAPI</text></g>
+  </a>
+  <a href="architecture.html#orchestrator">
+    <g class="node"><rect class="node-box" x="480" y="248" width="170" height="56" rx="10" fill="#121a26" stroke="#4ea1ff"/>
+      <text class="nlabel" x="565" y="272" text-anchor="middle">Orchestrator</text>
+      <text class="nsub"   x="565" y="289" text-anchor="middle">leader-elected</text></g>
+  </a>
+  <a href="architecture.html#viewer">
+    <g class="node"><rect class="node-box" x="670" y="248" width="150" height="56" rx="10" fill="#121a26" stroke="#4ea1ff"/>
+      <text class="nlabel" x="745" y="272" text-anchor="middle">Inspect viewer</text>
+      <text class="nsub"   x="745" y="289" text-anchor="middle">transcripts</text></g>
+  </a>
+  <a href="architecture.html#training">
+    <g class="node"><rect class="node-box" x="840" y="248" width="122" height="56" rx="10" fill="#121a26" stroke="#4ea1ff"/>
+      <text class="nlabel" x="901" y="272" text-anchor="middle">Training</text>
+      <text class="nsub"   x="901" y="289" text-anchor="middle">monitor</text></g>
+  </a>
+  <a href="architecture.html#postgres">
+    <g class="node"><rect class="node-box" x="220" y="324" width="600" height="48" rx="10" fill="#101826" stroke="#c084fc"/>
+      <text class="nlabel" x="520" y="346" text-anchor="middle">Postgres (Neon)</text>
+      <text class="nsub"   x="520" y="363" text-anchor="middle">runs metadata · ephemeral task ledger · leader lock · heartbeats · registry</text></g>
+  </a>
+
+  <!-- EXECUTION -->
+  <a href="architecture.html#workers">
+    <g class="node"><rect class="node-box" x="220" y="420" width="280" height="56" rx="10" fill="#121e1c" stroke="#34d399"/>
+      <text class="nlabel" x="360" y="444" text-anchor="middle">Workers (KEDA-scaled)</text>
+      <text class="nsub"   x="360" y="461" text-anchor="middle">claim → Inspect Task → commit → load</text></g>
+  </a>
+  <a href="architecture.html#sandbox">
+    <g class="node"><rect class="node-box" x="520" y="420" width="280" height="56" rx="10" fill="#121e1c" stroke="#34d399"/>
+      <text class="nlabel" x="660" y="444" text-anchor="middle">Agentic sandbox pods</text>
+      <text class="nsub"   x="660" y="461" text-anchor="middle">gVisor · per-sample · air-gapped</text></g>
+  </a>
+
+  <!-- GATEWAY -->
+  <a href="architecture.html#gateway">
+    <g class="node"><rect class="node-box" x="220" y="528" width="270" height="54" rx="10" fill="#1c1a12" stroke="#fbbf24"/>
+      <text class="nlabel" x="355" y="551" text-anchor="middle">LiteLLM gateway</text>
+      <text class="nsub"   x="355" y="568" text-anchor="middle">all model traffic · cost tally</text></g>
+  </a>
+  <a href="architecture.html#redis">
+    <g class="node"><rect class="node-box" x="510" y="528" width="190" height="54" rx="10" fill="#1c1a12" stroke="#fbbf24"/>
+      <text class="nlabel" x="605" y="551" text-anchor="middle">Redis (HA)</text>
+      <text class="nsub"   x="605" y="568" text-anchor="middle">rate-limit · stop-flags</text></g>
+  </a>
+  <a href="architecture.html#providers">
+    <g class="node"><rect class="node-box" x="760" y="528" width="210" height="54" rx="10" fill="#0f1620" stroke="#52708c"/>
+      <text class="nlabel" x="865" y="551" text-anchor="middle">Model providers</text>
+      <text class="nsub"   x="865" y="568" text-anchor="middle">OpenRouter · vLLM</text></g>
+  </a>
+
+  <!-- STORAGE -->
+  <a href="architecture.html#clickhouse">
+    <g class="node"><rect class="node-box" x="220" y="636" width="270" height="60" rx="10" fill="#19121f" stroke="#c084fc"/>
+      <text class="nlabel" x="355" y="661" text-anchor="middle">ClickHouse (HA)</text>
+      <text class="nsub"   x="355" y="679" text-anchor="middle">~12B-row sample projection</text></g>
+  </a>
+  <a href="architecture.html#objectstore">
+    <g class="node"><rect class="node-box" x="510" y="636" width="270" height="60" rx="10" fill="#19121f" stroke="#c084fc"/>
+      <text class="nlabel" x="645" y="661" text-anchor="middle">Object store (GCS/S3)</text>
+      <text class="nsub"   x="645" y="679" text-anchor="middle">.eval logs · transcripts (zstd)</text></g>
+  </a>
+  <a href="architecture.html#observability">
+    <g class="node"><rect class="node-box" x="800" y="636" width="170" height="60" rx="10" fill="#19121f" stroke="#f472b6"/>
+      <text class="nlabel" x="885" y="661" text-anchor="middle">Grafana + GMP</text>
+      <text class="nsub"   x="885" y="679" text-anchor="middle">dashboards-as-code</text></g>
+  </a>
+
+  <!-- EDGES -->
+  <path class="edge" marker-end="url(#arrow)" d="M290,164 H328"/>
+  <path class="edge" marker-end="url(#arrow)" d="M510,164 H548"/>
+  <path class="edge" marker-end="url(#arrow)" d="M650,194 V246"/>           <!-- oauth → control band -->
+  <path class="edge" marker-end="url(#arrow)" d="M215,304 V322"/>           <!-- frontend → pg -->
+  <path class="edge" marker-end="url(#arrow)" d="M385,304 V322"/>           <!-- api → pg -->
+  <path class="edge" marker-end="url(#arrow)" d="M565,304 V322"/>           <!-- orch → pg -->
+  <path class="edge-d" marker-end="url(#arrow)" d="M901,304 V318 H820"/>    <!-- training → pg -->
+  <path class="edge" marker-end="url(#arrow)" d="M360,372 V418"/>           <!-- pg → workers (claim) -->
+  <path class="edge" marker-end="url(#arrow)" d="M520,476 V418" transform="translate(0,0)"/>
+  <path class="edge" marker-end="url(#arrow)" d="M620,448 H518"/>           <!-- sandbox ↔ workers -->
+  <path class="edge" marker-end="url(#arrow)" d="M355,476 V526"/>           <!-- workers → gateway -->
+  <path class="edge" marker-end="url(#arrow)" d="M490,555 H508"/>           <!-- gateway → redis -->
+  <path class="edge" marker-end="url(#arrow)" d="M700,555 H758"/>           <!-- gateway → providers -->
+  <path class="edge" marker-end="url(#arrow)" d="M300,476 V632"/>           <!-- workers → clickhouse -->
+  <path class="edge" marker-end="url(#arrow)" d="M430,476 C430,560 560,560 560,634"/> <!-- workers → object store -->
+  <path class="edge-d" marker-end="url(#arrow)" d="M820,348 C900,360 885,500 885,634"/> <!-- grafana reads stores -->
+</svg>
+</div>
+<div class="legend">
+  <span><i style="background:#4ea1ff"></i> Access &amp; control plane</span>
+  <span><i style="background:#34d399"></i> Execution plane</span>
+  <span><i style="background:#fbbf24"></i> Model gateway</span>
+  <span><i style="background:#c084fc"></i> Storage tier</span>
+  <span><i style="background:#f472b6"></i> Observability</span>
+  <span><i style="border:1px dashed #52708c;background:none"></i> vNext / read-only flow</span>
+</div>
+
+<h2 class="anchor-h" id="next">Where to go next</h2>
+<div class="cards">
+  <a class="card" href="architecture.html">
+    <h3>Architecture &amp; components →</h3>
+    <p>Every box in the diagram, in detail — responsibilities, code, and config.</p>
+  </a>
+  <a class="card" href="execution.html">
+    <h3>Execution &amp; orchestration →</h3>
+    <p>A run end-to-end: the ledger state machine, claim/lease, the ack-before-flip commit, finalize.</p>
+  </a>
+  <a class="card" href="storage.html">
+    <h3>Storage choices →</h3>
+    <p>Why Postgres, ClickHouse, object storage, and Redis — each justified against the load.</p>
+  </a>
+  <a class="card" href="scale.html">
+    <h3>Handling the load →</h3>
+    <p>The arithmetic behind ~1B/month and ~385&nbsp;samples/s, component by component.</p>
+  </a>
+  <a class="card" href="resilience.html">
+    <h3>Resilience &amp; HA →</h3>
+    <p>Crash safety, exactly-once analytics, leader election, HA stores, and the SPOF ledger.</p>
+  </a>
+  <a class="card" href="inspect.html">
+    <h3>Integration with Inspect →</h3>
+    <p>What "Inspect-native" means and exactly where the kernel plugs into the platform.</p>
+  </a>
+</div>
+
+<p class="footnote">
+  This documentation is generated from the design docs in <code>docs/</code> and the implementation in
+  <code>eval_engine/</code> and <code>deploy/</code>. Where the prototype's code and the v1 design
+  diverge (noted inline), the page describes <em>what the code actually does</em>.
+</p>
+
+</body>
+</html>

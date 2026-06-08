@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extensibility, Sandbox & Ops — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">Foundations</span>
+<h1>Extensibility, security &amp; operations</h1>
+<p class="lead">
+  The last set of foundations: how to add capabilities without touching the core, how untrusted
+  model-generated code is contained, how the platform is observed in production, and the vNext
+  training-monitor track built entirely by reusing the existing machinery.
+</p>
+
+<!-- ===================== EXTENSIBILITY ===================== -->
+<h2 class="anchor-h" id="plugins">Extensibility — the plugin contract</h2>
+<p>
+  The orthogonality of <em>model ⟂ harness ⟂ scorer ⟂ dataset</em> is enforced by four independent
+  plugin kinds, composed only at RunSpec resolution. Adding an eval capability is shipping a plugin —
+  with <strong>zero core changes</strong>.
+</p>
+<table>
+  <thead><tr><th>Kind</th><th>Wraps (Inspect)</th><th>Returns</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><strong>harness</strong></td><td><code>@solver</code></td><td><code>Solver</code></td><td>How the model is driven (single-turn, agentic, RAG…).</td></tr>
+    <tr><td><strong>scorer</strong></td><td><code>@scorer</code></td><td><code>Scorer</code></td><td>How output is judged (match, LLM-judge, programmatic, human-stub).</td></tr>
+    <tr><td><strong>dataset_loader</strong></td><td>—</td><td><code>Dataset</code></td><td>Turn a source (HF/S3/JSONL/DB) into a content-addressed snapshot.</td></tr>
+    <tr><td><strong>tool</strong></td><td><code>@tool</code></td><td><code>Tool</code></td><td>Capabilities an agentic harness can call.</td></tr>
+  </tbody>
+</table>
+<p>Two properties make this safe and self-service:</p>
+<ul>
+  <li><strong>Typed config with a published schema.</strong> Each plugin declares a Pydantic config
+      model; its JSON Schema drives both RunSpec validation and the launch-wizard form — so a new plugin
+      is immediately usable from the UI with no frontend work.</li>
+  <li><strong>Versioned &amp; reproducible.</strong> A plugin declares a semantic version (the label),
+      while the actual executing code is pinned by the deployment's <code>code_ref</code> (git SHA) on
+      the eval version (the truth). Reproducing a run means redeploying that <code>code_ref</code>.</li>
+</ul>
+<p>
+  v1 uses a shared <strong>in-process registry</strong> (entry-point discovery) with schemas derived
+  live. A Postgres plugin catalog — which would let the control plane serve schemas <em>without</em>
+  importing plugin code — is deferred until untrusted third-party plugins exist (it lands with
+  multi-tenancy). It's purely additive: a table + a sync step.
+</p>
+
+<!-- ===================== SANDBOX ===================== -->
+<h2 class="anchor-h" id="sandbox">Sandboxing — containing untrusted model code</h2>
+<p>
+  Agentic evals execute untrusted, model-generated shell/code/file operations — the highest-stakes
+  security surface in the system. The threat model is concrete: destructive/runaway actions (fork bombs,
+  disk fill), network exfiltration or attacks on the engine's own services, attempts to reach cloud
+  metadata (<code>169.254.169.254</code>) for node IAM credentials, sandbox escape, and
+  <em>adversarial-by-design</em> evals that deliberately test dangerous capabilities.
+</p>
+<div class="key"><span class="tag">The architectural lever</span>
+  In Inspect's model the agent loop runs in the <strong>worker</strong>; only tool/command execution
+  runs in the sandbox. So the sandbox almost never needs to reach the model — which means
+  <strong>most sandboxes can be fully air-gapped (zero egress)</strong>, removing the single largest
+  exfiltration vector for the majority of evals. This is the foundation of "air-gap by default."</div>
+
+<h3>Tiered isolation by eval risk</h3>
+<p>
+  One size is wrong (microVMs for a calculator is wasteful; a shared container for a cyber eval is
+  reckless). The harness declares its tier; the boundary criterion is sharp — not "how dangerous does it
+  feel" but <strong>"is the model adversarially trying to escape?"</strong>
+</p>
+<table>
+  <thead><tr><th>Tier</th><th>Eval type</th><th>Runtime / boundary</th><th>Network</th></tr></thead>
+  <tbody>
+    <tr><td><strong>T1</strong></td><td>benign tools (search, calculator, RAG)</td><td>hardened container</td><td>deny-all + per-eval FQDN allowlist via a logged egress proxy</td></tr>
+    <tr><td><strong>T2</strong> (default)</td><td>general agentic / code tasks</td><td><strong>gVisor</strong> — user-space kernel closes the kernel-exploit escape vector</td><td>air-gapped</td></tr>
+    <tr><td><strong>T3</strong></td><td>cyber-offense, self-propagation, adversarial</td><td><strong>Kata / microVM</strong> — a real per-pod VM; the boundary becomes the hypervisor</td><td>fully air-gapped, dedicated nodes/account</td></tr>
+  </tbody>
+</table>
+<p>
+  gVisor (T2) reimplements the syscall surface in user space, which closes the kernel-CVE escape vector
+  most container escapes rely on — plenty when the model just wants to solve the task. Kata (T3) gives
+  each pod its own kernel, so you pay for VM isolation only when the eval <em>rewards</em> finding an
+  exploit.
+</p>
+
+<h3>Baseline hardening (every tier)</h3>
+<ul>
+  <li><strong>Resource caps</strong> — CPU/memory/storage + a <strong>PID limit</strong> (kills fork
+      bombs); storage limit kills disk-fill.</li>
+  <li><strong>No credentials</strong> — no mounted secrets, zero-RBAC service account
+      (<code>automountServiceAccountToken: false</code>), <strong>IMDS blocked</strong> so a sandbox
+      can't lift node cloud credentials.</li>
+  <li><strong>Network default-deny</strong> — a <code>NetworkPolicy</code> denies all ingress/egress;
+      sandboxes cannot reach Postgres, the gateway, or each other. The rare legitimate need routes
+      through a credential-less, logged egress proxy — a <em>separate trust zone</em> from the LiteLLM
+      gateway (which holds provider keys), so sandboxed code can never spend the model budget or
+      exfiltrate keys.</li>
+  <li><strong>Pod security</strong> — non-root, read-only root filesystem, drop ALL capabilities,
+      <code>seccomp=RuntimeDefault</code>, no host network/PID/IPC.</li>
+  <li><strong>Node isolation</strong> — sandboxes on dedicated tainted node pools, away from control/
+      worker/gateway nodes, so an escape lands on a disposable node.</li>
+  <li><strong>Guaranteed teardown</strong> — pods are single-use and TTL-bounded; a sweeper reaps any pod
+      whose owning task's lease expired (labels carry run/sample id), so orphans can't accumulate.</li>
+</ul>
+
+<h3>The scale ceiling &amp; its mitigation</h3>
+<p>
+  Pod create/destroy <em>throughput</em> tops out at low-hundreds/s (K8s control-plane limits). v1 ships
+  hardened per-sample pods — within budget while agentic is a minority of the aggregate — with cold-start
+  hidden by pre-pulled images and expand-time pre-warm. The trigger-gated next step is a pooled microVM
+  snapshot-restore service (T2): each sample runs in a fresh microVM restored from a golden snapshot in
+  tens of ms, then discarded — fresh isolation <em>and</em> high churn, with no "prove the reset is
+  airtight" burden because there's no reuse. (Detailed under <a href="scale.html#sandbox">Handling the
+  load</a>.)
+</p>
+<div class="note"><span class="tag">Two distinct trust boundaries</span>
+  Don't conflate them: <strong>plugin code</strong> (harness/scorer/tool implementations) runs in the
+  worker and is trusted via review; <strong>model-generated actions</strong> run in the sandbox and are
+  untrusted, isolated by everything above. The sandbox protects against what the <em>model</em> does, not
+  against a malicious plugin author.</div>
+
+<!-- ===================== OBSERVABILITY ===================== -->
+<h2 class="anchor-h" id="ops">Operations &amp; observability</h2>
+<p>
+  Two complementary surfaces, split by the question they answer — covered in the
+  <a href="architecture.html#observability">component reference</a>; the operational rationale:
+</p>
+<ul>
+  <li><strong>The Ops tab</strong> (<code>/ops</code>, <code>eval_engine/ops.py</code>) answers "is
+      everything up <em>right now</em>?" Its portable backbone is a <strong>heartbeats table</strong>:
+      the leader-elected orchestrator and every KEDA-churned worker upsert a liveness row each loop, so
+      both become observable <em>without</em> coupling to the Kubernetes API — it works identically on
+      GKE/EKS/AKS/local. It enriches with the in-cluster K8s API (pod phase, restarts, KEDA
+      desired-vs-current) and one-click GCP Log Explorer deep links, and it degrades gracefully (an
+      unreachable backend is a <code>down</code> card, never a 500). No log <em>contents</em> flow through
+      the app — just a pre-filtered Log Explorer URL.</li>
+  <li><strong>Grafana</strong> (<code>/grafana</code>) answers "how did metrics <em>trend</em>?" Five
+      dashboards (Quality, Cost &amp; Tokens, Fleet &amp; Orchestration, Gateway, Infra) over three
+      provisioned-as-code datasources: ClickHouse (eval quality, cost, latency), Postgres (live fleet/
+      ledger/budget state, orchestrator tick latency from the heartbeats), and Google Managed Prometheus
+      (gateway QPS/latency/spend + pod CPU/mem/replicas). There's <strong>no Prometheus server to run</strong>
+      — it reuses GMP, so the footprint is just a small Grafana pod.</li>
+</ul>
+<p>
+  A dedicated app <code>/metrics</code> exporter is deliberately deferred: the orchestration internals it
+  would expose are already persisted in the heartbeats table (trended via Postgres), and the metrics that
+  truly need counter/histogram semantics (gateway, infra) come from LiteLLM + GMP with no app code.
+</p>
+
+<!-- ===================== TRAINING ===================== -->
+<h2 class="anchor-h" id="training">Training monitor — reuse as a feature (vNext)</h2>
+<p>
+  <span class="pill ctrl">eval_engine/training*.py · mock_trainer.py</span>
+  A vNext track that is the clearest demonstration of the platform's modularity. Training itself is an
+  explicit non-goal, so the trainer is <strong>mocked</strong>; what's built is a continuous-eval /
+  training-monitor layer that consumes a stream of checkpoints and drives the existing eval machinery
+  against each one — then surfaces the per-checkpoint score trajectory with anomaly detection.
+</p>
+<div class="key"><span class="tag">The reuse insight</span>
+  A checkpoint-eval <strong>is just a tagged <code>Run</code></strong>. So the ephemeral ledger, KEDA
+  workers, ClickHouse projection, retries, budget caps, transcripts, the Inspect viewer, <em>and the
+  Compare view</em> all work unchanged. The net-new surface is thin: two entities, a few nullable
+  columns, one poller/monitor loop, an anomaly module, and a UI tab — added without reshaping any
+  hot path.</div>
+<p>The monitor is one more <strong>leader-elected loop</strong> (the orchestrator pattern). Per tick:</p>
+<ol>
+  <li><strong>Discover</strong> — poll an object-storage prefix (the <code>checkpoint.json</code> manifest
+      is the commit signal) and record new checkpoints. The watched prefix goes through the same
+      <a href="storage.html#object">fsspec</a> wrapper, so it's <code>gs://…</code> in-cluster, a local
+      dir in dev.</li>
+  <li><strong>Fan out</strong> — launch the eval suite as ordinary runs tagged with
+      <code>(training_run_id, checkpoint_id, step, sweep)</code>, with the checkpoint's opaque
+      <code>model_ref</code> as the model (a mock resolver maps it to a real model — the rest of the
+      engine never knows). Checkpoint-evals run in the <strong>interactive lane</strong> for timely
+      feedback, with an eval-every + skip-stale backpressure valve.</li>
+  <li><strong>Reconcile</strong> — when a checkpoint's suite runs are terminal, roll their summaries into
+      the per-(eval, step) score series with a Wilson CI, refit the expected curve, and run anomaly
+      detection.</li>
+  <li><strong>Finalize</strong> — on the run going terminal, compute the best checkpoint per eval.</li>
+</ol>
+<h3>Anomaly detection &amp; diagnosis</h3>
+<p>
+  The hard part is telling a <em>training fault</em> apart from <em>a model simply weak on a hard eval</em>.
+  The core metric is <strong>deviation from an expected trajectory</strong> (a saturating curve fit per
+  eval), gated by the Wilson CI so sampling noise isn't flagged. Detectors yield
+  <code>regression</code> / <code>drift</code> / <code>plateau</code> with a severity. The diagnosis then
+  <strong>corroborates the eval score with orthogonal signals</strong>: a training-metric cross-check
+  (loss vs. score quadrant), broad-vs-isolated collapse, <strong>canary evals</strong> (a trivial eval
+  any functional model aces — its collapse is the decisive "model/serving broke" signal), error-rate vs.
+  low-score, output-health (repetition/empty-output/refusal rate), and per-category regression. The
+  result is a templated root-cause hypothesis with corroborating evidence — rendered as chart markers and
+  a drill drawer.
+</p>
+
+<hr>
+<p class="footnote">
+  That completes the tour: the <a href="index.html">overview</a> and load envelope, the
+  <a href="architecture.html">components</a>, the <a href="execution.html">execution protocol</a>, the
+  <a href="storage.html">storage choices</a>, <a href="scale.html">scaling</a>,
+  <a href="resilience.html">resilience</a>, the <a href="inspect.html">Inspect integration</a>, and the
+  extensibility, security, and operational foundations above.
+</p>
+
+</body>
+</html>

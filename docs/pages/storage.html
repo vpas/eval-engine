@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage Choices — Eval Engine</title>
+<link rel="stylesheet" href="styles.css">
+<script defer src="site.js"></script>
+</head>
+<body>
+
+<span class="eyebrow">How it works</span>
+<h1>Storage choices, justified</h1>
+<p class="lead">
+  Four storage tiers, each chosen for one job and defensible against the <a href="index.html#load">load
+  envelope</a>. The guiding split: <strong>hot coordination in Postgres, cold analytics in ClickHouse,
+  immutable artifacts in object storage, soft shared counters in Redis.</strong> Putting any one job in
+  the wrong tier is what breaks at scale — this page explains why each lives where it does.
+</p>
+
+<table>
+  <thead><tr><th>Tier</th><th>Holds</th><th>Why this engine</th></tr></thead>
+  <tbody>
+    <tr><td><span class="pill store">Postgres</span></td>
+        <td>run metadata, the <em>ephemeral</em> task ledger, registry, audit, heartbeats, leader lock</td>
+        <td>Transactional row-locking (<code>FOR UPDATE SKIP LOCKED</code>) + SQL aggregates over live state.</td></tr>
+    <tr><td><span class="pill ana">ClickHouse</span></td>
+        <td>the ~12B-row per-sample results projection</td>
+        <td>Columnar OLAP built for billions of rows + fast slicing; deduping merge engine.</td></tr>
+    <tr><td><span class="pill store">Object store</span></td>
+        <td><code>.eval</code> logs, transcripts (zstd), dataset snapshots</td>
+        <td>Cheap, durable, infinitely scalable blob storage; tiering for the dominant cost.</td></tr>
+    <tr><td><span class="pill gw">Redis</span></td>
+        <td>global rate-limit counters, per-run stop-flags</td>
+        <td>Fast shared, atomic counters across gateway replicas; state is soft/rebuildable.</td></tr>
+  </tbody>
+</table>
+
+<!-- ===================== POSTGRES ===================== -->
+<h2 class="anchor-h" id="postgres">Postgres — the coordinator</h2>
+<h3>Why Postgres for the ledger</h3>
+<p>
+  The task ledger needs three things a plain message queue can't give: <strong>atomic claim with no
+  double-dispatch</strong>, <strong>lease-based crash reclaim</strong>, and the ability to answer
+  <strong>SQL-shaped questions</strong> about live state (counts by status, per-lane running counts,
+  budget burn, fairness). Postgres' <code>FOR UPDATE SKIP LOCKED</code> is exactly an atomic
+  work-claim primitive, and the rest is just SQL over the same rows. The ledger is our
+  <em>domain model</em> that happens to use a standard claim pattern — not a generic queue we're
+  reinventing.
+</p>
+<div class="note"><span class="tag">Rejected: Temporal / SQS</span>
+  A workflow engine is the wrong shape — our work is a single-step fan-out (claim → run one sample →
+  record), not a multi-step workflow, so we'd use almost none of it. Worse, its own persistence becomes
+  the <em>same</em> ~1B/month write problem we already solve, and it can't answer the SQL questions the
+  control plane asks. <code>pgmq</code>/<code>procrastinate</code> remain a drop-in escape hatch if the
+  hand-rolled lease ever proves bug-prone.</div>
+
+<h3>Why the ledger is ephemeral and skinny</h3>
+<p>
+  Two deliberate constraints keep Postgres tiny and fast despite 12B lifetime samples:
+</p>
+<ul>
+  <li><strong>Ephemeral.</strong> <code>sample_tasks</code> holds only <em>in-flight</em> runs; on
+      finalize, failures are archived and the rest pruned. Lifetime history lives in ClickHouse + object
+      storage, so Postgres never grows a 12B-row table.</li>
+  <li><strong>Skinny.</strong> The ledger carries only coordination (status/lease/attempts/error).
+      Results go <em>straight</em> to ClickHouse — they never widen the ledger row.</li>
+</ul>
+<div class="note"><span class="tag">Reversed: widened rows + a ResultLoader</span>
+  An earlier design wrote fat result payloads into the ledger row and had a separate loader copy them to
+  ClickHouse. Co-locating tiny hot coordination updates with fat append-mostly columns on one
+  high-churn table caused dead-tuple / autovacuum bloat at 1B/month. The skinny ledger + direct
+  async-insert deleted both the bloat <em>and</em> a whole component.</div>
+
+<h3>Managed Neon</h3>
+<p>
+  In this deployment Postgres is managed <strong>Neon serverless</strong> (external, free tier) — zero
+  always-on DB cost, its own storage durability and failover. The app connects through Neon's pooled
+  (PgBouncer) endpoint via a bounded <code>psycopg_pool</code>; the leader lock uses a session-mode
+  endpoint (a transaction pooler would defeat the advisory lock — see
+  <a href="resilience.html#leader">Resilience</a>). The portability contract is <em>vanilla Postgres
+  only</em> — no Aurora-only features — so CloudNativePG or any managed Postgres is a drop-in.
+</p>
+
+<!-- ===================== CLICKHOUSE ===================== -->
+<h2 class="anchor-h" id="clickhouse">ClickHouse — the 12B-row analytics store</h2>
+<h3>Why ClickHouse</h3>
+<p>
+  This is one of the <a href="index.html#load">two numbers that force real infrastructure</a>. At ~1B
+  new rows/month and ~12B retained, the analytics store must do wide columnar scans, group-bys, and
+  percentile work over billions of rows — and TTL-drop a year-old month cheaply. That is ClickHouse's
+  home turf and squarely outside Postgres' or DuckDB's comfort zone.
+</p>
+<ul>
+  <li><strong>Columnar + <code>LowCardinality</code></strong> on provider/model/harness/category shrinks
+      12B rows and makes model-comparison scans fast.</li>
+  <li><strong>Monthly partitions aligned to the 12-month TTL</strong> turn retention into a cheap
+      partition drop, not a row-by-row delete.</li>
+  <li><strong>A deduping merge engine</strong> (<code>ReplacingMergeTree</code>) is what makes
+      exactly-once analytics fall out of at-least-once execution (see
+      <a href="execution.html#exactly-once">Execution</a>).</li>
+</ul>
+<div class="note"><span class="tag">DuckDB stays dev-only</span>
+  DuckDB is great for local-dev and one-off spikes, but 12B rows is well past its comfort zone as a
+  shared, concurrently-written warehouse. It remains the local stand-in, not the production store.</div>
+
+<h3>The table</h3>
+<pre><code>CREATE TABLE sample_results (
+  run_id, sample_id, eval_id, eval_version,
+  provider LowCardinality, model_id LowCardinality, harness_type LowCardinality,
+  group_key LowCardinality,                 -- category / slicing dimension
+  passed UInt8, primary_score Float64, scores String,   -- all scorer outputs as JSON
+  tokens_in, tokens_out, cost_usd, latency_ms, attempt,
+  error_type LowCardinality, transcript_uri, review_status, finished_at DateTime )
+ENGINE = ReplacingMergeTree(attempt)          -- newest re-execution wins; dup re-insert collapses
+PARTITION BY toYYYYMM(finished_at)
+ORDER BY (eval_id, model_id, run_id, sample_id)
+TTL finished_at + INTERVAL 12 MONTH</code></pre>
+<p>
+  The <code>ORDER BY</code> front-loads the columns most queries filter on (which eval, which model), so
+  it doubles as both the access-pattern key and the dedup key. The <code>passed</code>/
+  <code>primary_score</code> columns are hoisted out for the fast common path while the full
+  <code>scores</code> map keeps the table flexible across arbitrary scorers with no per-eval schema
+  change.
+</p>
+<div class="note"><span class="tag">Reversed: insert-time aggregating MV</span>
+  An insert-time <code>AggregatingMergeTree</code> materialized view for per-run pass-rate/cost was
+  rejected: it fires per insert block and never sees the base table's later ReplacingMergeTree collapse,
+  so a re-loaded batch double-counts the headline numbers. Computing once at finalize over the deduped
+  partition is exactly-once by construction.</div>
+
+<h3>Why workers insert directly</h3>
+<p>
+  Workers <strong>async-insert straight to ClickHouse</strong> (<code>async_insert=1,
+  wait_for_async_insert=1</code>) — the server batches concurrent small inserts into one part (no
+  write-amplification under load) while still blocking until durable, which is what lets the
+  <a href="execution.html#commit">ack-before-flip</a> commit hold its invariant. No separate loader
+  exists; ClickHouse's own server-side buffering is the batching layer.
+</p>
+
+<!-- ===================== OBJECT STORE ===================== -->
+<h2 class="anchor-h" id="object">Object storage — immutable artifacts</h2>
+<h3>Why object storage</h3>
+<p>
+  The bulky, write-once artifacts — Inspect <code>.eval</code> logs, per-sample transcripts, and dataset
+  snapshots — belong in cheap, durable, effectively-infinite blob storage, not a database. The
+  <code>.eval</code> log is the <strong>source-of-truth</strong> artifact; ClickHouse is just the index
+  over it.
+</p>
+<h3>Transcript storage is the dominant cost — so it's managed</h3>
+<ul>
+  <li><strong>zstd compression</strong> on every transcript (<code>.json.zst</code>).</li>
+  <li><strong>Sample-by-default retention</strong> — keep <em>all failures</em> (what you debug) plus a
+      deterministic fraction of passes (stable in/out by a hash of the sample id), with a per-eval opt-in
+      to keep everything. The ClickHouse projection stays full-fidelity regardless.</li>
+  <li><strong>Storage-class tiering</strong> — a lifecycle policy cools objects to NEARLINE at 30 days,
+      COLDLINE at 90.</li>
+</ul>
+<div class="note"><span class="tag">Why sample, not keep-all</span>
+  The asymmetry is the point: keep-all's sunk storage cost is <em>not reversible downward</em>, while
+  sampling is <em>reversible upward</em> — you can always decide to keep more later. So the cheaper
+  default is also the safer one.</div>
+
+<h3>Portable by interface (fsspec)</h3>
+<p>
+  All object-store access goes through one <code>storage.py</code> fsspec wrapper where the URI scheme
+  selects the driver — <code>gcsfs</code> for <code>gs://</code>, <code>s3fs</code> for <code>s3://</code>,
+  a local path in dev. No native cloud SDK appears in app code, so AWS&nbsp;S3, GCS, or self-hosted MinIO
+  are all swappable with zero code change. Credentials come from the environment (workload identity / the
+  node service account).
+</p>
+
+<h3>Datasets are content-addressed</h3>
+<p>
+  Registering a dataset hashes its bytes and writes an immutable snapshot keyed by that hash; the
+  <code>content_hash</code> + <code>snapshot_uri</code> are pinned on the dataset version. A RunSpec pins
+  the version → the hash → the exact bytes, giving true input reproducibility (and free dedup: identical
+  content → identical hash). LakeFS/DVC/HF-revisions were considered and not adopted as the
+  system-of-record — content-addressed snapshots are the simplest thing that gives real reproducibility
+  with no extra stateful service; LakeFS can slot under the same pointer later if branching is ever
+  needed.
+</p>
+
+<!-- ===================== REDIS ===================== -->
+<h2 class="anchor-h" id="redis">Redis — soft shared state</h2>
+<p>
+  Redis holds exactly the state that must be <strong>shared, atomic, and fast</strong> across gateway
+  replicas but is <strong>soft and rebuildable</strong>: the global per-model rate-limit counters and the
+  per-run stop-flags. It is the substrate that makes the cross-worker rate limit — the
+  <a href="index.html#load">second forcing requirement</a> — possible: a read-modify-write counter under
+  a hashed key, shared by all LiteLLM replicas.
+</p>
+<p>
+  Because the state is soft, a Sentinel failover losing a sliver of a rate-limit window is acceptable —
+  which is why a 3-pod + Sentinel cluster is enough and no durable store is warranted here. Putting
+  rate-limit counters in Postgres would add contention to the coordinator for data that doesn't need
+  durability; putting them in worker memory would defeat the "global, cross-worker" requirement entirely.
+</p>
+
+<h2 class="anchor-h" id="summary">One-line rationale per tier</h2>
+<div class="cards">
+  <div class="card"><h3>Postgres</h3><p>Needs transactional claims + SQL over <em>live</em> state. Ephemeral + skinny so it never grows huge.</p></div>
+  <div class="card"><h3>ClickHouse</h3><p>Needs billion-row columnar scans + cheap TTL drops + dedup-on-merge. Forced by the 12B-row figure.</p></div>
+  <div class="card"><h3>Object store</h3><p>Needs cheap, durable, write-once blobs at any scale. Tiered + sampled because transcripts dominate cost.</p></div>
+  <div class="card"><h3>Redis</h3><p>Needs fast atomic counters shared across replicas; state is soft, so HA-by-Sentinel suffices.</p></div>
+</div>
+
+</body>
+</html>
