@@ -52,9 +52,12 @@ def _execute_with_heartbeat(spec, run_id: str, samples_by_id: dict, ids: list[st
         while not stop.wait(LEASE_RENEW_SECONDS):
             try:
                 db.control.renew_lease(run_id, ids, WORKER_ID)
-                log.debug("[%s] run_id=%s renewed lease on %d task(s)", WORKER_ID, run_id, len(ids))
+                # INFO (not debug): a long agentic/SWE batch outlives the renew interval, so this is the
+                # "still alive, still working" signal during the otherwise-quiet execute phase. Normal
+                # (sub-interval) batches finish before the first beat, so they never emit it.
+                log.info("[%s] run_id=%s still executing %d sample(s) — lease renewed", WORKER_ID, run_id, len(ids))
             except Exception:  # noqa: BLE001  a transient renew failure just risks one early reclaim
-                log.debug("[%s] run_id=%s lease renew failed (will retry)", WORKER_ID, run_id)
+                log.warning("[%s] run_id=%s lease renew failed (will retry next interval)", WORKER_ID, run_id)
 
     t = threading.Thread(target=beat, name=f"lease-{run_id}", daemon=True)
     t.start()
@@ -79,17 +82,22 @@ def _drain_run(run_id: str) -> int:
             return processed
         ids = db.control.claim_batch(run_id, WORKER_ID, spec.batch_size)
         if not ids:
+            if processed:  # nothing left for us — close out the run we'd been draining this pass
+                log.info("[%s] run_id=%s drained (for now) — %d sample(s) this pass",
+                         WORKER_ID, run_id, processed)
             return processed
         # run_id in the log line so the ops dashboard's per-run "worker logs" deep link matches.
-        log.info("[%s] run_id=%s claimed %d sample(s)", WORKER_ID, run_id, len(ids))
+        log.info("[%s] run_id=%s claimed %d sample(s) — executing (harness=%s, model=%s)",
+                 WORKER_ID, run_id, len(ids), spec.harness.type, spec.model)
+        t0 = time.time()
         results = _execute_with_heartbeat(spec, run_id, samples_by_id, ids)
         # ack-before-flip commit: durable analytics insert → flip ledger 'done'; + retry + budget
         runner.commit_batch(spec, run_id, samples_by_id, ids, results)
         ok = sum(1 for r in results.values() if r and not r.get("error_type"))
         errs = sum(1 for r in results.values() if r and r.get("error_type"))
         missing = len(ids) - len(results)
-        log.info("[%s] run_id=%s batch done: %d ok, %d errored, %d missing",
-                 WORKER_ID, run_id, ok, errs, missing)
+        log.info("[%s] run_id=%s batch done in %.1fs: %d ok, %d errored, %d missing → committed to analytics",
+                 WORKER_ID, run_id, time.time() - t0, ok, errs, missing)
         processed += len(ids)
         # Refresh liveness between batches so a long multi-batch drain doesn't read as a dead worker.
         db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": len(ids), "run": run_id})
@@ -108,13 +116,19 @@ def main() -> None:
         # drain attempt (a worker blocked in a long model call mid-batch still has this fresh-ish row;
         # the snapshot also reconciles against K8s pod readiness for the truly-busy case).
         db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": 0})
+        active = db.control.active_runs(("running",))
+        if active:  # debug, not info — this fires every poll, so keep it out of the default stream
+            log.debug("[%s] scanning %d running run(s) for claimable work", WORKER_ID, len(active))
         did = 0
-        for run_id in db.control.active_runs(("running",)):
+        for run_id in active:
             if _STOP:
                 break
             did += _drain_run(run_id)
         db.control.heartbeat("worker", WORKER_ID, {"claimed_this_loop": did})
         if did == 0:
+            # idle stays at debug so an idle worker doesn't emit one INFO line per poll-interval; the
+            # per-batch INFO lines above carry the visible lifecycle when there's actually work.
+            log.debug("[%s] idle — nothing claimable, sleeping %.1fs", WORKER_ID, POLL_SECONDS)
             time.sleep(POLL_SECONDS)  # nothing claimable; let KEDA scale us down when idle
 
 
