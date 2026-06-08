@@ -21,6 +21,6 @@ INTERACTIVE_RESERVE = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_RESERVE", "12"
 ORCH_TICK_SECONDS = float(os.environ.get("EVAL_ENGINE_ORCH_TICK", "2.0"))
 WORKER_POLL_SECONDS = float(os.environ.get("EVAL_ENGINE_WORKER_POLL", "1.0"))
 
-# Leader election: how long an idle advisory-lock holder is treated as crashed (bug B1). Shared by the
+# Leader election: how long an idle advisory-lock holder is treated as crashed. Shared by the
 # orchestrator and the training monitor (control.run_as_leader takes it as stale_seconds).
 STALE_LEADER_SECONDS = float(os.environ.get("EVAL_ENGINE_STALE_LEADER_SECONDS", "20"))

@@ -75,7 +75,7 @@ def init() -> None:
     _c()
 
 
-# Connection resilience (docs/RESILIENCE.md item A; mirrors control._run). The module-global client is
+# Connection resilience (see docs/RESILIENCE.md; mirrors control._run). The module-global client is
 # never re-created on failure on its own, so a transient ClickHouse unavailability (rollout, node loss,
 # brief network blip) would otherwise crash the worker mid-commit — and because the ack-before-flip
 # commit inserts to ClickHouse BEFORE flipping the ledger to 'done', that stalls execution, not just

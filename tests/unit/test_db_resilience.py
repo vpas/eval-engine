@@ -1,4 +1,4 @@
-"""Unit: the storage-tier connection-resilience helpers (docs/RESILIENCE.md item A) — pure, no backends.
+"""Unit: the storage-tier connection-resilience helpers (see docs/RESILIENCE.md) — pure, no backends.
 
 ``control._run`` / ``analytics._run`` must transparently reconnect + retry a query when the underlying
 connection has been dropped underneath us (Neon failover/cold-start, idle reap, NAT timeout), instead of

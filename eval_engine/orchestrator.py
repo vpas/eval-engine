@@ -3,7 +3,7 @@
     python -m eval_engine.orchestrator
 
 Runs leader-elected (a Postgres advisory lock; see ``main``), so >1 replica is safe — only the
-leader ticks, and a standby takes over on handover or a reaped stale lock (bug B1). Each tick:
+leader ticks, and a standby takes over on handover or a reaped stale lock. Each tick:
   - **Admit** (``_admit``): two-lane admission (docs/SCHEDULER.md §2) — ``queued`` runs become
     ``running`` under a global cap with a reserved interactive slice (the API already expanded the
     ledger in ``launch()``).
@@ -125,7 +125,8 @@ def main() -> None:
     # Leader election (shared loop): block as a standby until we hold the advisory lock, so running >1
     # orchestrator replica is safe (only the leader ticks). A standby takes over when the lock releases
     # — gracefully (SIGTERM handover) or, on an ungraceful death, by reaping the lingering idle lock
-    # (bug B1). A tick error propagates → pod restart → re-contend (no swallow). The standby heartbeat
+    # (so a rollout never strands leadership). A tick error propagates → pod restart → re-contend (no
+    # swallow). The standby heartbeat
     # makes it observable; the leader heartbeats from inside tick().
     db.control.run_as_leader(
         LEADER_KEY, tick, tick_seconds=TICK_SECONDS, stale_seconds=STALE_LEADER_SECONDS,

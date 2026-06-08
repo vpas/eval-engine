@@ -157,7 +157,7 @@ def _cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
     **gateway** ``openai/<id>`` calls: in this deployment the LiteLLM gateway fronts OpenRouter at the
     same catalog price, so ``openai/<id>`` == ``openrouter/<id>`` in dollar terms (the gateway routes
     ``*`` → ``openrouter/*``). The production-canonical cost is the gateway's own per-``run_id`` tally
-    (DESIGN §8 / A5); querying that at finalize is the deferred refinement — see docs/DEPLOYMENT.md."""
+    (DESIGN §8); querying that at finalize is the deferred refinement — see docs/DEPLOYMENT.md."""
     prefix, _, mid = model.partition("/")
     if prefix not in ("openrouter", "openai") or not mid:
         return 0.0

@@ -137,7 +137,8 @@ class RunSpec(BaseModel):
     # Cost cap for the whole run (USD). When committed cost reaches it, remaining queued samples are
     # marked terminal `budget_skipped` (a DISTINCT terminal class — not `failed`, so it neither burns
     # retries nor inflates failed_samples; DESIGN §8). None = uncapped. The canonical form is the
-    # gateway's own per-run_id reject (deferred "A5"); this enforces the same semantics control-side.
+    # gateway's own per-run_id reject (the deferred canonical cost tally); this enforces the same
+    # semantics control-side.
     budget_usd: float | None = None
     # Transcript retention (DESIGN §8/§13). Fraction of *passing* samples whose transcript is kept;
     # failing samples are always kept (stratified — failures are what you debug). None ⇒ fall back to

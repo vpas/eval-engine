@@ -59,7 +59,7 @@ def _dsn_host() -> str:
 # once per process — and concurrent pods are made safe by yoyo's own advisory lock during apply.
 _init_done = False
 
-# Connection resilience (docs/RESILIENCE.md item A). A connection dropped underneath us (Neon
+# Connection resilience (see docs/RESILIENCE.md). A connection dropped underneath us (Neon
 # failover/cold-start, idle reap, NAT timeout) raises OperationalError/InterfaceError on the next
 # statement — which, with no try/except in the worker/orchestrator loops, would crash the process. The
 # pool liveness-checks a connection on checkout (so a dead socket is replaced up front, not mid-loop),
@@ -160,8 +160,8 @@ def _leader_dsn() -> str:
     ``-pooler`` host) does not provide: through the pooler two orchestrators can each "acquire" the same
     lock → split-brain (both tick admit/finalize). So the leader connection must use a SESSION-mode
     endpoint. Prefer an explicit ``EVAL_ENGINE_PG_LEADER_DSN``; otherwise derive Neon's direct endpoint
-    by dropping the ``-pooler`` suffix from the host (a no-op for a non-pooled / local DSN). (RESILIENCE
-    item D: the rest of the app keeps the pooled endpoint; only this one connection needs session mode.)"""
+    by dropping the ``-pooler`` suffix from the host (a no-op for a non-pooled / local DSN). The rest of
+    the app keeps the pooled endpoint; only this one connection needs session mode (see docs/RESILIENCE.md)."""
     return os.environ.get("EVAL_ENGINE_PG_LEADER_DSN") or DSN.replace("-pooler.", ".")
 
 
@@ -189,7 +189,7 @@ def release_leader(key: int) -> None:
     """Graceful handover: explicitly release the advisory lock + close the connection. On pooled PG
     (pgbouncer) merely closing the client connection returns the SERVER connection to the pool with the
     session lock still held — so we must ``pg_advisory_unlock`` first. Called from the orchestrator's
-    SIGTERM handler so a rollout hands leadership over in ~1s instead of stalling (bug B1)."""
+    SIGTERM handler so a rollout hands leadership over in ~1s instead of stalling for the lock TTL."""
     global _leader_con
     try:
         if _leader_con is not None and not _leader_con.closed:
@@ -221,7 +221,7 @@ def run_as_leader(key: int, tick: Callable[[], None], *, tick_seconds: float, st
     loop). Contend for the advisory ``key`` (reaping a stale holder per ``reap_stale_leader``), block
     as a standby until we win it, then tick every ``tick_seconds`` while we hold it; return when
     leadership is lost so the caller's process can restart and re-contend. Registers a SIGTERM handler
-    that releases the lock for a fast (~1s) rollout handover (bug B1).
+    that releases the lock for a fast (~1s) rollout handover.
 
     ``on_standby`` runs once per standby poll (e.g. a heartbeat so a standby is observable).
     ``swallow_tick_errors`` logs+continues on a tick exception (the monitor: one bad run mustn't kill

@@ -7,7 +7,7 @@ that contract directly against the backend:
 
   - ``acquire_leader`` is a single-holder mutex (a second connection is refused while it's held),
   - ``release_leader`` frees it for a standby (graceful handover),
-  - ``reap_stale_leader`` terminates an *idle* holder (the ungraceful-death backstop, bug B1) but
+  - ``reap_stale_leader`` terminates an *idle* holder (the ungraceful-death backstop) but
     SPARES one that hasn't been idle past the threshold (the live-leader guard).
 
 Each test uses a fresh random advisory key so nothing leaks between tests or from a prior run, and the
