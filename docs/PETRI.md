@@ -464,11 +464,18 @@ said "do first"):
 
 **Net:** the Petri eval shape is now proven end-to-end against live models — compose → 3-role audit →
 multi-dimension scores → analytics, with the right UI polarity and full multi-role cost. The ledger /
-orchestrator / worker / ClickHouse schema are untouched, exactly as §7 predicted. (Cluster: the deploy
-image is now `python:3.12-slim` with the `[petri]` extra baked in, so workers can run audits in-cluster.
-In-cluster runs must use `openai/<id>` model prefixes — gateway-routed via LiteLLM's `*` wildcard to
-OpenRouter — not `openrouter/<id>`, which would bypass the gateway; `examples/petri.yaml` is set up
-that way.)
+orchestrator / worker / ClickHouse schema are untouched, exactly as §7 predicted.
+
+**Cluster model routing (learned the hard way — a 405 on the first real in-cluster run).** The image is
+`python:3.12-slim` with `[petri]` baked in, so workers run audits in-cluster. Use **`openrouter/<id>`**
+prefixes for all roles, NOT `openai/<id>`: inspect_ai ≥0.3.238's *native* openai provider force-enables
+the OpenAI **Responses API** (it hard-sets `background=True` for every non-azure model, which also can't
+be disabled via model args) and then calls `POST /v1/responses/input_tokens` for token counting — which
+LiteLLM **405s** on, failing the audit. Inspect's **OpenRouter provider** speaks plain chat-completions,
+which the gateway handles. The worker sets `OPENROUTER_BASE_URL` → the LiteLLM gateway (+ the gateway
+master key as `OPENROUTER_API_KEY`), so `openrouter/<id>` still routes via LiteLLM → OpenRouter and
+`_cost_usd` still prices it. (This also fixes in-cluster routing for the benchmark suite, which had no
+OpenRouter env before.)
 
 ---
 
@@ -522,8 +529,9 @@ shaped this way (and not re-derive it).
 
 **Status:** all three runbook items are **done** (see §12) — 14.1 was validated live (one real audit,
 $0.15, which surfaced + fixed the `target`-role + model-slug issues). The deploy image is now
-`python:3.12-slim` with `[petri]` baked in, so workers run audits in-cluster (use `openai/<id>` model
-prefixes there — gateway-routed). Nothing operational left.
+`python:3.12-slim` with `[petri]` baked in, so workers run audits in-cluster — use `openrouter/<id>`
+model prefixes there (routed via Inspect's OpenRouter provider → chat-completions → the LiteLLM gateway;
+`openai/<id>` hits inspect's Responses-API path that LiteLLM 405s on — see §12). Nothing operational left.
 
 ### 14.1 e2e: one real audit through the gateway — ✅ *done (validated live in a 3.12 env)*
 

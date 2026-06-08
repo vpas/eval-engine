@@ -47,6 +47,14 @@ spec:
             - { name: OPENAI_BASE_URL, value: "http://litellm:4000/v1" }
             - name: OPENAI_API_KEY
               valueFrom: { secretKeyRef: { name: litellm, key: master_key } }
+            # Point Inspect's OpenRouter provider at the SAME gateway. `openrouter/<id>` models use
+            # plain chat-completions (unlike the native `openai/` provider in inspect_ai >=0.3.238, which
+            # force-enables the OpenAI *Responses API* + a /v1/responses/input_tokens token-count call
+            # that LiteLLM 405s on — see docs/PETRI.md). So prefer `openrouter/<id>` for gateway runs
+            # (petri's auditor/judge/target included); the key is the gateway master key, same as above.
+            - { name: OPENROUTER_BASE_URL, value: "http://litellm:4000/v1" }
+            - name: OPENROUTER_API_KEY
+              valueFrom: { secretKeyRef: { name: litellm, key: master_key } }
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits:   { memory: "1536Mi" }
