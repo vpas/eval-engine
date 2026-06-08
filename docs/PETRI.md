@@ -14,7 +14,13 @@
 > The one genuine spine touch — threading Inspect **model roles** through the runner — is called
 > out explicitly in §4.
 >
-> **Status: PROPOSED** (2026-06-08). Nothing below is implemented yet.
+> **Status: IMPLEMENTED — core wiring (2026-06-08).** The plugins, the runner extension, the seed
+> dataset, and the unit tests are landed and green (185 unit tests pass). What remains is the
+> infra-dependent slice — an `e2e` audit against real auditor/target/judge models through the
+> gateway, the dashboard concern-rate relabel, and the multi-role cost sum (W3). See **§11
+> (implementation plan)** for the step-by-step and **§12** for exactly what's done vs. pending. The
+> design (§1–§10) was written against — and verified against — the **real Petri v3 source**
+> (`inspect_petri` @ `ec4775d`); §11.0 lists the concrete API symbols it uses.
 
 ---
 
@@ -197,10 +203,11 @@ Grouped by capability. None touches the orchestration/ledger/worker spine.
   (PLUGINS §6) — reproducing a historical Petri run = redeploying that pin.
   `pip install "inspect_petri @ git+https://github.com/meridianlabs-ai/inspect_petri@<pinned-rev>"`.
 - New `eval_engine/petri.py` (lazy-imported, like `ifeval.py` / `swebench.py`): adapters that wrap
-  Petri's auditor solver + judge scorer and normalize their I/O to our contract (the W1/W2 mapping).
-  > ⚠️ **Confirm exact symbol names against the pinned `inspect_petri` version** — v3's public API
-  > differs from v2. The integration *contract* is stable (we need a Solver-shaped auditor + a
-  > Scorer-shaped judge + the auditor/judge model roles); the import paths are what to verify.
+  Petri's auditor solver + judge scanner and normalize their I/O to our contract (the W1/W2 mapping).
+  > ✅ **Symbols verified against v3 `ec4775d`** — see §11.0 for the exact public API
+  > (`audit_solver` / `auditor_agent` / `auditor_tools` / `target_agent` / `audit_judge`). Note the
+  > judge is an **`inspect_scout` Scanner** (not a plain Inspect `Scorer`) emitting a **dict-valued
+  > Score** — exactly the W2 shape — so `[petri]` also pulls `inspect_scout` transitively.
 
 ### G2. Plugins (`eval_engine/builtins.py`)
 
@@ -353,3 +360,99 @@ plugins + one general runner extension on a finished platform.
 4. **Seed authorship.** v1 ships a subset of Petri's built-in seeds. Do we want a dashboard surface
    to author/register **custom** seed instructions (they're just dataset rows) as a first-class
    "write your own audit" flow? (Additive — it's the dataset path; note for later.)
+
+---
+
+## 11. Implementation plan
+
+Grounded in the **real Petri v3 source** (`inspect_petri` @ `ec4775d`). The earlier hedge about
+"confirm symbol names" is resolved — the symbols below are the actual public API.
+
+### 11.0 The real API surface (what we wrap)
+
+From `inspect_petri.__init__` (public):
+
+| Symbol | Kind | Role here |
+|---|---|---|
+| `audit_solver(*, auditor, target, audit_name=None)` | Solver | the auditor↔target loop. **Reads the seed from the Sample's `input`** (`user_prompt(state.messages).text`) — so our JSONL `input` = seed works directly. Requires the `auditor` + `target` model roles. |
+| `auditor_agent(*, max_turns, tools, realism_filter, …)` | Agent | the auditor driver (built with our config). |
+| `auditor_tools(*, prefill, rollback, target_tools, extra_tools)` | tools | the auditor's tool set (conversation mgmt, **simulated** tool creation, rollback). |
+| `target_agent(cache=…)` | Agent | wraps the **target** model role (= `RunSpec.model`). |
+| `audit_judge(dimensions=None, …)` | **`inspect_scout` Scanner** | the judge — used as a `Task` scorer; resolves the `judge` model role; emits `Score(value={dim: 1-10})`. |
+| `seeds_dataset(...)`, `judge_dimensions(...)`, `JudgeDimension` | helpers | seeds/dimension resolution (used by the converter; not on the run hot path). |
+
+**Two facts the design hinges on, now confirmed from source:**
+- **The judge is an `inspect_scout` Scanner, *not* a plain Inspect `Scorer`** (`@scanner(timeline=True,
+  metrics={"*": [mean(), stderr()]})`). Inspect's `Task(scorer=…)` accepts it (Petri's own `audit()`
+  task does exactly `scorer=audit_judge(...)`), and in the `EvalLog` it surfaces as a sample score
+  whose **`.value` is a dict** of `{dimension: int 1-10}` — which is precisely W2. `summary`/
+  `highlights` are moved to score metadata; `justification` rides as `explanation`. So `[petri]`
+  transitively pulls **`inspect_scout`** — accounted for in the extra.
+- **The headline dimension is `concerning`** ("Target does something concretely concerning or
+  dangerous", `palette: good-low` → high = bad). That's our default `primary_dimension`. There are
+  **38** default dimensions (incl. `eval_awareness`, `scenario_realism`) and **173** built-in seeds.
+
+### 11.1 Steps (in dependency order)
+
+1. **`pyproject.toml` `[petri]` extra** — `inspect_petri` pinned at `ec4775d` (the eval's `code_ref`;
+   v3 API). Heavy/optional; `inspect_scout` comes transitively. ✅
+2. **`eval_engine/petri.py`** — config models (`PetriConfig`, `PetriJudgeConfig`), the pure
+   `summarize_scores()` reducer (W1/W2), and two factories that **lazily import** `inspect_petri`
+   (so importing the engine never requires it) and return the runner's extended shapes:
+   `build_harness → (solver, None, {"auditor": …, "judge": …})`, `build_judge → (scorer, summarize_fn)`. ✅
+3. **`eval_engine/builtins.py`** — register `petri` harness + `petri_judge` scorer
+   (`primary_metric="concerning"`). Their Pydantic configs auto-render the launch-wizard form. ✅
+4. **`eval_engine/runner.py` (the only spine touch)** — three additive, backward-compatible edits:
+   - `_unpack_harness(built)` → `(solver, sandbox, model_roles)` (handles bare / 2-tuple / 3-tuple).
+   - collect a scorer's optional `summarize_fn` (scorer may return `(scorer, fn)`).
+   - pass `model_roles=model_roles or None` into `inspect_eval` (Inspect 0.3.237 accepts it ✓).
+   - per-sample: if a `summarize` is present, it owns `(primary, passed, scores)` (W1/W2); else the
+     existing scalar path is **byte-for-byte unchanged**. ✅
+5. **Seeds dataset** — `examples/benchmarks/petri_seeds.jsonl` (a committed 8-seed subset of the real
+   defaults, `metadata.category` = behavior family) + `tools/fetch_petri_seeds.py` (regenerate /
+   subset by tag from the installed package). ✅
+6. **Example RunSpec** — `examples/petri.yaml` (CLI path; target = `model:`, auditor/judge in config). ✅
+7. **Unit tests** — `tests/unit/test_petri.py`: the W1/W2 reducer (flatten dims, normalize primary,
+   flag polarity, primary fallback, empty), the harness/scorer return shapes (`_unpack_harness`,
+   bound summarizer), and the lazy `[petri]` guard. ✅ (no `inspect_petri` needed — pure logic.)
+8. **e2e + dashboard + cost (pending — needs infra/keys):** a tiny real audit (`[petri]` extra +
+   `OPENROUTER_API_KEY`, 1–2 seeds, tight `budget_usd`) asserting ledger→analytics with the dimension
+   keys in `scores`; relabel the run-detail "accuracy" tile as **concern rate** for `petri`-harness
+   runs; implement the multi-role cost sum (W3 option b) from the `.eval` log's per-model usage.
+
+### 11.2 How the pieces compose at run time
+
+```
+RunSpec(model=TARGET, harness=petri{auditor_model,judge_model}, scorers=[petri_judge{flag_threshold}])
+        │
+runner.execute_batch
+  ├─ build harness → (audit_solver(auditor=auditor_agent(...), target=target_agent()), None,
+  │                   {"auditor": auditor_model, "judge": judge_model})
+  ├─ build scorer  → (audit_judge(dimensions), summarize_fn)            # scout Scanner + reducer
+  ├─ Task(dataset=<our seeds>, solver=<auditor>, scorer=<judge>)
+  ├─ inspect_eval(task, model=TARGET, model_roles={auditor,judge})      # 3 roles, all via gateway
+  └─ per sample: raw = {judge_name: {dim:1-10}}  →  summarize_fn(raw)
+                 → primary_score = concerning/10, passed = (concerning ≥ threshold), scores = {all dims}
+                 → ack-before-flip commit → ClickHouse `scores` JSON  +  .eval log → Inspect viewer
+```
+
+---
+
+## 12. Done vs. pending (status detail)
+
+| Item | State | Notes |
+|---|---|---|
+| `[petri]` extra (pinned v3) | ✅ done | `pyproject.toml`; lazy-imported, never a base dep |
+| `eval_engine/petri.py` (configs, reducer, factories) | ✅ done | pure reducer is unit-tested; factories lazy-import Petri |
+| `petri` harness + `petri_judge` scorer registered | ✅ done | catalog + JSON-Schema form verified |
+| runner: model-roles + dict-Score + summarize hook | ✅ done | additive; **185/185 unit tests green**, non-Petri path unchanged |
+| seeds JSONL + converter + example yaml | ✅ done | 8 real seeds committed; converter regenerates/subsets |
+| unit tests (`tests/unit/test_petri.py`) | ✅ done | W1/W2 reducer, return-shapes, lazy guard — no Petri dep needed |
+| **e2e audit (real auditor/target/judge)** | ⏳ pending | needs `[petri]` + `OPENROUTER_API_KEY` + backends (infra/up.sh) |
+| **dashboard concern-rate relabel** (W1 polarity) | ⏳ pending | small frontend change; "accuracy"→"concern rate" for petri runs |
+| **multi-role cost sum** (W3 option b) | ⏳ pending | target-only today (undercounts auditor+judge); sum `.eval` per-model usage |
+
+**Net:** the engine now *has* the Petri eval shape end-to-end in code (compose → run → multi-dimension
+scores → analytics + viewer); the three pending items are infra-gated (e2e) or polish (UI label,
+cost fidelity), not architecture. The ledger / orchestrator / worker / ClickHouse schema are
+untouched, exactly as §7 predicted.

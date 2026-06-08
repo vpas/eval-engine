@@ -57,6 +57,19 @@ INTERACTIVE_MAX_INFLIGHT = int(os.environ.get("EVAL_ENGINE_INTERACTIVE_MAX_INFLI
 BATCH_MAX_INFLIGHT = int(os.environ.get("EVAL_ENGINE_BATCH_MAX_INFLIGHT", "50"))
 
 
+def _unpack_harness(built) -> tuple:
+    """Normalize a harness factory's return into ``(solver, sandbox, model_roles)``. A harness may
+    return a bare ``Solver``, ``(solver, sandbox)`` (agentic), or ``(solver, sandbox, model_roles)``
+    (a multi-model harness like ``petri`` — docs/PETRI.md §4). Backward-compatible: ≤2-tuples get
+    ``sandbox``/``model_roles`` defaulted to None, so existing harnesses are unaffected."""
+    if isinstance(built, tuple):
+        if len(built) == 3:
+            return built
+        if len(built) == 2:
+            return built[0], built[1], None
+    return built, None, None
+
+
 def _classify(spec: RunSpec, total: int) -> tuple[str, int]:
     """Return (lane, max_inflight) for a run (SCHEDULER §2/§3)."""
     if spec.lane in ("interactive", "batch"):
@@ -283,11 +296,23 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     """Run Inspect on the claimed shard; return {sample_id: result dict}."""
     sub = MemoryDataset([samples_by_id[i] for i in ids])
     built, _ = plugins.build("harness", spec.harness.model_dump())
-    # An agentic harness returns (solver, sandbox); simple harnesses return just a solver. The
-    # sandbox flows into the Task → Inspect provisions one per sample (local Docker; prod = hardened
-    # per-sample K8s pods, with a pooled snapshot-restore service later — docs/FUTURE.md §4).
-    solver, sandbox = built if isinstance(built, tuple) else (built, None)
-    scorers = [plugins.build("scorer", s.model_dump())[0] for s in spec.scorers]
+    # A harness may return just a solver, OR (solver, sandbox) — an agentic harness flows a sandbox
+    # into the Task so Inspect provisions one per sample (local Docker; prod = hardened per-sample K8s
+    # pods, docs/FUTURE.md §4) — OR (solver, sandbox, model_roles), where a multi-model harness (e.g.
+    # `petri`: auditor + judge) declares extra Inspect MODEL ROLES the target run doesn't carry
+    # (docs/PETRI.md §4). The target stays `spec.model` (Inspect's default role).
+    solver, sandbox, model_roles = _unpack_harness(built)
+    # A scorer may return just a Scorer, OR (scorer, summarize_fn): a multi-dimension scorer (the
+    # `petri_judge`) hands back a reducer that maps its raw per-dimension output → our
+    # (primary_score, passed, scores) shape (docs/PETRI.md W1/W2). Default scorers have no reducer.
+    scorers, summarizers = [], []
+    for s in spec.scorers:
+        obj, _ = plugins.build("scorer", s.model_dump())
+        sc, summ = obj if isinstance(obj, tuple) else (obj, None)
+        scorers.append(sc)
+        if summ:
+            summarizers.append(summ)
+    summarize = summarizers[0] if summarizers else None
     task = Task(dataset=sub, solver=solver, scorer=scorers, sandbox=sandbox)
     # Sampling (DESIGN §14): epochs repeat each sample (Inspect reduces to one per-sample score);
     # temperature/seed go into the GenerateConfig that `eval` builds from **kwargs.
@@ -305,7 +330,7 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     log.debug("run_id=%s executing batch of %d via %s (harness=%s)",
               run_id, len(ids), exec_model, spec.harness.type)
     inspect_log = inspect_eval(
-        task, model=model, display="none",
+        task, model=model, model_roles=model_roles or None, display="none",
         log_dir=EVAL_LOG_DIR,  # GCS in-cluster (Inspect viewer reads these), local in dev
         epochs=epochs, time_limit=SAMPLE_TIME_LIMIT, fail_on_error=False, **gen,
     )[0]
@@ -314,8 +339,13 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
     out: dict[str, dict] = {}
     for s in inspect_log.samples or []:
         sid = str(s.id)
-        score_vals = {name: _score_value(sc.value) for name, sc in (s.scores or {}).items()}
-        primary = next(iter(score_vals.values()), 0.0)
+        raw = {name: sc.value for name, sc in (s.scores or {}).items()}
+        if summarize:  # multi-dimension scorer (petri_judge): reducer owns primary/passed/scores (W1/W2)
+            primary, passed, score_vals = summarize(raw)
+        else:          # default: one scalar per scorer; first is primary; pass on the 0.5 threshold
+            score_vals = {name: _score_value(v) for name, v in raw.items()}
+            primary = next(iter(score_vals.values()), 0.0)
+            passed = 1 if primary >= 0.5 else 0
         usage = getattr(s.output, "usage", None) if s.output else None
         tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
         tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
@@ -329,7 +359,7 @@ def execute_batch(spec: RunSpec, run_id: str, samples_by_id: dict, ids: list[str
         # — distinct from a low score. A non-empty error_type routes the sample to retry (`_settle_result`).
         err = getattr(s, "error", None)
         error_type = str(getattr(err, "message", err))[:200] if err else ""
-        passed = 1 if primary >= 0.5 else 0
+        # `passed` was set above (default threshold, or the summarizer's flag for a multi-dim scorer).
         # No transcript for a to-be-retried sample (the retry writes its own); otherwise keep it per
         # the retention policy (always failures, a sampled fraction of passes — DESIGN §13).
         uri = _put_transcript(

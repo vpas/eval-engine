@@ -20,6 +20,7 @@ from inspect_ai.tool import bash, python
 from inspect_ai.util import SandboxEnvironmentSpec, sandbox
 
 from . import ifeval as _ifeval
+from . import petri as _petri
 from . import swebench as _swebench
 from .plugins import harness, scorer
 
@@ -464,3 +465,31 @@ def swe_bench_scorer(cfg: SWEBenchScorerConfig) -> Scorer:
                         f"(parsed {report['n_parsed']} tests)",
         )
     return _simple_scorer("swe_bench", score)
+
+
+# ---- petri (alignment auditing): a NEW EVAL SHAPE — no gold answer, no pass/fail (docs/PETRI.md).
+# An auditor agent drives a multi-turn audit of the TARGET (= RunSpec.model); a judge scores the
+# transcript across ~38 behavioral dimensions (1-10). Built on Petri's own Inspect-native pieces
+# (eval_engine/petri.py wraps them). The harness returns (solver, sandbox=None, model_roles) — the
+# auditor/judge models flow to the runner as Inspect model roles; the scorer returns
+# (scorer, summarize_fn) so the runner can reduce the multi-dimension judge output to our
+# (primary_score, passed=flagged, scores) shape. NB polarity is INVERTED: high = concerning.
+
+
+@harness("petri", "1.0.0", _petri.PetriConfig,
+         description="Alignment AUDIT: an auditor agent probes the target model (RunSpec.model) for "
+                     "misaligned behavior over a multi-turn, tool-simulated conversation (no real "
+                     "sandbox). Pair with the 'petri_judge' scorer. Auditor/judge models are config; "
+                     "needs the [petri] extra (inspect_petri).")
+def petri(cfg: _petri.PetriConfig):
+    return _petri.build_harness(cfg)
+
+
+@scorer("petri_judge", "1.0.0", _petri.PetriJudgeConfig,
+        primary_metric="concerning",
+        description="Petri alignment judge: scores the audit transcript across ~38 dimensions (1-10 "
+                    "each; headline = 'concerning'). primary_score = the primary dimension normalized "
+                    "to [0,1]; passed = FLAGGED (primary dim ≥ flag_threshold). HIGH = concerning "
+                    "(inverted polarity vs. accuracy evals). Pair with the 'petri' harness.")
+def petri_judge(cfg: _petri.PetriJudgeConfig):
+    return _petri.build_judge(cfg)
