@@ -2,7 +2,7 @@
 
 A modular, distributed **LLM-evaluation platform**: run *any model × harness × dataset × scorer* at
 scale, with a dashboard to author / launch / monitor / analyze. Built **around Inspect AI as the kernel**
-("Pure A") — harnesses are Inspect Solvers, scorers are Inspect Scorers, `.eval` logs are the
+(*Inspect-native* — we use Inspect's own types, not a wrapper) — harnesses are Inspect Solvers, scorers are Inspect Scorers, `.eval` logs are the
 source-of-truth artifact; our value-add is distributed orchestration + a ClickHouse analytics
 projection + the dashboard.
 

@@ -10,7 +10,8 @@
 
 ## 1. Eval kernel — alternatives to Inspect AI
 
-We adopt **Inspect AI directly** ("Pure A"). Rejected:
+We adopt **Inspect AI directly** (*Inspect-native* — harnesses/scorers are its own `Solver`/`Scorer`
+types, not a wrapper over them). Rejected:
 
 | Option | Why not |
 |---|---|

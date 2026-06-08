@@ -25,7 +25,7 @@ The docs describe the **current (v1) design**. Approaches considered and dropped
 | [docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) | Considered & rejected; decisions reversed |
 | [docs/FUTURE.md](docs/FUTURE.md) | Deferred subsystems & roadmap (with re-introduction triggers) |
 
-**Stack (chosen):** Inspect AI kernel (Pure A) · LiteLLM gateway (all traffic) · K8s Deployment +
+**Stack (chosen):** Inspect AI kernel (used directly) · LiteLLM gateway (all traffic) · K8s Deployment +
 KEDA · FastAPI control plane · Postgres metadata + ephemeral ledger · S3/MinIO artifacts ·
 ClickHouse analytics · Next.js dashboard + embedded Inspect viewer + canned CH views · Terraform/Helm
 on cloud Kubernetes, portable by interface.

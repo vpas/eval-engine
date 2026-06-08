@@ -17,7 +17,7 @@
 
 Phases 0–3 are substantially up on GKE (`us-central1-a`, cluster `eval-engine`):
 
-- **Kernel (Pure A):** Inspect AI; harnesses = Solvers, scorers = Scorers; `.eval` logs → GCS.
+- **Kernel (Inspect-native):** Inspect AI; harnesses = Solvers, scorers = Scorers; `.eval` logs → GCS.
 - **Control plane:** FastAPI (`api.py`), Postgres metadata + **ephemeral task ledger** with a real
   `FOR UPDATE SKIP LOCKED` claim, lease, crash-reclaim, archive+prune (`control_pg.py`).
 - **Execution plane:** KEDA-autoscaled worker Deployment (claim→execute→commit→load), leader-elected

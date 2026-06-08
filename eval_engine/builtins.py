@@ -1,7 +1,7 @@
 """First-party harnesses & scorers — the prototype catalog seed (PLUGINS §9.3).
 
 Importing this module populates the registry. Harnesses wrap Inspect solvers; scorers wrap
-Inspect scorers. Pure A: we register/configure, we do not re-abstract Inspect's types.
+Inspect scorers. Inspect-native: we register/configure, we do not re-abstract Inspect's types.
 """
 from __future__ import annotations
 

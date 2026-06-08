@@ -73,7 +73,7 @@ Consequences that shaped the design:
 
 Building an eval *execution kernel* (dataset → solver → scorer, with tool use, sandboxing,
 model-graded scoring, transcript logging) is a large solved problem. We **adopt
-[Inspect AI](https://inspect.aisi.org.uk/) directly** ("Pure A") and spend our effort on the
+[Inspect AI](https://inspect.aisi.org.uk/) directly** (an approach we call *Inspect-native*) and spend our effort on the
 differentiated platform: **distributed orchestration + central metadata store + dashboard.**
 
 Why Inspect: modular `Dataset → Solver(=harness) → Scorer` abstractions that match our domain 1:1;
@@ -82,14 +82,14 @@ scorers; provider-agnostic model layer; structured `.eval` logs + an official **
 active development (UK AISI), becoming a de-facto standard. (Kernels we evaluated and rejected:
 `ALTERNATIVES.md` §1.)
 
-**Pure A means:** harnesses *are* Inspect `Solver`s, scorers *are* Inspect `Scorer`s, workers call
+**Inspect-native means:** harnesses *are* Inspect `Solver`s, scorers *are* Inspect `Scorer`s, workers call
 `inspect_ai` directly, and the `.eval` log is our **source-of-truth artifact**. We accept the coupling
 and would only extract an interface if we ever truly need a non-Inspect backend.
 
-> **Consistency rule:** Pure A does *not* make Inspect's log format our analytics store. Every completed
+> **Consistency rule:** Being Inspect-native does *not* make Inspect's log format our analytics store. Every completed
 > sample is **flattened/ETL'd into ClickHouse** for querying. The `.eval` log is the immutable artifact
 > in object storage; ClickHouse holds the queryable projection. That projection is indexing, not an
-> abstraction layer, so it's consistent with Pure A.
+> abstraction layer, so it's consistent with staying Inspect-native.
 
 ---
 
@@ -158,7 +158,7 @@ logs, metrics) · cost-aware (token & $ per run/model/sample; budget caps).
                                │ (workers claim from the ledger)
                        ┌───────▼────────────────────────────────────────┐
                        │  Distributed Workers (K8s Deployment + KEDA)    │
-                       │   Inspect Task per claimed shard (Pure A)       │
+                       │   Inspect Task per claimed shard                │
                        │             │ all model calls                   │
                        └─────────────┼──────────────────────────────────┘
                                      ▼
@@ -215,7 +215,7 @@ enforcement and the human-review queue are *additive* later, not migrations.
 
 | Concern | Decision | Notes |
 |---|---|---|
-| Eval kernel | **Inspect AI, Pure A** | solvers/scorers native; `.eval` = source-of-truth artifact |
+| Eval kernel | **Inspect AI — used directly (Inspect-native)** | solvers/scorers native; `.eval` = source-of-truth artifact |
 | Transcript viewer | **Embedded Inspect viewer** | don't rebuild |
 | Model gateway | **LiteLLM for ALL traffic** | external *and* self-hosted vLLM are gateway-fronted; ≥2 replicas; Redis global rate limits; per-`run_id` cost tally is canonical |
 | Distribution | **K8s Deployment + KEDA** | stateless workers autoscaled on ledger queue depth (`count(queued)` + `maxReplicas` cap) |
@@ -308,7 +308,7 @@ Python kernel **Inspect AI** · **LiteLLM** gateway (all traffic) · **K8s Deplo
 - **Ledger claim/lease/idempotency** — a *thin* surface (skinny ledger); a wrongful reclaim is wasted
   spend, not corruption (idempotent CH writes). `pgmq` is the escape hatch.
 - **Transcript storage growth** — addressed by sample-by-default retention + storage tiering.
-- **Inspect coupling** (Pure A) — accepted; the ClickHouse projection keeps analytics insulated.
+- **Inspect coupling** (the Inspect-native bet) — accepted; the ClickHouse projection keeps analytics insulated.
 - **ClickHouse ops** at 12B rows — partitioning/TTL design up front.
 
 ---
@@ -319,7 +319,7 @@ Python kernel **Inspect AI** · **LiteLLM** gateway (all traffic) · **K8s Deplo
   Mixed API + self-hosted.
 - **Deployment:** cloud Kubernetes, greenfield, **portable by interface** (Terraform/Helm, S3 API,
   vanilla PG). ClickHouse from v1.
-- **Kernel:** **Pure A** — adopt Inspect directly; `.eval` = source-of-truth; flatten to ClickHouse.
+- **Kernel:** **Inspect-native** — adopt Inspect directly; `.eval` = source-of-truth; flatten to ClickHouse.
 - **Coordination:** **K8s Deployment + KEDA** over the **Postgres ephemeral ledger** (sole scheduler);
   `pgmq`/`procrastinate` escape hatch.
 - **Gateway:** **LiteLLM for all traffic** (external + gateway-fronted vLLM); per-`run_id` cost tally is

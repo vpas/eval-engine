@@ -2,7 +2,7 @@
 
 How to run the engine **locally**. The `eval_engine/` package is the spine that deploys to GKE (see
 `docs/DEPLOYMENT.md`); locally it runs single-process against the **same backends as production**
-(Postgres + ClickHouse in docker, `infra/up.sh`). It proves: Inspect AI integration (Pure A), the
+(Postgres + ClickHouse in docker, `infra/up.sh`). It proves: Inspect AI integration (Inspect-native — used directly, not wrapped), the
 plugin contract, the result path (Inspect log → flatten → store → query), and exactly-once claiming
 with lease-based crash recovery (`tests/test_concurrency.py`).
 

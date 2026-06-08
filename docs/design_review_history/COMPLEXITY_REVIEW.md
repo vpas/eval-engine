@@ -42,7 +42,7 @@ that the doc itself admits aren't needed for v1.**
 
 | Component | Verdict | One-line reason |
 |---|---|---|
-| Inspect AI kernel (Pure A) | **Keep** | Correct core bet; the differentiator is the platform, not the kernel. |
+| Inspect AI kernel (used directly) | **Keep** | Correct core bet; the differentiator is the platform, not the kernel. |
 | Skinny Postgres ledger + claim/lease | **Keep** | Right-sized after A3; 8 claims/s is trivial. |
 | ClickHouse analytics + flatten/ETL | **Keep** | 12B rows genuinely needs it. |
 | Object store + zstd + sampling retention | **Keep** | Correct; A12's reversibility argument is sound. |

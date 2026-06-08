@@ -1,7 +1,7 @@
 # Eval Engine — Extensibility / Plugin Interface (v1)
 
 > Companion to `DESIGN.md`. Defines the contract for adding **harnesses, scorers, dataset loaders,
-> and tools** without touching the core — the extensibility guarantee. Built on **Pure A**: harnesses
+> and tools** without touching the core — the extensibility guarantee. Built **directly on Inspect** (*Inspect-native*): harnesses
 > *are* Inspect `Solver`s, scorers *are* Inspect `Scorer`s. The plugin layer is a thin, typed,
 > discoverable wrapper around Inspect's own registry — not a re-abstraction of it. v1 uses a shared
 > **in-process registry** with JSON Schemas derived live; the Postgres catalog (for untrusted

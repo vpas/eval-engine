@@ -35,7 +35,7 @@
 
 ## 1. What the engine supports today (the substrate we build on)
 
-The execution path is **Pure A**: `runner._execute_batch` builds an Inspect `Task(dataset, solver, scorer)`
+The execution path is **Inspect-native**: `runner.execute_batch` builds an Inspect `Task(dataset, solver, scorer)`
 from a `RunSpec` and runs it. So adding a benchmark = supplying **(dataset JSONL) × (harness=Solver) ×
 (scorer=Scorer)** that compose into that Task. Concretely:
 
